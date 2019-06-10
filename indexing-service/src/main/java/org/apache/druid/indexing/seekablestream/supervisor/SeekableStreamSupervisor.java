@@ -1163,7 +1163,11 @@ public abstract class SeekableStreamSupervisor<PartitionIdType, SequenceOffsetTy
             final int groupId = getTaskGroupIdForPartition(partition);
             killTaskGroupForPartitions(ImmutableSet.of(partition), "DataSourceMetadata is updated while reset");
             activelyReadingTaskGroups.remove(groupId);
-            partitionGroups.get(groupId).replaceAll((partitionId, sequence) -> getNotSetMarker());
+            ConcurrentHashMap<PartitionIdType, SequenceOffsetType> partitionGroup = partitionGroups.get(groupId);
+            if (partitionGroup != null) {
+              partitionGroup.replaceAll((partitionId, sequence) -> getNotSetMarker());
+            }
+            
           });
         } else {
           throw new ISE("Unable to reset metadata");
