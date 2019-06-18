@@ -80,6 +80,12 @@ public class DerivativeDataSourceMetadata implements DataSourceMetadata
   }
 
   @Override
+  public DataSourceMetadata asEndMetadata()
+  {
+    return this;
+  }
+
+  @Override
   public boolean matches(DataSourceMetadata other) 
   {
     return equals(other);

@@ -113,8 +113,8 @@ public class SegmentTransactionalInsertAction implements TaskAction<SegmentPubli
               .onValidLocks(
                   () -> toolbox.getIndexerMetadataStorageCoordinator().announceHistoricalSegments(
                       segments,
-                      startMetadata,
-                      endMetadata
+                      startMetadata.asStartMetadata(),
+                      endMetadata.asEndMetadata()
                   )
               )
               .onInvalidLocks(SegmentPublishResult::fail)

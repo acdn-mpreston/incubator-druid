@@ -329,8 +329,8 @@ public class SequenceMetadata<PartitionIdType, SequenceOffsetType>
                     getStartOffsets(),
                     exclusiveStartPartitions
                 )
-            ),
-            runner.createDataSourceMetadata(finalPartitions)
+            ).asStartMetadata(),
+            runner.createDataSourceMetadata(finalPartitions).asEndMetadata()
         );
       } else {
         action = new SegmentTransactionalInsertAction(segments, null, null);

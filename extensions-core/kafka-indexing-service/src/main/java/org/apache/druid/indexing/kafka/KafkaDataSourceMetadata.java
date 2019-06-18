@@ -25,6 +25,7 @@ import org.apache.druid.indexing.overlord.DataSourceMetadata;
 import org.apache.druid.indexing.seekablestream.SeekableStreamDataSourceMetadata;
 import org.apache.druid.indexing.seekablestream.SeekableStreamEndSequenceNumbers;
 import org.apache.druid.indexing.seekablestream.SeekableStreamSequenceNumbers;
+import org.apache.druid.indexing.seekablestream.SeekableStreamStartSequenceNumbers;
 
 public class KafkaDataSourceMetadata extends SeekableStreamDataSourceMetadata<Integer, Long>
 {
@@ -44,6 +45,19 @@ public class KafkaDataSourceMetadata extends SeekableStreamDataSourceMetadata<In
     if (sequenceNumbers instanceof SeekableStreamEndSequenceNumbers) {
       return createConcreteDataSourceMetaData(
           ((SeekableStreamEndSequenceNumbers<Integer, Long>) sequenceNumbers).asStartPartitions(true)
+      );
+    } else {
+      return this;
+    }
+  }
+
+  @Override
+  public DataSourceMetadata asEndMetadata()
+  {
+    final SeekableStreamSequenceNumbers<Integer, Long> sequenceNumbers = getSeekableStreamSequenceNumbers();
+    if (sequenceNumbers instanceof SeekableStreamStartSequenceNumbers) {
+      return createConcreteDataSourceMetaData(
+          ((SeekableStreamStartSequenceNumbers<Integer, Long>) sequenceNumbers).asEndPartitions()
       );
     } else {
       return this;

@@ -25,6 +25,7 @@ import org.apache.druid.indexing.overlord.DataSourceMetadata;
 import org.apache.druid.indexing.seekablestream.SeekableStreamDataSourceMetadata;
 import org.apache.druid.indexing.seekablestream.SeekableStreamEndSequenceNumbers;
 import org.apache.druid.indexing.seekablestream.SeekableStreamSequenceNumbers;
+import org.apache.druid.indexing.seekablestream.SeekableStreamStartSequenceNumbers;
 
 public class KinesisDataSourceMetadata extends SeekableStreamDataSourceMetadata<String, String>
 {
@@ -43,6 +44,19 @@ public class KinesisDataSourceMetadata extends SeekableStreamDataSourceMetadata<
     if (sequenceNumbers instanceof SeekableStreamEndSequenceNumbers) {
       return createConcreteDataSourceMetaData(
           ((SeekableStreamEndSequenceNumbers<String, String>) sequenceNumbers).asStartPartitions(false)
+      );
+    } else {
+      return this;
+    }
+  }
+
+  @Override
+  public DataSourceMetadata asEndMetadata()
+  {
+    final SeekableStreamSequenceNumbers<String, String> sequenceNumbers = getSeekableStreamSequenceNumbers();
+    if (sequenceNumbers instanceof SeekableStreamStartSequenceNumbers) {
+      return createConcreteDataSourceMetaData(
+          ((SeekableStreamStartSequenceNumbers<String, String>) sequenceNumbers).asEndPartitions()
       );
     } else {
       return this;

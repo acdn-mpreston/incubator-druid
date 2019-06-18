@@ -175,6 +175,11 @@ public class SeekableStreamStartSequenceNumbers<PartitionIdType, SequenceOffsetT
     return exclusivePartitions;
   }
 
+  public SeekableStreamEndSequenceNumbers<PartitionIdType, SequenceOffsetType> asEndPartitions() 
+  {
+    return new SeekableStreamEndSequenceNumbers<>(stream, partitionSequenceNumberMap);
+  }
+
   @Override
   public boolean equals(Object o)
   {

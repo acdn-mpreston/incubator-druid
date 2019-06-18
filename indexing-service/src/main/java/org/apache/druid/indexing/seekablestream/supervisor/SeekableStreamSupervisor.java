@@ -1144,12 +1144,28 @@ public abstract class SeekableStreamSupervisor<PartitionIdType, SequenceOffsetTy
         if (currentMetadata == null) {
           metadataUpdateSuccess = true;
         } else {
-          // At this point the desire is to reset the supervisor, so this conversion
-          // to startMetadata is required to prevent the supervisor from becoming unable
-          // to schedule new indexing tasks in the situation where the sequence number
-          // metatdata types are mismatched.
-          final DataSourceMetadata newMetadata = currentMetadata.asStartMetadata()
-              .minus(resetMetadata.asStartMetadata());
+          // At this point the desire is to reset the supervisor, but there are 
+          // scenarios (namely process termination) that may cause a race condition
+          // that will cause the currentMetadata to be either start or end metadata. 
+          // Thus, there is a need to check the type of the currentMetadata to  
+          // ensure currentMetadata and resetMetadata are of the same type before
+          // performing the minus operation
+          DataSourceMetadata newMetadata = null;
+          if (currentMetadata.getClass() != resetMetadata.getClass()) { 
+            log.warn("Have currentMetadata of type [%s] and trying to get offset difference for resetMetadata of type [%s] for dataSourceMetadata [%s]", currentMetadata.getClass().getCanonicalName(), resetMetadata.getClass().getCanonicalName(), dataSourceMetadata);
+            
+            if (currentMetadata.getClass().getCanonicalName() == "org.apache.druid.indexing.seekablestream.SeekableStreamStartSequenceNumbers") {
+              // If currentMetadata is a start sequence, just cast the reset metadata
+              newMetadata = currentMetadata.asStartMetadata().minus(resetMetadata.asStartMetadata());
+            } else {
+              // If currentMetadata is an end sequence,
+              newMetadata = currentMetadata.minus(resetMetadata.asEndMetadata());
+            }
+          } else {
+            // Object type classes are the same, minus operation can be executed
+            newMetadata = currentMetadata.minus(resetMetadata);
+          }
+
           try {
             metadataUpdateSuccess = indexerMetadataStorageCoordinator.resetDataSourceMetadata(dataSource, newMetadata);
           }

@@ -31,20 +31,23 @@ import java.util.Map.Entry;
 import java.util.Objects;
 
 /**
- * Represents the end sequenceNumber per partition of a sequence. Note that end sequenceNumbers are always
- * exclusive/inclusive in Kafka/Kinesis indexing service, respectively.
+ * Represents the end sequenceNumber per partition of a sequence. Note that end
+ * sequenceNumbers are always exclusive/inclusive in Kafka/Kinesis indexing
+ * service, respectively.
  *
- * To be backward compatible with both Kafka and Kinesis datasource metadata when
- * serializing and deserializing json, redundant constructor fields stream, topic,
- * partitionSequenceNumberMap and partitionOffsetMap are created. Only one of topic, stream
- * should have a non-null value and only one of partitionOffsetMap and partitionSequenceNumberMap
- * should have a non-null value.
+ * To be backward compatible with both Kafka and Kinesis datasource metadata
+ * when serializing and deserializing json, redundant constructor fields stream,
+ * topic, partitionSequenceNumberMap and partitionOffsetMap are created. Only
+ * one of topic, stream should have a non-null value and only one of
+ * partitionOffsetMap and partitionSequenceNumberMap should have a non-null
+ * value.
  *
- * Redundant getters are used for proper Jackson serialization/deserialization when processing terminologies
- * used by Kafka and Kinesis (i.e. topic vs. stream)
+ * Redundant getters are used for proper Jackson serialization/deserialization
+ * when processing terminologies used by Kafka and Kinesis (i.e. topic vs.
+ * stream)
  */
-public class SeekableStreamEndSequenceNumbers<PartitionIdType, SequenceOffsetType> implements
-    SeekableStreamSequenceNumbers<PartitionIdType, SequenceOffsetType>
+public class SeekableStreamEndSequenceNumbers<PartitionIdType, SequenceOffsetType>
+    implements SeekableStreamSequenceNumbers<PartitionIdType, SequenceOffsetType> 
 {
   // stream/topic
   private final String stream;
@@ -52,15 +55,12 @@ public class SeekableStreamEndSequenceNumbers<PartitionIdType, SequenceOffsetTyp
   private final Map<PartitionIdType, SequenceOffsetType> partitionSequenceNumberMap;
 
   @JsonCreator
-  public SeekableStreamEndSequenceNumbers(
-      @JsonProperty("stream") final String stream,
+  public SeekableStreamEndSequenceNumbers(@JsonProperty("stream") final String stream,
       // kept for backward compatibility
       @JsonProperty("topic") final String topic,
-      @JsonProperty("partitionSequenceNumberMap")
-      final Map<PartitionIdType, SequenceOffsetType> partitionSequenceNumberMap,
+      @JsonProperty("partitionSequenceNumberMap") final Map<PartitionIdType, SequenceOffsetType> partitionSequenceNumberMap,
       // kept for backward compatibility
-      @JsonProperty("partitionOffsetMap") final Map<PartitionIdType, SequenceOffsetType> partitionOffsetMap
-  )
+      @JsonProperty("partitionOffsetMap") final Map<PartitionIdType, SequenceOffsetType> partitionOffsetMap) 
   {
     this.stream = stream == null ? topic : stream;
     this.partitionSequenceNumberMap = partitionOffsetMap == null ? partitionSequenceNumberMap : partitionOffsetMap;
@@ -69,31 +69,27 @@ public class SeekableStreamEndSequenceNumbers<PartitionIdType, SequenceOffsetTyp
     Preconditions.checkNotNull(this.partitionSequenceNumberMap, "partitionIdToSequenceNumberMap");
   }
 
-  public SeekableStreamEndSequenceNumbers(
-      final String stream,
-      final Map<PartitionIdType, SequenceOffsetType> partitionSequenceNumberMap
-  )
+  public SeekableStreamEndSequenceNumbers(final String stream,
+      final Map<PartitionIdType, SequenceOffsetType> partitionSequenceNumberMap) 
   {
     this(stream, null, partitionSequenceNumberMap, null);
   }
 
   /**
-   * Converts this end sequence numbers into start sequence numbers. This conversion is required when checking two
-   * sequence numbers are "matched" in {@code IndexerSQLMetadataStorageCoordinator#updateDataSourceMetadataWithHandle}
+   * Converts this end sequence numbers into start sequence numbers. This
+   * conversion is required when checking two sequence numbers are "matched" in
+   * {@code IndexerSQLMetadataStorageCoordinator#updateDataSourceMetadataWithHandle}
    * because only sequences numbers of the same type can be compared.
    *
-   * @param isExclusiveEndOffset flag that end offsets are exclusive. Should be true for Kafka and false for Kinesis.
+   * @param isExclusiveEndOffset flag that end offsets are exclusive. Should be
+   *                             true for Kafka and false for Kinesis.
    */
   public SeekableStreamStartSequenceNumbers<PartitionIdType, SequenceOffsetType> asStartPartitions(
-      boolean isExclusiveEndOffset
-  )
+      boolean isExclusiveEndOffset) 
   {
-    return new SeekableStreamStartSequenceNumbers<>(
-        stream,
-        partitionSequenceNumberMap,
+    return new SeekableStreamStartSequenceNumbers<>(stream, partitionSequenceNumberMap,
         // All start offsets are supposed to be opposite
-        isExclusiveEndOffset ? Collections.emptySet() : partitionSequenceNumberMap.keySet()
-    );
+        isExclusiveEndOffset ? Collections.emptySet() : partitionSequenceNumberMap.keySet());
   }
 
   @Override
