@@ -23,27 +23,21 @@ import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import org.apache.druid.indexing.overlord.DataSourceMetadata;
 import org.apache.druid.indexing.seekablestream.SeekableStreamDataSourceMetadata;
-import org.apache.druid.indexing.seekablestream.SeekableStreamEndSequenceNumbers;
+import org.apache.druid.indexing.seekablestream.SeekableStreamStartSequenceNumbers;
 import org.apache.druid.indexing.seekablestream.SeekableStreamSequenceNumbers;
 
-public class KinesisDataSourceMetadata extends SeekableStreamDataSourceMetadata<String, String>
-{
+public class KinesisDataSourceMetadata extends SeekableStreamDataSourceMetadata<String, String> {
   @JsonCreator
   public KinesisDataSourceMetadata(
-      @JsonProperty("partitions") SeekableStreamSequenceNumbers<String, String> kinesisPartitions
-  )
-  {
+      @JsonProperty("partitions") SeekableStreamSequenceNumbers<String, String> kinesisPartitions) {
     super(kinesisPartitions);
   }
 
   @Override
-  public DataSourceMetadata asStartMetadata()
-  {
+  public DataSourceMetadata asStartMetadata() {
     final SeekableStreamSequenceNumbers<String, String> sequenceNumbers = getSeekableStreamSequenceNumbers();
-    if (sequenceNumbers instanceof SeekableStreamEndSequenceNumbers) {
-      return createConcreteDataSourceMetaData(
-          ((SeekableStreamEndSequenceNumbers<String, String>) sequenceNumbers).asStartPartitions(false)
-      );
+    if (sequenceNumbers instanceof SeekableStreamStartSequenceNumbers) {
+      return createConcreteDataSourceMetaData(((SeekableStreamStartSequenceNumbers<String, String>) sequenceNumbers));
     } else {
       return this;
     }
@@ -51,9 +45,7 @@ public class KinesisDataSourceMetadata extends SeekableStreamDataSourceMetadata<
 
   @Override
   protected KinesisDataSourceMetadata createConcreteDataSourceMetaData(
-      SeekableStreamSequenceNumbers<String, String> seekableStreamSequenceNumbers
-  )
-  {
+      SeekableStreamSequenceNumbers<String, String> seekableStreamSequenceNumbers) {
     return new KinesisDataSourceMetadata(seekableStreamSequenceNumbers);
   }
 }

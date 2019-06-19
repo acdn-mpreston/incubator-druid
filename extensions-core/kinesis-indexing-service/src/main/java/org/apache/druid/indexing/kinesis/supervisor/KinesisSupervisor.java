@@ -40,7 +40,7 @@ import org.apache.druid.indexing.overlord.IndexerMetadataStorageCoordinator;
 import org.apache.druid.indexing.overlord.TaskMaster;
 import org.apache.druid.indexing.overlord.TaskStorage;
 import org.apache.druid.indexing.seekablestream.SeekableStreamDataSourceMetadata;
-import org.apache.druid.indexing.seekablestream.SeekableStreamEndSequenceNumbers;
+import org.apache.druid.indexing.seekablestream.SeekableStreamStartSequenceNumbers;
 import org.apache.druid.indexing.seekablestream.SeekableStreamIndexTask;
 import org.apache.druid.indexing.seekablestream.SeekableStreamIndexTaskIOConfig;
 import org.apache.druid.indexing.seekablestream.SeekableStreamIndexTaskTuningConfig;
@@ -64,98 +64,58 @@ import java.util.TreeMap;
 import java.util.concurrent.ScheduledExecutorService;
 
 /**
- * Supervisor responsible for managing the KinesisIndexTask for a single dataSource. At a high level, the class accepts a
- * {@link KinesisSupervisorSpec} which includes the Kinesis stream and configuration as well as an ingestion spec which will
- * be used to generate the indexing tasks. The run loop periodically refreshes its view of the Kinesis stream's partitions
- * and the list of running indexing tasks and ensures that all partitions are being read from and that there are enough
- * tasks to satisfy the desired number of replicas. As tasks complete, new tasks are queued to process the next range of
- * Kinesis sequences.
+ * Supervisor responsible for managing the KinesisIndexTask for a single
+ * dataSource. At a high level, the class accepts a
+ * {@link KinesisSupervisorSpec} which includes the Kinesis stream and
+ * configuration as well as an ingestion spec which will be used to generate the
+ * indexing tasks. The run loop periodically refreshes its view of the Kinesis
+ * stream's partitions and the list of running indexing tasks and ensures that
+ * all partitions are being read from and that there are enough tasks to satisfy
+ * the desired number of replicas. As tasks complete, new tasks are queued to
+ * process the next range of Kinesis sequences.
  * <p>
  * the Kinesis supervisor does not yet support lag calculations
  */
-public class KinesisSupervisor extends SeekableStreamSupervisor<String, String>
-{
-  public static final TypeReference<TreeMap<Integer, Map<String, String>>> CHECKPOINTS_TYPE_REF =
-      new TypeReference<TreeMap<Integer, Map<String, String>>>()
-      {
-      };
+public class KinesisSupervisor extends SeekableStreamSupervisor<String, String> {
+  public static final TypeReference<TreeMap<Integer, Map<String, String>>> CHECKPOINTS_TYPE_REF = new TypeReference<TreeMap<Integer, Map<String, String>>>() {
+  };
 
   private static final String NOT_SET = "-1";
   private final KinesisSupervisorSpec spec;
   private final AWSCredentialsConfig awsCredentialsConfig;
 
-  public KinesisSupervisor(
-      final TaskStorage taskStorage,
-      final TaskMaster taskMaster,
+  public KinesisSupervisor(final TaskStorage taskStorage, final TaskMaster taskMaster,
       final IndexerMetadataStorageCoordinator indexerMetadataStorageCoordinator,
-      final KinesisIndexTaskClientFactory taskClientFactory,
-      final ObjectMapper mapper,
-      final KinesisSupervisorSpec spec,
-      final RowIngestionMetersFactory rowIngestionMetersFactory,
-      final AWSCredentialsConfig awsCredentialsConfig
-  )
-  {
-    super(
-        StringUtils.format("KinesisSupervisor-%s", spec.getDataSchema().getDataSource()),
-        taskStorage,
-        taskMaster,
-        indexerMetadataStorageCoordinator,
-        taskClientFactory,
-        mapper,
-        spec,
-        rowIngestionMetersFactory,
-        true
-    );
+      final KinesisIndexTaskClientFactory taskClientFactory, final ObjectMapper mapper,
+      final KinesisSupervisorSpec spec, final RowIngestionMetersFactory rowIngestionMetersFactory,
+      final AWSCredentialsConfig awsCredentialsConfig) {
+    super(StringUtils.format("KinesisSupervisor-%s", spec.getDataSchema().getDataSource()), taskStorage, taskMaster,
+        indexerMetadataStorageCoordinator, taskClientFactory, mapper, spec, rowIngestionMetersFactory, true);
 
     this.spec = spec;
     this.awsCredentialsConfig = awsCredentialsConfig;
   }
 
   @Override
-  protected SeekableStreamIndexTaskIOConfig createTaskIoConfig(
-      int groupId,
-      Map<String, String> startPartitions,
-      Map<String, String> endPartitions,
-      String baseSequenceName,
-      DateTime minimumMessageTime,
-      DateTime maximumMessageTime,
-      Set<String> exclusiveStartSequenceNumberPartitions,
-      SeekableStreamSupervisorIOConfig ioConfigg
-  )
-  {
+  protected SeekableStreamIndexTaskIOConfig createTaskIoConfig(int groupId, Map<String, String> startPartitions,
+      Map<String, String> endPartitions, String baseSequenceName, DateTime minimumMessageTime,
+      DateTime maximumMessageTime, Set<String> exclusiveStartSequenceNumberPartitions,
+      SeekableStreamSupervisorIOConfig ioConfigg) {
     KinesisSupervisorIOConfig ioConfig = (KinesisSupervisorIOConfig) ioConfigg;
-    return new KinesisIndexTaskIOConfig(
-        groupId,
-        baseSequenceName,
-        new SeekableStreamStartSequenceNumbers<>(
-            ioConfig.getStream(),
-            startPartitions,
-            exclusiveStartSequenceNumberPartitions
-        ),
-        new SeekableStreamEndSequenceNumbers<>(ioConfig.getStream(), endPartitions),
-        true,
-        minimumMessageTime,
-        maximumMessageTime,
-        ioConfig.getEndpoint(),
-        ioConfig.getRecordsPerFetch(),
-        ioConfig.getFetchDelayMillis(),
-        ioConfig.getAwsAssumedRoleArn(),
-        ioConfig.getAwsExternalId(),
-        ioConfig.isDeaggregate()
-    );
+    return new KinesisIndexTaskIOConfig(groupId, baseSequenceName,
+        new SeekableStreamStartSequenceNumbers<>(ioConfig.getStream(), startPartitions,
+            exclusiveStartSequenceNumberPartitions),
+        new SeekableStreamStartSequenceNumbers<>(ioConfig.getStream(), endPartitions, Collections.emptySet()), true,
+        minimumMessageTime, maximumMessageTime, ioConfig.getEndpoint(), ioConfig.getRecordsPerFetch(),
+        ioConfig.getFetchDelayMillis(), ioConfig.getAwsAssumedRoleArn(), ioConfig.getAwsExternalId(),
+        ioConfig.isDeaggregate());
   }
 
   @Override
-  protected List<SeekableStreamIndexTask<String, String>> createIndexTasks(
-      int replicas,
-      String baseSequenceName,
-      ObjectMapper sortingMapper,
-      TreeMap<Integer, Map<String, String>> sequenceOffsets,
-      SeekableStreamIndexTaskIOConfig taskIoConfig,
-      SeekableStreamIndexTaskTuningConfig taskTuningConfig,
-      RowIngestionMetersFactory rowIngestionMetersFactory
-  ) throws JsonProcessingException
-  {
+  protected List<SeekableStreamIndexTask<String, String>> createIndexTasks(int replicas, String baseSequenceName,
+      ObjectMapper sortingMapper, TreeMap<Integer, Map<String, String>> sequenceOffsets,
+      SeekableStreamIndexTaskIOConfig taskIoConfig, SeekableStreamIndexTaskTuningConfig taskTuningConfig,
+      RowIngestionMetersFactory rowIngestionMetersFactory) throws JsonProcessingException {
     final String checkpoints = sortingMapper.writerFor(CHECKPOINTS_TYPE_REF).writeValueAsString(sequenceOffsets);
     final Map<String, Object> context = createBaseTaskContexts();
     context.put(CHECKPOINTS_CTX_KEY, checkpoints);
@@ -163,58 +123,34 @@ public class KinesisSupervisor extends SeekableStreamSupervisor<String, String>
     List<SeekableStreamIndexTask<String, String>> taskList = new ArrayList<>();
     for (int i = 0; i < replicas; i++) {
       String taskId = Joiner.on("_").join(baseSequenceName, RandomIdUtils.getRandomId());
-      taskList.add(new KinesisIndexTask(
-          taskId,
-          new TaskResource(baseSequenceName, 1),
-          spec.getDataSchema(),
-          (KinesisIndexTaskTuningConfig) taskTuningConfig,
-          (KinesisIndexTaskIOConfig) taskIoConfig,
-          context,
-          null,
-          null,
-          rowIngestionMetersFactory,
-          awsCredentialsConfig
-      ));
+      taskList.add(new KinesisIndexTask(taskId, new TaskResource(baseSequenceName, 1), spec.getDataSchema(),
+          (KinesisIndexTaskTuningConfig) taskTuningConfig, (KinesisIndexTaskIOConfig) taskIoConfig, context, null, null,
+          rowIngestionMetersFactory, awsCredentialsConfig));
     }
     return taskList;
   }
 
-
   @Override
-  protected RecordSupplier<String, String> setupRecordSupplier()
-      throws RuntimeException
-  {
+  protected RecordSupplier<String, String> setupRecordSupplier() throws RuntimeException {
     KinesisSupervisorIOConfig ioConfig = spec.getIoConfig();
     KinesisIndexTaskTuningConfig taskTuningConfig = spec.getTuningConfig();
 
     return new KinesisRecordSupplier(
-        KinesisRecordSupplier.getAmazonKinesisClient(
-            ioConfig.getEndpoint(),
-            awsCredentialsConfig,
-            ioConfig.getAwsAssumedRoleArn(),
-            ioConfig.getAwsExternalId()
-        ),
-        ioConfig.getRecordsPerFetch(),
-        ioConfig.getFetchDelayMillis(),
-        1,
-        ioConfig.isDeaggregate(),
-        taskTuningConfig.getRecordBufferSize(),
-        taskTuningConfig.getRecordBufferOfferTimeout(),
-        taskTuningConfig.getRecordBufferFullWait(),
-        taskTuningConfig.getFetchSequenceNumberTimeout(),
-        taskTuningConfig.getMaxRecordsPerPoll()
-    );
+        KinesisRecordSupplier.getAmazonKinesisClient(ioConfig.getEndpoint(), awsCredentialsConfig,
+            ioConfig.getAwsAssumedRoleArn(), ioConfig.getAwsExternalId()),
+        ioConfig.getRecordsPerFetch(), ioConfig.getFetchDelayMillis(), 1, ioConfig.isDeaggregate(),
+        taskTuningConfig.getRecordBufferSize(), taskTuningConfig.getRecordBufferOfferTimeout(),
+        taskTuningConfig.getRecordBufferFullWait(), taskTuningConfig.getFetchSequenceNumberTimeout(),
+        taskTuningConfig.getMaxRecordsPerPoll());
   }
 
   @Override
-  protected void scheduleReporting(ScheduledExecutorService reportingExec)
-  {
+  protected void scheduleReporting(ScheduledExecutorService reportingExec) {
     // not yet implemented, see issue #6739
   }
 
   @Override
-  protected int getTaskGroupIdForPartition(String partitionId)
-  {
+  protected int getTaskGroupIdForPartition(String partitionId) {
     if (!partitionIds.contains(partitionId)) {
       partitionIds.add(partitionId);
     }
@@ -223,93 +159,68 @@ public class KinesisSupervisor extends SeekableStreamSupervisor<String, String>
   }
 
   @Override
-  protected boolean checkSourceMetadataMatch(DataSourceMetadata metadata)
-  {
+  protected boolean checkSourceMetadataMatch(DataSourceMetadata metadata) {
     return metadata instanceof KinesisDataSourceMetadata;
   }
 
   @Override
-  protected boolean doesTaskTypeMatchSupervisor(Task task)
-  {
+  protected boolean doesTaskTypeMatchSupervisor(Task task) {
     return task instanceof KinesisIndexTask;
   }
 
   @Override
-  protected SeekableStreamSupervisorReportPayload<String, String> createReportPayload(
-      int numPartitions,
-      boolean includeOffsets
-  )
-  {
+  protected SeekableStreamSupervisorReportPayload<String, String> createReportPayload(int numPartitions,
+      boolean includeOffsets) {
     KinesisSupervisorIOConfig ioConfig = spec.getIoConfig();
-    return new KinesisSupervisorReportPayload(
-        spec.getDataSchema().getDataSource(),
-        ioConfig.getStream(),
-        numPartitions,
-        ioConfig.getReplicas(),
-        ioConfig.getTaskDuration().getMillis() / 1000,
-        spec.isSuspended()
-    );
+    return new KinesisSupervisorReportPayload(spec.getDataSchema().getDataSource(), ioConfig.getStream(), numPartitions,
+        ioConfig.getReplicas(), ioConfig.getTaskDuration().getMillis() / 1000, spec.isSuspended());
   }
 
   // not yet supported, will be implemented in the future
   @Override
-  protected Map<String, String> getLagPerPartition(Map<String, String> currentOffsets)
-  {
+  protected Map<String, String> getLagPerPartition(Map<String, String> currentOffsets) {
     return ImmutableMap.of();
   }
 
   @Override
-  protected SeekableStreamDataSourceMetadata<String, String> createDataSourceMetaDataForReset(
-      String stream,
-      Map<String, String> map
-  )
-  {
-    return new KinesisDataSourceMetadata(
-        new SeekableStreamStartSequenceNumbers<>(stream, map, Collections.emptySet())
-    );
+  protected SeekableStreamDataSourceMetadata<String, String> createDataSourceMetaDataForReset(String stream,
+      Map<String, String> map) {
+    return new KinesisDataSourceMetadata(new SeekableStreamStartSequenceNumbers<>(stream, map, Collections.emptySet()));
   }
 
   @Override
-  protected OrderedSequenceNumber<String> makeSequenceNumber(String seq, boolean isExclusive)
-  {
+  protected OrderedSequenceNumber<String> makeSequenceNumber(String seq, boolean isExclusive) {
     return KinesisSequenceNumber.of(seq, isExclusive);
   }
 
   @Override
-  protected void updateLatestSequenceFromStream(
-      RecordSupplier<String, String> recordSupplier, Set<StreamPartition<String>> streamPartitions
-  )
-  {
+  protected void updateLatestSequenceFromStream(RecordSupplier<String, String> recordSupplier,
+      Set<StreamPartition<String>> streamPartitions) {
     // do nothing
   }
 
   @Override
-  protected String baseTaskName()
-  {
+  protected String baseTaskName() {
     return "index_kinesis";
   }
 
   @Override
-  protected String getNotSetMarker()
-  {
+  protected String getNotSetMarker() {
     return NOT_SET;
   }
 
   @Override
-  protected String getEndOfPartitionMarker()
-  {
+  protected String getEndOfPartitionMarker() {
     return KinesisSequenceNumber.NO_END_SEQUENCE_NUMBER;
   }
 
   @Override
-  protected boolean isEndOfShard(String seqNum)
-  {
+  protected boolean isEndOfShard(String seqNum) {
     return KinesisSequenceNumber.END_OF_SHARD_MARKER.equals(seqNum);
   }
 
   @Override
-  protected boolean useExclusiveStartSequenceNumberForNonFirstSequence()
-  {
+  protected boolean useExclusiveStartSequenceNumberForNonFirstSequence() {
     return true;
   }
 }

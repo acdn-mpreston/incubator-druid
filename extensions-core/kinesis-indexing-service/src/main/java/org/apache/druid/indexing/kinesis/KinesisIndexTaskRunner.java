@@ -26,7 +26,7 @@ import org.apache.druid.data.input.impl.InputRowParser;
 import org.apache.druid.indexing.common.TaskToolbox;
 import org.apache.druid.indexing.common.stats.RowIngestionMetersFactory;
 import org.apache.druid.indexing.seekablestream.SeekableStreamDataSourceMetadata;
-import org.apache.druid.indexing.seekablestream.SeekableStreamEndSequenceNumbers;
+import org.apache.druid.indexing.seekablestream.SeekableStreamStartSequenceNumbers;
 import org.apache.druid.indexing.seekablestream.SeekableStreamIndexTaskRunner;
 import org.apache.druid.indexing.seekablestream.SeekableStreamSequenceNumbers;
 import org.apache.druid.indexing.seekablestream.SequenceMetadata;
@@ -51,84 +51,52 @@ import java.util.TreeMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.stream.Collectors;
 
-public class KinesisIndexTaskRunner extends SeekableStreamIndexTaskRunner<String, String>
-{
+public class KinesisIndexTaskRunner extends SeekableStreamIndexTaskRunner<String, String> {
   private static final EmittingLogger log = new EmittingLogger(KinesisIndexTaskRunner.class);
   private static final long POLL_TIMEOUT = 100;
 
   private final KinesisIndexTask task;
 
-  KinesisIndexTaskRunner(
-      KinesisIndexTask task,
-      InputRowParser<ByteBuffer> parser,
-      AuthorizerMapper authorizerMapper,
-      Optional<ChatHandlerProvider> chatHandlerProvider,
-      CircularBuffer<Throwable> savedParseExceptions,
-      RowIngestionMetersFactory rowIngestionMetersFactory
-  )
-  {
-    super(
-        task,
-        parser,
-        authorizerMapper,
-        chatHandlerProvider,
-        savedParseExceptions,
-        rowIngestionMetersFactory
-    );
+  KinesisIndexTaskRunner(KinesisIndexTask task, InputRowParser<ByteBuffer> parser, AuthorizerMapper authorizerMapper,
+      Optional<ChatHandlerProvider> chatHandlerProvider, CircularBuffer<Throwable> savedParseExceptions,
+      RowIngestionMetersFactory rowIngestionMetersFactory) {
+    super(task, parser, authorizerMapper, chatHandlerProvider, savedParseExceptions, rowIngestionMetersFactory);
     this.task = task;
   }
 
-
   @Override
-  protected String getNextStartOffset(String sequenceNumber)
-  {
+  protected String getNextStartOffset(String sequenceNumber) {
     return sequenceNumber;
   }
 
   @Nonnull
   @Override
-  protected List<OrderedPartitionableRecord<String, String>> getRecords(
-      RecordSupplier<String, String> recordSupplier, TaskToolbox toolbox
-  )
-  {
+  protected List<OrderedPartitionableRecord<String, String>> getRecords(RecordSupplier<String, String> recordSupplier,
+      TaskToolbox toolbox) {
     return recordSupplier.poll(POLL_TIMEOUT);
   }
 
   @Override
-  protected SeekableStreamEndSequenceNumbers<String, String> deserializePartitionsFromMetadata(
-      ObjectMapper mapper,
-      Object object
-  )
-  {
+  protected SeekableStreamStartSequenceNumbers<String, String> deserializePartitionsFromMetadata(ObjectMapper mapper,
+      Object object) {
     return mapper.convertValue(object, mapper.getTypeFactory().constructParametrizedType(
-        SeekableStreamEndSequenceNumbers.class,
-        SeekableStreamEndSequenceNumbers.class,
-        String.class,
-        String.class
-    ));
+        SeekableStreamStartSequenceNumbers.class, SeekableStreamStartSequenceNumbers.class, String.class, String.class));
   }
 
   @Override
   protected SeekableStreamDataSourceMetadata<String, String> createDataSourceMetadata(
-      SeekableStreamSequenceNumbers<String, String> partitions
-  )
-  {
+      SeekableStreamSequenceNumbers<String, String> partitions) {
     return new KinesisDataSourceMetadata(partitions);
   }
 
   @Override
-  protected OrderedSequenceNumber<String> createSequenceNumber(String sequenceNumber)
-  {
+  protected OrderedSequenceNumber<String> createSequenceNumber(String sequenceNumber) {
     return KinesisSequenceNumber.of(sequenceNumber);
   }
 
   @Override
-  protected void possiblyResetDataSourceMetadata(
-      TaskToolbox toolbox,
-      RecordSupplier<String, String> recordSupplier,
-      Set<StreamPartition<String>> assignment
-  )
-  {
+  protected void possiblyResetDataSourceMetadata(TaskToolbox toolbox, RecordSupplier<String, String> recordSupplier,
+      Set<StreamPartition<String>> assignment) {
     if (!task.getTuningConfig().isSkipSequenceNumberAvailabilityCheck()) {
       final ConcurrentMap<String, String> currOffsets = getCurrentOffsets();
       for (final StreamPartition<String> streamPartition : assignment) {
@@ -140,21 +108,15 @@ public class KinesisIndexTaskRunner extends SeekableStreamIndexTaskRunner<String
             log.info("Attempting to reset sequences automatically for all partitions");
             try {
               sendResetRequestAndWait(
-                  assignment.stream()
-                            .collect(Collectors.toMap(x -> x, x -> currOffsets.get(x.getPartitionId()))),
-                  toolbox
-              );
-            }
-            catch (IOException e) {
+                  assignment.stream().collect(Collectors.toMap(x -> x, x -> currOffsets.get(x.getPartitionId()))),
+                  toolbox);
+            } catch (IOException e) {
               throw new ISE(e, "Exception while attempting to automatically reset sequences");
             }
           } else {
             throw new ISE(
                 "Starting sequenceNumber [%s] is no longer available for partition [%s] (earliest: [%s]) and resetOffsetAutomatically is not enabled",
-                sequence,
-                streamPartition.getPartitionId(),
-                earliestSequenceNumber
-            );
+                sequence, streamPartition.getPartitionId(), earliestSequenceNumber);
           }
         }
       }
@@ -162,40 +124,30 @@ public class KinesisIndexTaskRunner extends SeekableStreamIndexTaskRunner<String
   }
 
   @Override
-  protected boolean isEndOffsetExclusive()
-  {
+  protected boolean isEndOffsetExclusive() {
     return false;
   }
 
   @Override
-  protected boolean isEndOfShard(String seqNum)
-  {
+  protected boolean isEndOfShard(String seqNum) {
     return KinesisSequenceNumber.END_OF_SHARD_MARKER.equals(seqNum);
   }
 
   @Override
-  public TypeReference<List<SequenceMetadata<String, String>>> getSequenceMetadataTypeReference()
-  {
-    return new TypeReference<List<SequenceMetadata<String, String>>>()
-    {
+  public TypeReference<List<SequenceMetadata<String, String>>> getSequenceMetadataTypeReference() {
+    return new TypeReference<List<SequenceMetadata<String, String>>>() {
     };
   }
 
   @Nullable
   @Override
-  protected TreeMap<Integer, Map<String, String>> getCheckPointsFromContext(
-      TaskToolbox toolbox,
-      String checkpointsString
-  ) throws IOException
-  {
+  protected TreeMap<Integer, Map<String, String>> getCheckPointsFromContext(TaskToolbox toolbox,
+      String checkpointsString) throws IOException {
     if (checkpointsString != null) {
       log.info("Checkpoints [%s]", checkpointsString);
-      return toolbox.getObjectMapper().readValue(
-          checkpointsString,
-          new TypeReference<TreeMap<Integer, Map<String, String>>>()
-          {
-          }
-      );
+      return toolbox.getObjectMapper().readValue(checkpointsString,
+          new TypeReference<TreeMap<Integer, Map<String, String>>>() {
+          });
     } else {
       return null;
     }

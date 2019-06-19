@@ -48,7 +48,7 @@ import org.apache.druid.indexing.common.stats.RowIngestionMetersFactory;
 import org.apache.druid.indexing.common.task.IndexTaskUtils;
 import org.apache.druid.indexing.common.task.RealtimeIndexTask;
 import org.apache.druid.indexing.seekablestream.SeekableStreamDataSourceMetadata;
-import org.apache.druid.indexing.seekablestream.SeekableStreamEndSequenceNumbers;
+import org.apache.druid.indexing.seekablestream.SeekableStreamStartSequenceNumbers;
 import org.apache.druid.indexing.seekablestream.SeekableStreamIndexTask;
 import org.apache.druid.indexing.seekablestream.SeekableStreamIndexTaskRunner;
 import org.apache.druid.indexing.seekablestream.SeekableStreamSequenceNumbers;
@@ -119,33 +119,43 @@ import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
- * Kafka index task runner which doesn't support incremental segment publishing. We keep this to support rolling update.
- * This class will be removed in a future release.
+ * Kafka index task runner which doesn't support incremental segment publishing.
+ * We keep this to support rolling update. This class will be removed in a
+ * future release.
  */
 @Deprecated
-public class LegacyKafkaIndexTaskRunner extends SeekableStreamIndexTaskRunner<Integer, Long>
-{
+public class LegacyKafkaIndexTaskRunner extends SeekableStreamIndexTaskRunner<Integer, Long> {
   private static final EmittingLogger log = new EmittingLogger(LegacyKafkaIndexTaskRunner.class);
   private static final String METADATA_NEXT_PARTITIONS = "nextPartitions";
 
   private final ConcurrentMap<Integer, Long> endOffsets = new ConcurrentHashMap<>();
   private final ConcurrentMap<Integer, Long> nextOffsets = new ConcurrentHashMap<>();
 
-  // The pause lock and associated conditions are to support coordination between the Jetty threads and the main
-  // ingestion loop. The goal is to provide callers of the API a guarantee that if pause() returns successfully
-  // the ingestion loop has been stopped at the returned offsets and will not ingest any more data until resumed. The
+  // The pause lock and associated conditions are to support coordination between
+  // the Jetty threads and the main
+  // ingestion loop. The goal is to provide callers of the API a guarantee that if
+  // pause() returns successfully
+  // the ingestion loop has been stopped at the returned offsets and will not
+  // ingest any more data until resumed. The
   // fields are used as follows (every step requires acquiring [pauseLock]):
-  //   Pausing:
-  //   - In pause(), [pauseRequested] is set to true and then execution waits for [status] to change to PAUSED, with the
-  //     condition checked when [hasPaused] is signalled.
-  //   - In possiblyPause() called from the main loop, if [pauseRequested] is true, [status] is set to PAUSED,
-  //     [hasPaused] is signalled, and execution pauses until [pauseRequested] becomes false, either by being set or by
-  //     the [pauseMillis] timeout elapsing. [pauseRequested] is checked when [shouldResume] is signalled.
-  //   Resuming:
-  //   - In resume(), [pauseRequested] is set to false, [shouldResume] is signalled, and execution waits for [status] to
-  //     change to something other than PAUSED, with the condition checked when [shouldResume] is signalled.
-  //   - In possiblyPause(), when [shouldResume] is signalled, if [pauseRequested] has become false the pause loop ends,
-  //     [status] is changed to STARTING and [shouldResume] is signalled.
+  // Pausing:
+  // - In pause(), [pauseRequested] is set to true and then execution waits for
+  // [status] to change to PAUSED, with the
+  // condition checked when [hasPaused] is signalled.
+  // - In possiblyPause() called from the main loop, if [pauseRequested] is true,
+  // [status] is set to PAUSED,
+  // [hasPaused] is signalled, and execution pauses until [pauseRequested] becomes
+  // false, either by being set or by
+  // the [pauseMillis] timeout elapsing. [pauseRequested] is checked when
+  // [shouldResume] is signalled.
+  // Resuming:
+  // - In resume(), [pauseRequested] is set to false, [shouldResume] is signalled,
+  // and execution waits for [status] to
+  // change to something other than PAUSED, with the condition checked when
+  // [shouldResume] is signalled.
+  // - In possiblyPause(), when [shouldResume] is signalled, if [pauseRequested]
+  // has become false the pause loop ends,
+  // [status] is changed to STARTING and [shouldResume] is signalled.
 
   private final Lock pauseLock = new ReentrantLock();
   private final Condition hasPaused = pauseLock.newCondition();
@@ -154,12 +164,18 @@ public class LegacyKafkaIndexTaskRunner extends SeekableStreamIndexTaskRunner<In
   private final AtomicBoolean stopRequested = new AtomicBoolean(false);
   private final AtomicBoolean publishOnStop = new AtomicBoolean(false);
 
-  // [statusLock] is used to synchronize the Jetty thread calling stopGracefully() with the main run thread. It prevents
-  // the main run thread from switching into a publishing state while the stopGracefully() thread thinks it's still in
-  // a pre-publishing state. This is important because stopGracefully() will try to use the [stopRequested] flag to stop
-  // the main thread where possible, but this flag is not honored once publishing has begun so in this case we must
-  // interrupt the thread. The lock ensures that if the run thread is about to transition into publishing state, it
-  // blocks until after stopGracefully() has set [stopRequested] and then does a final check on [stopRequested] before
+  // [statusLock] is used to synchronize the Jetty thread calling stopGracefully()
+  // with the main run thread. It prevents
+  // the main run thread from switching into a publishing state while the
+  // stopGracefully() thread thinks it's still in
+  // a pre-publishing state. This is important because stopGracefully() will try
+  // to use the [stopRequested] flag to stop
+  // the main thread where possible, but this flag is not honored once publishing
+  // has begun so in this case we must
+  // interrupt the thread. The lock ensures that if the run thread is about to
+  // transition into publishing state, it
+  // blocks until after stopGracefully() has set [stopRequested] and then does a
+  // final check on [stopRequested] before
   // transitioning to publishing state.
   private final Object statusLock = new Object();
 
@@ -186,23 +202,10 @@ public class LegacyKafkaIndexTaskRunner extends SeekableStreamIndexTaskRunner<In
 
   private volatile boolean pauseRequested;
 
-  LegacyKafkaIndexTaskRunner(
-      KafkaIndexTask task,
-      InputRowParser<ByteBuffer> parser,
-      AuthorizerMapper authorizerMapper,
-      Optional<ChatHandlerProvider> chatHandlerProvider,
-      CircularBuffer<Throwable> savedParseExceptions,
-      RowIngestionMetersFactory rowIngestionMetersFactory
-  )
-  {
-    super(
-        task,
-        parser,
-        authorizerMapper,
-        chatHandlerProvider,
-        savedParseExceptions,
-        rowIngestionMetersFactory
-    );
+  LegacyKafkaIndexTaskRunner(KafkaIndexTask task, InputRowParser<ByteBuffer> parser, AuthorizerMapper authorizerMapper,
+      Optional<ChatHandlerProvider> chatHandlerProvider, CircularBuffer<Throwable> savedParseExceptions,
+      RowIngestionMetersFactory rowIngestionMetersFactory) {
+    super(task, parser, authorizerMapper, chatHandlerProvider, savedParseExceptions, rowIngestionMetersFactory);
     this.task = task;
     this.ioConfig = task.getIOConfig();
     this.tuningConfig = task.getTuningConfig();
@@ -217,36 +220,28 @@ public class LegacyKafkaIndexTaskRunner extends SeekableStreamIndexTaskRunner<In
   }
 
   @Override
-  public TaskStatus run(TaskToolbox toolbox)
-  {
+  public TaskStatus run(TaskToolbox toolbox) {
     try {
       return runInternal(toolbox);
-    }
-    catch (Exception e) {
+    } catch (Exception e) {
       log.error(e, "Encountered exception while running task.");
       final String errorMsg = Throwables.getStackTraceAsString(e);
       toolbox.getTaskReportFileWriter().write(getTaskCompletionReports(errorMsg));
-      return TaskStatus.failure(
-          task.getId(),
-          errorMsg
-      );
+      return TaskStatus.failure(task.getId(), errorMsg);
     }
   }
 
   @Override
-  public Appenderator getAppenderator()
-  {
+  public Appenderator getAppenderator() {
     return appenderator;
   }
 
   @Override
-  public RowIngestionMeters getRowIngestionMeters()
-  {
+  public RowIngestionMeters getRowIngestionMeters() {
     return rowIngestionMeters;
   }
 
-  private TaskStatus runInternal(TaskToolbox toolbox) throws Exception
-  {
+  private TaskStatus runInternal(TaskToolbox toolbox) throws Exception {
     log.info("Starting up!");
     startTime = DateTimes.nowUtc();
     status = Status.STARTING;
@@ -262,35 +257,24 @@ public class LegacyKafkaIndexTaskRunner extends SeekableStreamIndexTaskRunner<In
     runThread = Thread.currentThread();
 
     // Set up FireDepartmentMetrics
-    final FireDepartment fireDepartmentForMetrics = new FireDepartment(
-        task.getDataSchema(),
-        new RealtimeIOConfig(null, null, null),
-        null
-    );
+    final FireDepartment fireDepartmentForMetrics = new FireDepartment(task.getDataSchema(),
+        new RealtimeIOConfig(null, null, null), null);
     fireDepartmentMetrics = fireDepartmentForMetrics.getMetrics();
     toolbox.getMonitorScheduler()
-           .addMonitor(TaskRealtimeMetricsMonitorBuilder.build(task, fireDepartmentForMetrics, rowIngestionMeters));
+        .addMonitor(TaskRealtimeMetricsMonitorBuilder.build(task, fireDepartmentForMetrics, rowIngestionMeters));
 
     final String lookupTier = task.getContextValue(RealtimeIndexTask.CTX_KEY_LOOKUP_TIER);
-    LookupNodeService lookupNodeService = lookupTier == null ?
-                                          toolbox.getLookupNodeService() :
-                                          new LookupNodeService(lookupTier);
-    DiscoveryDruidNode discoveryDruidNode = new DiscoveryDruidNode(
-        toolbox.getDruidNode(),
-        NodeType.PEON,
-        ImmutableMap.of(
-            toolbox.getDataNodeService().getName(), toolbox.getDataNodeService(),
-            lookupNodeService.getName(), lookupNodeService
-        )
-    );
+    LookupNodeService lookupNodeService = lookupTier == null ? toolbox.getLookupNodeService()
+        : new LookupNodeService(lookupTier);
+    DiscoveryDruidNode discoveryDruidNode = new DiscoveryDruidNode(toolbox.getDruidNode(), NodeType.PEON,
+        ImmutableMap.of(toolbox.getDataNodeService().getName(), toolbox.getDataNodeService(),
+            lookupNodeService.getName(), lookupNodeService));
 
     ingestionState = IngestionState.BUILD_SEGMENTS;
 
-    try (
-        final Appenderator appenderator0 = task.newAppenderator(fireDepartmentMetrics, toolbox);
+    try (final Appenderator appenderator0 = task.newAppenderator(fireDepartmentMetrics, toolbox);
         final StreamAppenderatorDriver driver = task.newDriver(appenderator0, toolbox, fireDepartmentMetrics);
-        final KafkaConsumer<byte[], byte[]> consumer = task.newConsumer()
-    ) {
+        final KafkaConsumer<byte[], byte[]> consumer = task.newConsumer()) {
       toolbox.getDataSegmentServerAnnouncer().announce();
       toolbox.getDruidNodeAnnouncer().announce(discoveryDruidNode);
 
@@ -304,32 +288,22 @@ public class LegacyKafkaIndexTaskRunner extends SeekableStreamIndexTaskRunner<In
         nextOffsets.putAll(ioConfig.getStartSequenceNumbers().getPartitionSequenceNumberMap());
       } else {
         final Map<String, Object> restoredMetadataMap = (Map) restoredMetadata;
-        final SeekableStreamEndSequenceNumbers<Integer, Long> restoredNextPartitions = toolbox.getObjectMapper().convertValue(
-            restoredMetadataMap.get(METADATA_NEXT_PARTITIONS),
-            toolbox.getObjectMapper().getTypeFactory().constructParametrizedType(
-                SeekableStreamStartSequenceNumbers.class,
-                SeekableStreamStartSequenceNumbers.class,
-                Integer.class,
-                Long.class
-            )
-        );
+        final SeekableStreamStartSequenceNumbers<Integer, Long> restoredNextPartitions = toolbox.getObjectMapper()
+            .convertValue(restoredMetadataMap.get(METADATA_NEXT_PARTITIONS),
+                toolbox.getObjectMapper().getTypeFactory().constructParametrizedType(
+                    SeekableStreamStartSequenceNumbers.class, SeekableStreamStartSequenceNumbers.class, Integer.class,
+                    Long.class));
         nextOffsets.putAll(restoredNextPartitions.getPartitionSequenceNumberMap());
 
         // Sanity checks.
         if (!restoredNextPartitions.getStream().equals(ioConfig.getStartSequenceNumbers().getStream())) {
-          throw new ISE(
-              "WTF?! Restored topic[%s] but expected topic[%s]",
-              restoredNextPartitions.getStream(),
-              ioConfig.getStartSequenceNumbers().getStream()
-          );
+          throw new ISE("WTF?! Restored topic[%s] but expected topic[%s]", restoredNextPartitions.getStream(),
+              ioConfig.getStartSequenceNumbers().getStream());
         }
 
         if (!nextOffsets.keySet().equals(ioConfig.getStartSequenceNumbers().getPartitionSequenceNumberMap().keySet())) {
-          throw new ISE(
-              "WTF?! Restored partitions[%s] but expected partitions[%s]",
-              nextOffsets.keySet(),
-              ioConfig.getStartSequenceNumbers().getPartitionSequenceNumberMap().keySet()
-          );
+          throw new ISE("WTF?! Restored partitions[%s] but expected partitions[%s]", nextOffsets.keySet(),
+              ioConfig.getStartSequenceNumbers().getPartitionSequenceNumberMap().keySet());
         }
       }
 
@@ -340,30 +314,20 @@ public class LegacyKafkaIndexTaskRunner extends SeekableStreamIndexTaskRunner<In
       }
 
       // Set up committer.
-      final Supplier<Committer> committerSupplier = new Supplier<Committer>()
-      {
+      final Supplier<Committer> committerSupplier = new Supplier<Committer>() {
         @Override
-        public Committer get()
-        {
+        public Committer get() {
           final Map<Integer, Long> snapshot = ImmutableMap.copyOf(nextOffsets);
 
-          return new Committer()
-          {
+          return new Committer() {
             @Override
-            public Object getMetadata()
-            {
-              return ImmutableMap.of(
-                  METADATA_NEXT_PARTITIONS,
-                  new SeekableStreamEndSequenceNumbers<>(
-                      ioConfig.getStartSequenceNumbers().getStream(),
-                      snapshot
-                  )
-              );
+            public Object getMetadata() {
+              return ImmutableMap.of(METADATA_NEXT_PARTITIONS,
+                  new SeekableStreamStartSequenceNumbers<>(ioConfig.getStartSequenceNumbers().getStream(), snapshot, Collections.emptySet()));
             }
 
             @Override
-            public void run()
-            {
+            public void run() {
               // Do nothing.
             }
           };
@@ -373,14 +337,17 @@ public class LegacyKafkaIndexTaskRunner extends SeekableStreamIndexTaskRunner<In
       Set<Integer> assignment = assignPartitionsAndSeekToNext(consumer, topic);
 
       // Main loop.
-      // Could eventually support leader/follower mode (for keeping replicas more in sync)
+      // Could eventually support leader/follower mode (for keeping replicas more in
+      // sync)
       boolean stillReading = !assignment.isEmpty();
       status = Status.READING;
       try {
         while (stillReading) {
           if (possiblyPause()) {
-            // The partition assignments may have changed while paused by a call to setEndOffsets() so reassign
-            // partitions upon resuming. This is safe even if the end offsets have not been modified.
+            // The partition assignments may have changed while paused by a call to
+            // setEndOffsets() so reassign
+            // partitions upon resuming. This is safe even if the end offsets have not been
+            // modified.
             assignment = assignPartitionsAndSeekToNext(consumer, topic);
 
             if (assignment.isEmpty()) {
@@ -394,14 +361,16 @@ public class LegacyKafkaIndexTaskRunner extends SeekableStreamIndexTaskRunner<In
             break;
           }
 
-          // The retrying business is because the KafkaConsumer throws OffsetOutOfRangeException if the seeked-to
-          // offset is not present in the topic-partition. This can happen if we're asking a task to read from data
-          // that has not been written yet (which is totally legitimate). So let's wait for it to show up.
+          // The retrying business is because the KafkaConsumer throws
+          // OffsetOutOfRangeException if the seeked-to
+          // offset is not present in the topic-partition. This can happen if we're asking
+          // a task to read from data
+          // that has not been written yet (which is totally legitimate). So let's wait
+          // for it to show up.
           ConsumerRecords<byte[], byte[]> records = ConsumerRecords.empty();
           try {
             records = consumer.poll(task.getIOConfig().getPollTimeout());
-          }
-          catch (OffsetOutOfRangeException e) {
+          } catch (OffsetOutOfRangeException e) {
             log.warn("OffsetOutOfRangeException with message [%s]", e.getMessage());
             possiblyResetOffsetsOrWait(e.offsetOutOfRangePartitions(), consumer, toolbox);
             stillReading = !assignment.isEmpty();
@@ -409,64 +378,49 @@ public class LegacyKafkaIndexTaskRunner extends SeekableStreamIndexTaskRunner<In
 
           for (ConsumerRecord<byte[], byte[]> record : records) {
             if (log.isTraceEnabled()) {
-              log.trace(
-                  "Got topic[%s] partition[%d] offset[%,d].",
-                  record.topic(),
-                  record.partition(),
-                  record.offset()
-              );
+              log.trace("Got topic[%s] partition[%d] offset[%,d].", record.topic(), record.partition(),
+                  record.offset());
             }
 
             if (record.offset() < endOffsets.get(record.partition())) {
               if (record.offset() != nextOffsets.get(record.partition())) {
                 if (ioConfig.isSkipOffsetGaps()) {
-                  log.warn(
-                      "Skipped to offset[%,d] after offset[%,d] in partition[%d].",
-                      record.offset(),
-                      nextOffsets.get(record.partition()),
-                      record.partition()
-                  );
+                  log.warn("Skipped to offset[%,d] after offset[%,d] in partition[%d].", record.offset(),
+                      nextOffsets.get(record.partition()), record.partition());
                 } else {
-                  throw new ISE(
-                      "WTF?! Got offset[%,d] after offset[%,d] in partition[%d].",
-                      record.offset(),
-                      nextOffsets.get(record.partition()),
-                      record.partition()
-                  );
+                  throw new ISE("WTF?! Got offset[%,d] after offset[%,d] in partition[%d].", record.offset(),
+                      nextOffsets.get(record.partition()), record.partition());
                 }
               }
 
               try {
                 final byte[] valueBytes = record.value();
-                final List<InputRow> rows = valueBytes == null
-                                            ? Utils.nullableListOf((InputRow) null)
-                                            : parser.parseBatch(ByteBuffer.wrap(valueBytes));
+                final List<InputRow> rows = valueBytes == null ? Utils.nullableListOf((InputRow) null)
+                    : parser.parseBatch(ByteBuffer.wrap(valueBytes));
                 boolean isPersistRequired = false;
                 final Map<String, Set<SegmentIdWithShardSpec>> segmentsToMoveOut = new HashMap<>();
 
                 for (InputRow row : rows) {
                   if (row != null && task.withinMinMaxRecordTime(row)) {
                     final String sequenceName = sequenceNames.get(record.partition());
-                    final AppenderatorDriverAddResult addResult = driver.add(
-                        row,
-                        sequenceName,
-                        committerSupplier,
-                        false,
-                        false
-                    );
+                    final AppenderatorDriverAddResult addResult = driver.add(row, sequenceName, committerSupplier,
+                        false, false);
 
                     if (addResult.isOk()) {
-                      // If the number of rows in the segment exceeds the threshold after adding a row,
-                      // move the segment out from the active segments of BaseAppenderatorDriver to make a new segment.
+                      // If the number of rows in the segment exceeds the threshold after adding a
+                      // row,
+                      // move the segment out from the active segments of BaseAppenderatorDriver to
+                      // make a new segment.
                       if (addResult.getNumRowsInSegment() > tuningConfig.getMaxRowsPerSegment()) {
                         segmentsToMoveOut.computeIfAbsent(sequenceName, k -> new HashSet<>())
-                                         .add(addResult.getSegmentIdentifier());
+                            .add(addResult.getSegmentIdentifier());
                       }
                       isPersistRequired |= addResult.isPersistRequired();
                     } else {
                       // Failure to allocate segment puts determinism at risk, bail out to be safe.
                       // May want configurable behavior here at some point.
-                      // If we allow continuing, then consider blacklisting the interval for a while to avoid constant checks.
+                      // If we allow continuing, then consider blacklisting the interval for a while
+                      // to avoid constant checks.
                       throw new ISE("Could not allocate segment for row with timestamp[%s]", row.getTimestamp());
                     }
 
@@ -486,8 +440,7 @@ public class LegacyKafkaIndexTaskRunner extends SeekableStreamIndexTaskRunner<In
                 segmentsToMoveOut.forEach((String sequence, Set<SegmentIdWithShardSpec> segments) -> {
                   driver.moveSegmentOut(sequence, new ArrayList<>(segments));
                 });
-              }
-              catch (ParseException e) {
+              } catch (ParseException e) {
                 handleParseException(e, record);
               }
 
@@ -503,12 +456,10 @@ public class LegacyKafkaIndexTaskRunner extends SeekableStreamIndexTaskRunner<In
           }
         }
         ingestionState = IngestionState.COMPLETED;
-      }
-      catch (Exception e) {
+      } catch (Exception e) {
         log.error(e, "Encountered exception in runLegacy() before persisting.");
         throw e;
-      }
-      finally {
+      } finally {
         driver.persist(committerSupplier.get()); // persist pending data
       }
 
@@ -521,19 +472,13 @@ public class LegacyKafkaIndexTaskRunner extends SeekableStreamIndexTaskRunner<In
       }
 
       final TransactionalSegmentPublisher publisher = (segments, commitMetadata) -> {
-        final SeekableStreamEndSequenceNumbers<Integer, Long> finalPartitions = toolbox.getObjectMapper().convertValue(
+        final SeekableStreamStartSequenceNumbers<Integer, Long> finalPartitions = toolbox.getObjectMapper().convertValue(
             ((Map) Preconditions.checkNotNull(commitMetadata, "commitMetadata")).get(METADATA_NEXT_PARTITIONS),
-            toolbox.getObjectMapper()
-                   .getTypeFactory()
-                   .constructParametrizedType(
-                       SeekableStreamEndSequenceNumbers.class,
-                       SeekableStreamEndSequenceNumbers.class,
-                       Integer.class,
-                       Long.class
-                   )
-        );
+            toolbox.getObjectMapper().getTypeFactory().constructParametrizedType(SeekableStreamStartSequenceNumbers.class,
+                SeekableStreamStartSequenceNumbers.class, Integer.class, Long.class));
 
-        // Sanity check, we should only be publishing things that match our desired end state.
+        // Sanity check, we should only be publishing things that match our desired end
+        // state.
         if (!endOffsets.equals(finalPartitions.getPartitionSequenceNumberMap())) {
           throw new ISE("WTF?! Driver attempted to publish invalid metadata[%s].", commitMetadata);
         }
@@ -541,11 +486,9 @@ public class LegacyKafkaIndexTaskRunner extends SeekableStreamIndexTaskRunner<In
         final SegmentTransactionalInsertAction action;
 
         if (ioConfig.isUseTransaction()) {
-          action = new SegmentTransactionalInsertAction(
-              segments,
+          action = new SegmentTransactionalInsertAction(segments,
               new KafkaDataSourceMetadata(ioConfig.getStartSequenceNumbers()),
-              new KafkaDataSourceMetadata(finalPartitions)
-          );
+              new KafkaDataSourceMetadata(finalPartitions));
         } else {
           action = new SegmentTransactionalInsertAction(segments, null, null);
         }
@@ -555,20 +498,15 @@ public class LegacyKafkaIndexTaskRunner extends SeekableStreamIndexTaskRunner<In
         return toolbox.getTaskActionClient().submit(action);
       };
 
-      // Supervised kafka tasks are killed by KafkaSupervisor if they are stuck during publishing segments or waiting
+      // Supervised kafka tasks are killed by KafkaSupervisor if they are stuck during
+      // publishing segments or waiting
       // for hand off. See KafkaSupervisorIOConfig.completionTimeout.
-      final SegmentsAndMetadata published = driver.publish(
-          publisher,
-          committerSupplier.get(),
-          sequenceNames.values()
-      ).get();
+      final SegmentsAndMetadata published = driver.publish(publisher, committerSupplier.get(), sequenceNames.values())
+          .get();
 
       List<?> publishedSegmentIds = Lists.transform(published.getSegments(), DataSegment::getId);
-      log.info(
-          "Published segments %s with metadata[%s].",
-          publishedSegmentIds,
-          Preconditions.checkNotNull(published.getCommitMetadata(), "commitMetadata")
-      );
+      log.info("Published segments %s with metadata[%s].", publishedSegmentIds,
+          Preconditions.checkNotNull(published.getCommitMetadata(), "commitMetadata"));
 
       final Future<SegmentsAndMetadata> handoffFuture = driver.registerHandoff(published);
       SegmentsAndMetadata handedOff = null;
@@ -577,40 +515,36 @@ public class LegacyKafkaIndexTaskRunner extends SeekableStreamIndexTaskRunner<In
       } else {
         try {
           handedOff = handoffFuture.get(tuningConfig.getHandoffConditionTimeout(), TimeUnit.MILLISECONDS);
-        }
-        catch (TimeoutException e) {
+        } catch (TimeoutException e) {
           log.makeAlert("Timed out after [%d] millis waiting for handoffs", tuningConfig.getHandoffConditionTimeout())
-             .addData("TaskId", task.getId())
-             .emit();
+              .addData("TaskId", task.getId()).emit();
         }
       }
 
       if (handedOff == null) {
         log.warn("Failed to handoff segments %s", publishedSegmentIds);
       } else {
-        log.info(
-            "Handoff completed for segments %s with metadata[%s]",
+        log.info("Handoff completed for segments %s with metadata[%s]",
             Lists.transform(handedOff.getSegments(), DataSegment::getId),
-            Preconditions.checkNotNull(handedOff.getCommitMetadata(), "commitMetadata")
-        );
+            Preconditions.checkNotNull(handedOff.getCommitMetadata(), "commitMetadata"));
       }
-    }
-    catch (InterruptedException | RejectedExecutionException e) {
-      // handle the InterruptedException that gets wrapped in a RejectedExecutionException
+    } catch (InterruptedException | RejectedExecutionException e) {
+      // handle the InterruptedException that gets wrapped in a
+      // RejectedExecutionException
       if (e instanceof RejectedExecutionException
           && (e.getCause() == null || !(e.getCause() instanceof InterruptedException))) {
         throw e;
       }
 
-      // if we were interrupted because we were asked to stop, handle the exception and return success, else rethrow
+      // if we were interrupted because we were asked to stop, handle the exception
+      // and return success, else rethrow
       if (!stopRequested.get()) {
         Thread.currentThread().interrupt();
         throw e;
       }
 
       log.info("The task was asked to stop before completing");
-    }
-    finally {
+    } finally {
       if (chatHandlerProvider.isPresent()) {
         chatHandlerProvider.get().unregister(task.getId());
       }
@@ -620,37 +554,28 @@ public class LegacyKafkaIndexTaskRunner extends SeekableStreamIndexTaskRunner<In
     }
 
     toolbox.getTaskReportFileWriter().write(getTaskCompletionReports(null));
-    return TaskStatus.success(
-        task.getId(),
-        null
-    );
+    return TaskStatus.success(task.getId(), null);
   }
 
   @Override
-  protected boolean isEndOfShard(Long seqNum)
-  {
+  protected boolean isEndOfShard(Long seqNum) {
     return false;
   }
 
   @Override
-  public TypeReference<List<SequenceMetadata<Integer, Long>>> getSequenceMetadataTypeReference()
-  {
-    return new TypeReference<List<SequenceMetadata<Integer, Long>>>()
-    {
+  public TypeReference<List<SequenceMetadata<Integer, Long>>> getSequenceMetadataTypeReference() {
+    return new TypeReference<List<SequenceMetadata<Integer, Long>>>() {
     };
   }
 
   @Nonnull
   @Override
-  protected List<OrderedPartitionableRecord<Integer, Long>> getRecords(
-      RecordSupplier<Integer, Long> recordSupplier, TaskToolbox toolbox
-  )
-  {
+  protected List<OrderedPartitionableRecord<Integer, Long>> getRecords(RecordSupplier<Integer, Long> recordSupplier,
+      TaskToolbox toolbox) {
     throw new UnsupportedOperationException();
   }
 
-  private Set<Integer> assignPartitionsAndSeekToNext(KafkaConsumer consumer, String topic)
-  {
+  private Set<Integer> assignPartitionsAndSeekToNext(KafkaConsumer consumer, String topic) {
     // Initialize consumer assignment.
     final Set<Integer> assignment = new HashSet<>();
     for (Map.Entry<Integer, Long> entry : nextOffsets.entrySet()) {
@@ -660,11 +585,7 @@ public class LegacyKafkaIndexTaskRunner extends SeekableStreamIndexTaskRunner<In
       } else if (entry.getValue() == endOffset) {
         log.info("Finished reading partition[%d].", entry.getKey());
       } else {
-        throw new ISE(
-            "WTF?! Cannot start from offset[%,d] > endOffset[%,d]",
-            entry.getValue(),
-            endOffset
-        );
+        throw new ISE("WTF?! Cannot start from offset[%,d] > endOffset[%,d]", entry.getValue(), endOffset);
       }
     }
 
@@ -681,15 +602,16 @@ public class LegacyKafkaIndexTaskRunner extends SeekableStreamIndexTaskRunner<In
   }
 
   /**
-   * Checks if the pauseRequested flag was set and if so blocks until pauseRequested is cleared.
+   * Checks if the pauseRequested flag was set and if so blocks until
+   * pauseRequested is cleared.
    * <p/>
-   * Sets paused = true and signals paused so callers can be notified when the pause command has been accepted.
+   * Sets paused = true and signals paused so callers can be notified when the
+   * pause command has been accepted.
    * <p/>
    *
    * @return true if a pause request was handled, false otherwise
    */
-  private boolean possiblyPause() throws InterruptedException
-  {
+  private boolean possiblyPause() throws InterruptedException {
     pauseLock.lockInterruptibly();
     try {
       if (pauseRequested) {
@@ -706,8 +628,7 @@ public class LegacyKafkaIndexTaskRunner extends SeekableStreamIndexTaskRunner<In
         log.info("Ingestion loop resumed");
         return true;
       }
-    }
-    finally {
+    } finally {
       pauseLock.unlock();
     }
 
@@ -715,36 +636,24 @@ public class LegacyKafkaIndexTaskRunner extends SeekableStreamIndexTaskRunner<In
   }
 
   @Override
-  protected void possiblyResetDataSourceMetadata(
-      TaskToolbox toolbox,
-      RecordSupplier<Integer, Long> recordSupplier,
-      Set<StreamPartition<Integer>> assignment
-  )
-  {
+  protected void possiblyResetDataSourceMetadata(TaskToolbox toolbox, RecordSupplier<Integer, Long> recordSupplier,
+      Set<StreamPartition<Integer>> assignment) {
     throw new UnsupportedOperationException();
   }
 
   @Override
-  protected boolean isEndOffsetExclusive()
-  {
+  protected boolean isEndOffsetExclusive() {
     return true;
   }
 
   @Override
-  protected SeekableStreamEndSequenceNumbers<Integer, Long> deserializePartitionsFromMetadata(
-      ObjectMapper mapper,
-      Object object
-  )
-  {
+  protected SeekableStreamStartSequenceNumbers<Integer, Long> deserializePartitionsFromMetadata(ObjectMapper mapper,
+      Object object) {
     throw new UnsupportedOperationException();
   }
 
-  private void possiblyResetOffsetsOrWait(
-      Map<TopicPartition, Long> outOfRangePartitions,
-      KafkaConsumer<byte[], byte[]> consumer,
-      TaskToolbox taskToolbox
-  ) throws InterruptedException, IOException
-  {
+  private void possiblyResetOffsetsOrWait(Map<TopicPartition, Long> outOfRangePartitions,
+      KafkaConsumer<byte[], byte[]> consumer, TaskToolbox taskToolbox) throws InterruptedException, IOException {
     final Map<TopicPartition, Long> resetPartitions = new HashMap<>();
     boolean doReset = false;
     if (tuningConfig.isResetOffsetAutomatically()) {
@@ -776,36 +685,26 @@ public class LegacyKafkaIndexTaskRunner extends SeekableStreamIndexTaskRunner<In
         while (nanos > 0L && !pauseRequested && !stopRequested.get()) {
           nanos = isAwaitingRetry.awaitNanos(nanos);
         }
-      }
-      finally {
+      } finally {
         pollRetryLock.unlock();
       }
     }
   }
 
   private void sendResetRequestAndWaitLegacy(Map<TopicPartition, Long> outOfRangePartitions, TaskToolbox taskToolbox)
-      throws IOException
-  {
+      throws IOException {
     Map<Integer, Long> partitionOffsetMap = new HashMap<>();
     for (Map.Entry<TopicPartition, Long> outOfRangePartition : outOfRangePartitions.entrySet()) {
       partitionOffsetMap.put(outOfRangePartition.getKey().partition(), outOfRangePartition.getValue());
     }
     boolean result = taskToolbox.getTaskActionClient()
-                                .submit(new ResetDataSourceMetadataAction(
-                                    task.getDataSource(),
-                                    new KafkaDataSourceMetadata(
-                                        new SeekableStreamStartSequenceNumbers<>(
-                                            ioConfig.getStartSequenceNumbers().getStream(),
-                                            partitionOffsetMap,
-                                            Collections.emptySet()
-                                        )
-                                    )
-                                ));
+        .submit(new ResetDataSourceMetadataAction(task.getDataSource(),
+            new KafkaDataSourceMetadata(new SeekableStreamStartSequenceNumbers<>(
+                ioConfig.getStartSequenceNumbers().getStream(), partitionOffsetMap, Collections.emptySet()))));
 
     if (result) {
       log.makeAlert("Resetting Kafka offsets for datasource [%s]", task.getDataSource())
-         .addData("partitions", partitionOffsetMap.keySet())
-         .emit();
+          .addData("partitions", partitionOffsetMap.keySet()).emit();
       // wait for being killed by supervisor
       requestPause();
     } else {
@@ -813,19 +712,16 @@ public class LegacyKafkaIndexTaskRunner extends SeekableStreamIndexTaskRunner<In
     }
   }
 
-  private void requestPause()
-  {
+  private void requestPause() {
     pauseRequested = true;
   }
 
   @Override
-  protected Long getNextStartOffset(Long sequenceNumber)
-  {
+  protected Long getNextStartOffset(Long sequenceNumber) {
     throw new UnsupportedOperationException();
   }
 
-  private void handleParseException(ParseException pe, ConsumerRecord<byte[], byte[]> record)
-  {
+  private void handleParseException(ParseException pe, ConsumerRecord<byte[], byte[]> record) {
     if (pe.isFromPartiallyValidRow()) {
       rowIngestionMeters.incrementProcessedWithError();
     } else {
@@ -833,65 +729,45 @@ public class LegacyKafkaIndexTaskRunner extends SeekableStreamIndexTaskRunner<In
     }
 
     if (tuningConfig.isLogParseExceptions()) {
-      log.error(
-          pe,
-          "Encountered parse exception on row from partition[%d] offset[%d]",
-          record.partition(),
-          record.offset()
-      );
+      log.error(pe, "Encountered parse exception on row from partition[%d] offset[%d]", record.partition(),
+          record.offset());
     }
 
     if (savedParseExceptions != null) {
       savedParseExceptions.add(pe);
     }
 
-    if (rowIngestionMeters.getUnparseable() + rowIngestionMeters.getProcessedWithError()
-        > tuningConfig.getMaxParseExceptions()) {
+    if (rowIngestionMeters.getUnparseable() + rowIngestionMeters.getProcessedWithError() > tuningConfig
+        .getMaxParseExceptions()) {
       log.error("Max parse exceptions exceeded, terminating task...");
       throw new RuntimeException("Max parse exceptions exceeded, terminating task...");
     }
   }
 
-  private Map<String, TaskReport> getTaskCompletionReports(@Nullable String errorMsg)
-  {
+  private Map<String, TaskReport> getTaskCompletionReports(@Nullable String errorMsg) {
     return TaskReport.buildTaskReports(
-        new IngestionStatsAndErrorsTaskReport(
-            task.getId(),
-            new IngestionStatsAndErrorsTaskReportData(
-                ingestionState,
-                getTaskCompletionUnparseableEvents(),
-                getTaskCompletionRowStats(),
-                errorMsg
-            )
-        )
-    );
+        new IngestionStatsAndErrorsTaskReport(task.getId(), new IngestionStatsAndErrorsTaskReportData(ingestionState,
+            getTaskCompletionUnparseableEvents(), getTaskCompletionRowStats(), errorMsg)));
   }
 
-  private Map<String, Object> getTaskCompletionUnparseableEvents()
-  {
+  private Map<String, Object> getTaskCompletionUnparseableEvents() {
     Map<String, Object> unparseableEventsMap = new HashMap<>();
-    List<String> buildSegmentsParseExceptionMessages = IndexTaskUtils.getMessagesFromSavedParseExceptions(
-        savedParseExceptions
-    );
+    List<String> buildSegmentsParseExceptionMessages = IndexTaskUtils
+        .getMessagesFromSavedParseExceptions(savedParseExceptions);
     if (buildSegmentsParseExceptionMessages != null) {
       unparseableEventsMap.put(RowIngestionMeters.BUILD_SEGMENTS, buildSegmentsParseExceptionMessages);
     }
     return unparseableEventsMap;
   }
 
-  private Map<String, Object> getTaskCompletionRowStats()
-  {
+  private Map<String, Object> getTaskCompletionRowStats() {
     Map<String, Object> metrics = new HashMap<>();
-    metrics.put(
-        RowIngestionMeters.BUILD_SEGMENTS,
-        rowIngestionMeters.getTotals()
-    );
+    metrics.put(RowIngestionMeters.BUILD_SEGMENTS, rowIngestionMeters.getTotals());
     return metrics;
   }
 
   @Override
-  public void stopGracefully()
-  {
+  public void stopGracefully() {
     log.info("Stopping gracefully (status: [%s])", status);
     stopRequested.set(true);
 
@@ -909,8 +785,7 @@ public class LegacyKafkaIndexTaskRunner extends SeekableStreamIndexTaskRunner<In
             pauseRequested = false;
             shouldResume.signalAll();
           }
-        }
-        finally {
+        } finally {
           pauseLock.unlock();
         }
       } else {
@@ -922,16 +797,14 @@ public class LegacyKafkaIndexTaskRunner extends SeekableStreamIndexTaskRunner<In
       if (pollRetryLock.tryLock(SeekableStreamIndexTask.LOCK_ACQUIRE_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
         try {
           isAwaitingRetry.signalAll();
-        }
-        finally {
+        } finally {
           pollRetryLock.unlock();
         }
       } else {
         log.warn("While stopping: failed to acquire pollRetryLock before timeout, interrupting run thread");
         runThread.interrupt();
       }
-    }
-    catch (Exception e) {
+    } catch (Exception e) {
       Throwables.propagate(e);
     }
   }
@@ -941,16 +814,14 @@ public class LegacyKafkaIndexTaskRunner extends SeekableStreamIndexTaskRunner<In
    *
    * @return authorization result
    */
-  private Access authorizationCheck(final HttpServletRequest req, Action action)
-  {
+  private Access authorizationCheck(final HttpServletRequest req, Action action) {
     return IndexTaskUtils.datasourceAuthorizationCheck(req, action, task.getDataSource(), authorizerMapper);
   }
 
   @Override
   @POST
   @Path("/stop")
-  public Response stop(@Context final HttpServletRequest req)
-  {
+  public Response stop(@Context final HttpServletRequest req) {
     authorizationCheck(req, Action.WRITE);
     stopGracefully();
     return Response.status(Response.Status.OK).build();
@@ -960,15 +831,13 @@ public class LegacyKafkaIndexTaskRunner extends SeekableStreamIndexTaskRunner<In
   @GET
   @Path("/status")
   @Produces(MediaType.APPLICATION_JSON)
-  public Status getStatusHTTP(@Context final HttpServletRequest req)
-  {
+  public Status getStatusHTTP(@Context final HttpServletRequest req) {
     authorizationCheck(req, Action.READ);
     return status;
   }
 
   @Override
-  public Status getStatus()
-  {
+  public Status getStatus() {
     return status;
   }
 
@@ -976,15 +845,13 @@ public class LegacyKafkaIndexTaskRunner extends SeekableStreamIndexTaskRunner<In
   @GET
   @Path("/offsets/current")
   @Produces(MediaType.APPLICATION_JSON)
-  public Map<Integer, Long> getCurrentOffsets(@Context final HttpServletRequest req)
-  {
+  public Map<Integer, Long> getCurrentOffsets(@Context final HttpServletRequest req) {
     authorizationCheck(req, Action.READ);
     return getCurrentOffsets();
   }
 
   @Override
-  public ConcurrentMap<Integer, Long> getCurrentOffsets()
-  {
+  public ConcurrentMap<Integer, Long> getCurrentOffsets() {
     return nextOffsets;
   }
 
@@ -992,21 +859,18 @@ public class LegacyKafkaIndexTaskRunner extends SeekableStreamIndexTaskRunner<In
   @GET
   @Path("/offsets/end")
   @Produces(MediaType.APPLICATION_JSON)
-  public Map<Integer, Long> getEndOffsetsHTTP(@Context final HttpServletRequest req)
-  {
+  public Map<Integer, Long> getEndOffsetsHTTP(@Context final HttpServletRequest req) {
     authorizationCheck(req, Action.READ);
     return getEndOffsets();
   }
 
   @Override
-  public Map<Integer, Long> getEndOffsets()
-  {
+  public Map<Integer, Long> getEndOffsets() {
     return endOffsets;
   }
 
   @Override
-  public Response setEndOffsets(Map<Integer, Long> sequenceNumbers, boolean finish) throws InterruptedException
-  {
+  public Response setEndOffsets(Map<Integer, Long> sequenceNumbers, boolean finish) throws InterruptedException {
     // finish is not used in this mode
     return setEndOffsets(sequenceNumbers);
   }
@@ -1015,11 +879,8 @@ public class LegacyKafkaIndexTaskRunner extends SeekableStreamIndexTaskRunner<In
   @Path("/offsets/end")
   @Consumes(MediaType.APPLICATION_JSON)
   @Produces(MediaType.APPLICATION_JSON)
-  public Response setEndOffsetsHTTP(
-      Map<Integer, Long> offsets,
-      @Context final HttpServletRequest req
-  ) throws InterruptedException
-  {
+  public Response setEndOffsetsHTTP(Map<Integer, Long> offsets, @Context final HttpServletRequest req)
+      throws InterruptedException {
     authorizationCheck(req, Action.WRITE);
     return setEndOffsets(offsets);
   }
@@ -1028,23 +889,14 @@ public class LegacyKafkaIndexTaskRunner extends SeekableStreamIndexTaskRunner<In
   @GET
   @Path("/rowStats")
   @Produces(MediaType.APPLICATION_JSON)
-  public Response getRowStats(
-      @Context final HttpServletRequest req
-  )
-  {
+  public Response getRowStats(@Context final HttpServletRequest req) {
     authorizationCheck(req, Action.READ);
     Map<String, Object> returnMap = new HashMap<>();
     Map<String, Object> totalsMap = new HashMap<>();
     Map<String, Object> averagesMap = new HashMap<>();
 
-    totalsMap.put(
-        RowIngestionMeters.BUILD_SEGMENTS,
-        rowIngestionMeters.getTotals()
-    );
-    averagesMap.put(
-        RowIngestionMeters.BUILD_SEGMENTS,
-        rowIngestionMeters.getMovingAverages()
-    );
+    totalsMap.put(RowIngestionMeters.BUILD_SEGMENTS, rowIngestionMeters.getTotals());
+    averagesMap.put(RowIngestionMeters.BUILD_SEGMENTS, rowIngestionMeters.getMovingAverages());
 
     returnMap.put("movingAverages", averagesMap);
     returnMap.put("totals", totalsMap);
@@ -1055,60 +907,41 @@ public class LegacyKafkaIndexTaskRunner extends SeekableStreamIndexTaskRunner<In
   @GET
   @Path("/unparseableEvents")
   @Produces(MediaType.APPLICATION_JSON)
-  public Response getUnparseableEvents(
-      @Context final HttpServletRequest req
-  )
-  {
+  public Response getUnparseableEvents(@Context final HttpServletRequest req) {
     authorizationCheck(req, Action.READ);
     List<String> events = IndexTaskUtils.getMessagesFromSavedParseExceptions(savedParseExceptions);
     return Response.ok(events).build();
   }
 
-  public Response setEndOffsets(
-      Map<Integer, Long> offsets
-  ) throws InterruptedException
-  {
+  public Response setEndOffsets(Map<Integer, Long> offsets) throws InterruptedException {
     if (offsets == null) {
       return Response.status(Response.Status.BAD_REQUEST)
-                     .entity("Request body must contain a map of { partition:endOffset }")
-                     .build();
+          .entity("Request body must contain a map of { partition:endOffset }").build();
     } else if (!endOffsets.keySet().containsAll(offsets.keySet())) {
-      return Response.status(Response.Status.BAD_REQUEST)
-                     .entity(
-                         StringUtils.format(
-                             "Request contains partitions not being handled by this task, my partitions: %s",
-                             endOffsets.keySet()
-                         )
-                     )
-                     .build();
+      return Response.status(Response.Status.BAD_REQUEST).entity(StringUtils
+          .format("Request contains partitions not being handled by this task, my partitions: %s", endOffsets.keySet()))
+          .build();
     }
 
     pauseLock.lockInterruptibly();
     try {
       if (!isPaused()) {
         return Response.status(Response.Status.BAD_REQUEST)
-                       .entity("Task must be paused before changing the end offsets")
-                       .build();
+            .entity("Task must be paused before changing the end offsets").build();
       }
 
       for (Map.Entry<Integer, Long> entry : offsets.entrySet()) {
         if (entry.getValue().compareTo(nextOffsets.get(entry.getKey())) < 0) {
           return Response.status(Response.Status.BAD_REQUEST)
-                         .entity(
-                             StringUtils.format(
-                                 "End offset must be >= current offset for partition [%s] (current: %s)",
-                                 entry.getKey(),
-                                 nextOffsets.get(entry.getKey())
-                             )
-                         )
-                         .build();
+              .entity(StringUtils.format("End offset must be >= current offset for partition [%s] (current: %s)",
+                  entry.getKey(), nextOffsets.get(entry.getKey())))
+              .build();
         }
       }
 
       endOffsets.putAll(offsets);
       log.info("endOffsets changed to %s", endOffsets);
-    }
-    finally {
+    } finally {
       pauseLock.unlock();
     }
 
@@ -1117,37 +950,33 @@ public class LegacyKafkaIndexTaskRunner extends SeekableStreamIndexTaskRunner<In
     return Response.ok(endOffsets).build();
   }
 
-  private boolean isPaused()
-  {
+  private boolean isPaused() {
     return status == Status.PAUSED;
   }
 
   /**
    * Signals the ingestion loop to pause.
    *
-   * @return one of the following Responses: 400 Bad Request if the task has started publishing; 202 Accepted if the
-   * method has timed out and returned before the task has paused; 200 OK with a map of the current partition offsets
-   * in the response body if the task successfully paused
+   * @return one of the following Responses: 400 Bad Request if the task has
+   *         started publishing; 202 Accepted if the method has timed out and
+   *         returned before the task has paused; 200 OK with a map of the current
+   *         partition offsets in the response body if the task successfully
+   *         paused
    */
   @Override
   @POST
   @Path("/pause")
   @Produces(MediaType.APPLICATION_JSON)
-  public Response pauseHTTP(
-      @Context final HttpServletRequest req
-  ) throws InterruptedException
-  {
+  public Response pauseHTTP(@Context final HttpServletRequest req) throws InterruptedException {
     authorizationCheck(req, Action.WRITE);
     return pause();
   }
 
   @Override
-  public Response pause() throws InterruptedException
-  {
+  public Response pause() throws InterruptedException {
     if (!(status == Status.PAUSED || status == Status.READING)) {
       return Response.status(Response.Status.BAD_REQUEST)
-                     .entity(StringUtils.format("Can't pause, task is not in a pausable state (state: [%s])", status))
-                     .build();
+          .entity(StringUtils.format("Can't pause, task is not in a pausable state (state: [%s])", status)).build();
     }
 
     pauseLock.lockInterruptibly();
@@ -1157,8 +986,7 @@ public class LegacyKafkaIndexTaskRunner extends SeekableStreamIndexTaskRunner<In
       pollRetryLock.lockInterruptibly();
       try {
         isAwaitingRetry.signalAll();
-      }
-      finally {
+      } finally {
         pollRetryLock.unlock();
       }
 
@@ -1169,21 +997,18 @@ public class LegacyKafkaIndexTaskRunner extends SeekableStreamIndexTaskRunner<In
       long nanos = TimeUnit.SECONDS.toNanos(2);
       while (!isPaused()) {
         if (nanos <= 0L) {
-          return Response.status(Response.Status.ACCEPTED)
-                         .entity("Request accepted but task has not yet paused")
-                         .build();
+          return Response.status(Response.Status.ACCEPTED).entity("Request accepted but task has not yet paused")
+              .build();
         }
         nanos = hasPaused.awaitNanos(nanos);
       }
-    }
-    finally {
+    } finally {
       pauseLock.unlock();
     }
 
     try {
       return Response.ok().entity(objectMapper.writeValueAsString(getCurrentOffsets())).build();
-    }
-    catch (JsonProcessingException e) {
+    } catch (JsonProcessingException e) {
       throw Throwables.propagate(e);
     }
   }
@@ -1191,16 +1016,14 @@ public class LegacyKafkaIndexTaskRunner extends SeekableStreamIndexTaskRunner<In
   @Override
   @POST
   @Path("/resume")
-  public Response resumeHTTP(@Context final HttpServletRequest req) throws InterruptedException
-  {
+  public Response resumeHTTP(@Context final HttpServletRequest req) throws InterruptedException {
     authorizationCheck(req, Action.WRITE);
     resume();
     return Response.status(Response.Status.OK).build();
   }
 
   @Override
-  public void resume() throws InterruptedException
-  {
+  public void resume() throws InterruptedException {
     pauseLock.lockInterruptibly();
     try {
       pauseRequested = false;
@@ -1213,23 +1036,19 @@ public class LegacyKafkaIndexTaskRunner extends SeekableStreamIndexTaskRunner<In
         }
         nanos = shouldResume.awaitNanos(nanos);
       }
-    }
-    finally {
+    } finally {
       pauseLock.unlock();
     }
   }
 
   @Override
   protected SeekableStreamDataSourceMetadata<Integer, Long> createDataSourceMetadata(
-      SeekableStreamSequenceNumbers<Integer, Long> partitions
-  )
-  {
+      SeekableStreamSequenceNumbers<Integer, Long> partitions) {
     throw new UnsupportedOperationException();
   }
 
   @Override
-  protected OrderedSequenceNumber<Long> createSequenceNumber(Long sequenceNumber)
-  {
+  protected OrderedSequenceNumber<Long> createSequenceNumber(Long sequenceNumber) {
     throw new UnsupportedOperationException();
   }
 
@@ -1237,19 +1056,15 @@ public class LegacyKafkaIndexTaskRunner extends SeekableStreamIndexTaskRunner<In
   @GET
   @Path("/time/start")
   @Produces(MediaType.APPLICATION_JSON)
-  public DateTime getStartTime(@Context final HttpServletRequest req)
-  {
+  public DateTime getStartTime(@Context final HttpServletRequest req) {
     authorizationCheck(req, Action.WRITE);
     return startTime;
   }
 
   @Nullable
   @Override
-  protected TreeMap<Integer, Map<Integer, Long>> getCheckPointsFromContext(
-      TaskToolbox toolbox,
-      String checkpointsString
-  )
-  {
+  protected TreeMap<Integer, Map<Integer, Long>> getCheckPointsFromContext(TaskToolbox toolbox,
+      String checkpointsString) {
     throw new UnsupportedOperationException();
   }
 

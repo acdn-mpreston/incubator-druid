@@ -22,7 +22,7 @@ package org.apache.druid.indexing.kinesis;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.base.Preconditions;
-import org.apache.druid.indexing.seekablestream.SeekableStreamEndSequenceNumbers;
+import org.apache.druid.indexing.seekablestream.SeekableStreamStartSequenceNumbers;
 import org.apache.druid.indexing.seekablestream.SeekableStreamIndexTaskIOConfig;
 import org.apache.druid.indexing.seekablestream.SeekableStreamStartSequenceNumbers;
 import org.joda.time.DateTime;
@@ -47,7 +47,7 @@ public class KinesisIndexTaskIOConfig extends SeekableStreamIndexTaskIOConfig<St
       @JsonProperty("taskGroupId") @Nullable Integer taskGroupId,
       @JsonProperty("baseSequenceName") String baseSequenceName,
       @JsonProperty("startSequenceNumbers") SeekableStreamStartSequenceNumbers<String, String> startSequenceNumbers,
-      @JsonProperty("endSequenceNumbers") SeekableStreamEndSequenceNumbers<String, String> endSequenceNumbers,
+      @JsonProperty("endSequenceNumbers") SeekableStreamStartSequenceNumbers<String, String> endSequenceNumbers,
       @JsonProperty("useTransaction") Boolean useTransaction,
       @JsonProperty("minimumMessageTime") DateTime minimumMessageTime,
       @JsonProperty("maximumMessageTime") DateTime maximumMessageTime,
