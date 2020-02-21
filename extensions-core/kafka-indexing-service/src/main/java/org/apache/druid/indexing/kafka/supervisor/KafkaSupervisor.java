@@ -24,6 +24,9 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Joiner;
+
+import org.apache.druid.data.input.InputFormat;
+import org.apache.druid.data.input.impl.JsonInputFormat;
 import org.apache.druid.indexing.common.stats.RowIngestionMetersFactory;
 import org.apache.druid.indexing.common.task.Task;
 import org.apache.druid.indexing.common.task.TaskResource;
@@ -212,6 +215,7 @@ public class KafkaSupervisor extends SeekableStreamSupervisor<Integer, Long>
   )
   {
     KafkaSupervisorIOConfig kafkaIoConfig = (KafkaSupervisorIOConfig) ioConfig;
+    InputFormat inputFormat = new JsonInputFormat(null, null);
     return new KafkaIndexTaskIOConfig(
         groupId,
         baseSequenceName,

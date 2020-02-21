@@ -23,12 +23,16 @@ import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.base.Preconditions;
 import org.apache.druid.data.input.InputFormat;
+import org.apache.druid.data.input.impl.JsonInputFormat;
+import org.apache.druid.data.input.impl.ParseSpec;
 import org.apache.druid.indexing.seekablestream.supervisor.SeekableStreamSupervisorIOConfig;
 import org.apache.druid.java.util.common.StringUtils;
 import org.joda.time.DateTime;
 import org.joda.time.Period;
 
 import java.util.Map;
+
+import javax.annotation.Nullable;
 
 public class KafkaSupervisorIOConfig extends SeekableStreamSupervisorIOConfig
 {
@@ -105,6 +109,17 @@ public class KafkaSupervisorIOConfig extends SeekableStreamSupervisorIOConfig
   public boolean isUseEarliestOffset()
   {
     return isUseEarliestSequenceNumber();
+  }
+
+  @Nullable
+  @Override
+  public InputFormat getInputFormat(@Nullable ParseSpec parseSpec)
+  {
+    if (inputFormat == null) {
+      return new JsonInputFormat(null, null);
+    } else {
+      return inputFormat;
+    }
   }
 
   @Override

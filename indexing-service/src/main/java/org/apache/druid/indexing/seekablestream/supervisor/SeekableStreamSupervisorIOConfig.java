@@ -36,7 +36,7 @@ public abstract class SeekableStreamSupervisorIOConfig
 {
   private final String stream;
   @Nullable
-  private final InputFormat inputFormat; // nullable for backward compatibility
+  protected final InputFormat inputFormat; // nullable for backward compatibility
   private final Integer replicas;
   private final Integer taskCount;
   private final Duration taskDuration;
