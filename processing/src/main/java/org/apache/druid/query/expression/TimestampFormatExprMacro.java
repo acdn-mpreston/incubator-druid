@@ -21,23 +21,28 @@ package org.apache.druid.query.expression;
 
 import com.google.common.base.Preconditions;
 import org.apache.druid.java.util.common.IAE;
+import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.math.expr.Expr;
 import org.apache.druid.math.expr.ExprEval;
 import org.apache.druid.math.expr.ExprMacroTable;
+import org.apache.druid.math.expr.ExprType;
 import org.joda.time.DateTimeZone;
 import org.joda.time.format.DateTimeFormat;
 import org.joda.time.format.DateTimeFormatter;
 import org.joda.time.format.ISODateTimeFormat;
 
 import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 import java.util.List;
 
 public class TimestampFormatExprMacro implements ExprMacroTable.ExprMacro
 {
+  private static final String FN_NAME = "timestamp_format";
+
   @Override
   public String name()
   {
-    return "timestamp_format";
+    return FN_NAME;
   }
 
   @Override
@@ -65,14 +70,14 @@ public class TimestampFormatExprMacro implements ExprMacroTable.ExprMacro
     }
 
     final DateTimeFormatter formatter = formatString == null
-                                        ? ISODateTimeFormat.dateTime()
+                                        ? ISODateTimeFormat.dateTime().withZone(timeZone)
                                         : DateTimeFormat.forPattern(formatString).withZone(timeZone);
 
     class TimestampFormatExpr extends ExprMacroTable.BaseScalarUnivariateMacroFunctionExpr
     {
       private TimestampFormatExpr(Expr arg)
       {
-        super(arg);
+        super(FN_NAME, arg);
       }
 
       @Nonnull
@@ -92,6 +97,31 @@ public class TimestampFormatExprMacro implements ExprMacroTable.ExprMacro
       {
         Expr newArg = arg.visit(shuttle);
         return shuttle.visit(new TimestampFormatExpr(newArg));
+      }
+
+      @Nullable
+      @Override
+      public ExprType getOutputType(InputBindingInspector inspector)
+      {
+        return ExprType.STRING;
+      }
+
+      @Override
+      public String stringify()
+      {
+        if (args.size() > 2) {
+          return StringUtils.format(
+              "%s(%s, %s, %s)",
+              FN_NAME,
+              arg.stringify(),
+              args.get(1).stringify(),
+              args.get(2).stringify()
+          );
+        }
+        if (args.size() > 1) {
+          return StringUtils.format("%s(%s, %s)", FN_NAME, arg.stringify(), args.get(1).stringify());
+        }
+        return super.stringify();
       }
     }
 

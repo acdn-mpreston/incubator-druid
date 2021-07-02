@@ -22,7 +22,6 @@ package org.apache.druid.indexer;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.google.common.base.Predicate;
 import com.google.common.base.Strings;
-import com.google.common.io.Files;
 import org.apache.druid.java.util.common.DateTimes;
 import org.apache.druid.java.util.common.FileUtils;
 import org.apache.druid.java.util.common.IAE;
@@ -49,6 +48,7 @@ import org.apache.hadoop.mapreduce.TaskAttemptID;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.util.Progressable;
 
+import javax.annotation.Nullable;
 import java.io.BufferedOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
@@ -60,7 +60,8 @@ import java.io.OutputStreamWriter;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
-import java.util.Arrays;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
@@ -77,8 +78,8 @@ public class JobHelper
   private static final Logger log = new Logger(JobHelper.class);
   private static final int NUM_RETRIES = 8;
   private static final int SECONDS_BETWEEN_RETRIES = 2;
-  private static final int DEFAULT_FS_BUFFER_SIZE = 1 << 18; // 256KB
-  private static final Pattern SNAPSHOT_JAR = Pattern.compile(".*\\-SNAPSHOT(-selfcontained)?\\.jar$");
+  private static final int DEFAULT_FS_BUFFER_SIZE = 1 << 18; // 256KiB
+  private static final Pattern SNAPSHOT_JAR = Pattern.compile(".*-SNAPSHOT(-selfcontained)?\\.jar$");
 
   public static Path distributedClassPath(String path)
   {
@@ -96,12 +97,11 @@ public class JobHelper
    * Dose authenticate against a secured hadoop cluster
    * In case of any bug fix make sure to fix the code at HdfsStorageAuthentication#authenticate as well.
    *
-   * @param config containing the principal name and keytab path.
    */
-  public static void authenticate(HadoopDruidIndexerConfig config)
+  public static void authenticate()
   {
-    String principal = config.HADOOP_KERBEROS_CONFIG.getPrincipal();
-    String keytab = config.HADOOP_KERBEROS_CONFIG.getKeytab();
+    String principal = HadoopDruidIndexerConfig.HADOOP_KERBEROS_CONFIG.getPrincipal();
+    String keytab = HadoopDruidIndexerConfig.HADOOP_KERBEROS_CONFIG.getKeytab();
     if (!Strings.isNullOrEmpty(principal) && !Strings.isNullOrEmpty(keytab)) {
       Configuration conf = new Configuration();
       UserGroupInformation.setConfiguration(conf);
@@ -177,7 +177,7 @@ public class JobHelper
     }
   }
 
-  public static final Predicate<Throwable> shouldRetryPredicate()
+  public static Predicate<Throwable> shouldRetryPredicate()
   {
     return new Predicate<Throwable>()
     {
@@ -293,7 +293,7 @@ public class JobHelper
   {
     log.info("Uploading jar to path[%s]", path);
     try (OutputStream os = fs.create(path)) {
-      Files.asByteSource(jarFile).copyTo(os);
+      Files.copy(jarFile.toPath(), os);
     }
   }
 
@@ -302,26 +302,26 @@ public class JobHelper
     return SNAPSHOT_JAR.matcher(jarFile.getName()).matches();
   }
 
-  public static void injectSystemProperties(Job job)
-  {
-    injectSystemProperties(job.getConfiguration());
-  }
-
-  public static void injectDruidProperties(Configuration configuration, List<String> listOfAllowedPrefix)
+  public static void injectDruidProperties(Configuration configuration, HadoopDruidIndexerConfig hadoopDruidIndexerConfig)
   {
     String mapJavaOpts = StringUtils.nullToEmptyNonDruidDataString(configuration.get(MRJobConfig.MAP_JAVA_OPTS));
     String reduceJavaOpts = StringUtils.nullToEmptyNonDruidDataString(configuration.get(MRJobConfig.REDUCE_JAVA_OPTS));
 
-    for (String propName : System.getProperties().stringPropertyNames()) {
-      for (String prefix : listOfAllowedPrefix) {
-        if (propName.equals(prefix) || propName.startsWith(prefix + ".")) {
-          mapJavaOpts = StringUtils.format("%s -D%s=%s", mapJavaOpts, propName, System.getProperty(propName));
-          reduceJavaOpts = StringUtils.format("%s -D%s=%s", reduceJavaOpts, propName, System.getProperty(propName));
-          break;
-        }
-      }
-
+    for (Map.Entry<String, String> allowedProperties : hadoopDruidIndexerConfig.getAllowedProperties().entrySet()) {
+      mapJavaOpts = StringUtils.format(
+          "%s -D%s=%s",
+          mapJavaOpts,
+          allowedProperties.getKey(),
+          allowedProperties.getValue()
+      );
+      reduceJavaOpts = StringUtils.format(
+          "%s -D%s=%s",
+          reduceJavaOpts,
+          allowedProperties.getKey(),
+          allowedProperties.getValue()
+      );
     }
+
     if (!Strings.isNullOrEmpty(mapJavaOpts)) {
       configuration.set(MRJobConfig.MAP_JAVA_OPTS, mapJavaOpts);
     }
@@ -330,19 +330,24 @@ public class JobHelper
     }
   }
 
-  public static Configuration injectSystemProperties(Configuration conf)
+  public static Configuration injectSystemProperties(Configuration conf, HadoopDruidIndexerConfig hadoopDruidIndexerConfig)
   {
-    for (String propName : System.getProperties().stringPropertyNames()) {
+    for (String propName : HadoopDruidIndexerConfig.PROPERTIES.stringPropertyNames()) {
       if (propName.startsWith("hadoop.")) {
-        conf.set(propName.substring("hadoop.".length()), System.getProperty(propName));
+        conf.set(propName.substring("hadoop.".length()), HadoopDruidIndexerConfig.PROPERTIES.getProperty(propName));
       }
     }
+
+    for (Map.Entry<String, String> allowedProperties : hadoopDruidIndexerConfig.getAllowedProperties().entrySet()) {
+      conf.set(allowedProperties.getKey(), allowedProperties.getValue());
+    }
+
     return conf;
   }
 
   public static void ensurePaths(HadoopDruidIndexerConfig config)
   {
-    authenticate(config);
+    authenticate();
     // config.addInputPaths() can have side-effects ( boo! :( ), so this stuff needs to be done before anything else
     try {
       Job job = Job.getInstance(
@@ -351,7 +356,7 @@ public class JobHelper
       );
 
       job.getConfiguration().set("io.sort.record.percent", "0.19");
-      injectSystemProperties(job);
+      injectSystemProperties(job.getConfiguration(), config);
       config.addJobProperties(job);
 
       config.addInputPaths(job);
@@ -364,11 +369,13 @@ public class JobHelper
   public static void writeJobIdToFile(String hadoopJobIdFileName, String hadoopJobId)
   {
     if (hadoopJobId != null && hadoopJobIdFileName != null) {
-      try {
-        HadoopDruidIndexerConfig.JSON_MAPPER.writeValue(
-            new OutputStreamWriter(new FileOutputStream(new File(hadoopJobIdFileName)), StandardCharsets.UTF_8),
-            hadoopJobId
-        );
+      try (final OutputStream out = Files.newOutputStream(Paths.get(hadoopJobIdFileName))) {
+        try (final OutputStreamWriter osw = new OutputStreamWriter(out, StandardCharsets.UTF_8)) {
+          HadoopDruidIndexerConfig.JSON_MAPPER.writeValue(
+                  osw,
+                  hadoopJobId
+          );
+        }
         log.info("MR job id [%s] is written to the file [%s]", hadoopJobId, hadoopJobIdFileName);
       }
       catch (IOException e) {
@@ -379,29 +386,13 @@ public class JobHelper
     }
   }
 
-  public static boolean runSingleJob(Jobby job, HadoopDruidIndexerConfig config)
+  public static boolean runSingleJob(Jobby job)
   {
     boolean succeeded = job.run();
-
-    if (!config.getSchema().getTuningConfig().isLeaveIntermediate()) {
-      if (succeeded || config.getSchema().getTuningConfig().isCleanupOnFailure()) {
-        Path workingPath = config.makeIntermediatePath();
-        log.info("Deleting path[%s]", workingPath);
-        try {
-          Configuration conf = injectSystemProperties(new Configuration());
-          config.addJobProperties(conf);
-          workingPath.getFileSystem(conf).delete(workingPath, true);
-        }
-        catch (IOException e) {
-          log.error(e, "Failed to cleanup path[%s]", workingPath);
-        }
-      }
-    }
-
     return succeeded;
   }
 
-  public static boolean runJobs(List<Jobby> jobs, HadoopDruidIndexerConfig config)
+  public static boolean runJobs(List<Jobby> jobs)
   {
     boolean succeeded = true;
     for (Jobby job : jobs) {
@@ -411,25 +402,33 @@ public class JobHelper
       }
     }
 
+    return succeeded;
+  }
+
+  public static void maybeDeleteIntermediatePath(
+      boolean jobSucceeded,
+      HadoopIngestionSpec indexerSchema)
+  {
+    HadoopDruidIndexerConfig config = HadoopDruidIndexerConfig.fromSpec(indexerSchema);
+    final Configuration configuration = JobHelper.injectSystemProperties(new Configuration(), config);
+    config.addJobProperties(configuration);
+    JobHelper.injectDruidProperties(configuration, config);
     if (!config.getSchema().getTuningConfig().isLeaveIntermediate()) {
-      if (succeeded || config.getSchema().getTuningConfig().isCleanupOnFailure()) {
+      if (jobSucceeded || config.getSchema().getTuningConfig().isCleanupOnFailure()) {
         Path workingPath = config.makeIntermediatePath();
         log.info("Deleting path[%s]", workingPath);
         try {
-          Configuration conf = injectSystemProperties(new Configuration());
-          config.addJobProperties(conf);
-          workingPath.getFileSystem(conf).delete(workingPath, true);
+          config.addJobProperties(configuration);
+          workingPath.getFileSystem(configuration).delete(workingPath, true);
         }
         catch (IOException e) {
           log.error(e, "Failed to cleanup path[%s]", workingPath);
         }
       }
     }
-
-    return succeeded;
   }
 
-  public static DataSegment serializeOutIndex(
+  public static DataSegmentAndIndexZipFilePath serializeOutIndex(
       final DataSegment segmentTemplate,
       final Configuration configuration,
       final Progressable progressable,
@@ -475,20 +474,16 @@ public class JobHelper
         .withSize(size.get())
         .withBinaryVersion(SegmentUtils.getVersionFromDir(mergedBase));
 
-    if (!renameIndexFiles(outputFS, tmpPath, finalIndexZipFilePath)) {
-      throw new IOE(
-          "Unable to rename [%s] to [%s]",
-          tmpPath.toUri().toString(),
-          finalIndexZipFilePath.toUri().toString()
-      );
-    }
-
-    return finalSegment;
+    return new DataSegmentAndIndexZipFilePath(
+        finalSegment,
+        tmpPath.toUri().toString(),
+        finalIndexZipFilePath.toUri().toString()
+    );
   }
 
   public static void writeSegmentDescriptor(
       final FileSystem outputFS,
-      final DataSegment segment,
+      final DataSegmentAndIndexZipFilePath segmentAndPath,
       final Path descriptorPath,
       final Progressable progressable
   )
@@ -504,9 +499,12 @@ public class JobHelper
             try {
               progressable.progress();
               if (outputFS.exists(descriptorPath)) {
-                if (!outputFS.delete(descriptorPath, false)) {
-                  throw new IOE("Failed to delete descriptor at [%s]", descriptorPath);
-                }
+                // If the descriptor path already exists, don't overwrite, and risk clobbering it.
+                // If it already exists, it means that the segment data is already written to the
+                // tmp path, and the existing descriptor written should give us the information we
+                // need to rename the segment index to final path and publish it in the top level task.
+                log.info("descriptor path [%s] already exists, not overwriting", descriptorPath);
+                return -1;
               }
               try (final OutputStream descriptorOut = outputFS.create(
                   descriptorPath,
@@ -514,7 +512,7 @@ public class JobHelper
                   DEFAULT_FS_BUFFER_SIZE,
                   progressable
               )) {
-                HadoopDruidIndexerConfig.JSON_MAPPER.writeValue(descriptorOut, segment);
+                HadoopDruidIndexerConfig.JSON_MAPPER.writeValue(descriptorOut, segmentAndPath);
               }
             }
             catch (RuntimeException | IOException ex) {
@@ -545,13 +543,15 @@ public class JobHelper
   {
     long size = 0L;
     try (ZipOutputStream outputStream = new ZipOutputStream(baseOutputStream)) {
-      List<String> filesToCopy = Arrays.asList(baseDir.list());
-      for (String fileName : filesToCopy) {
-        final File fileToCopy = new File(baseDir, fileName);
-        if (java.nio.file.Files.isRegularFile(fileToCopy.toPath())) {
-          size += copyFileToZipStream(fileToCopy, outputStream, progressable);
-        } else {
-          log.warn("File at [%s] is not a regular file! skipping as part of zip", fileToCopy.getPath());
+      String[] filesToCopy = baseDir.list();
+      if (filesToCopy != null) {
+        for (String fileName : filesToCopy) {
+          final File fileToCopy = new File(baseDir, fileName);
+          if (Files.isRegularFile(fileToCopy.toPath())) {
+            size += copyFileToZipStream(fileToCopy, outputStream, progressable);
+          } else {
+            log.warn("File at [%s] is not a regular file! skipping as part of zip", fileToCopy.getPath());
+          }
         }
       }
       outputStream.flush();
@@ -623,7 +623,39 @@ public class JobHelper
   }
 
   /**
-   * Rename the files. This works around some limitations of both FileContext (no s3n support) and NativeS3FileSystem.rename
+   * Renames the index files for the segments. This works around some limitations of both FileContext (no s3n support) and NativeS3FileSystem.rename
+   * which will not overwrite. Note: segments should be renamed in the index task, not in a hadoop job, as race
+   * conditions between job retries can cause the final segment index file path to get clobbered.
+   *
+   * @param indexerSchema  the hadoop ingestion spec
+   * @param segmentAndIndexZipFilePaths the list of segments with their currently stored tmp path and the final path
+   *                                    that they should be renamed to.
+   */
+  public static void renameIndexFilesForSegments(
+      HadoopIngestionSpec indexerSchema,
+      List<DataSegmentAndIndexZipFilePath> segmentAndIndexZipFilePaths
+  ) throws IOException
+  {
+    HadoopDruidIndexerConfig config = HadoopDruidIndexerConfig.fromSpec(indexerSchema);
+    final Configuration configuration = JobHelper.injectSystemProperties(new Configuration(), config);
+    config.addJobProperties(configuration);
+    JobHelper.injectDruidProperties(configuration, config);
+    for (DataSegmentAndIndexZipFilePath segmentAndIndexZipFilePath : segmentAndIndexZipFilePaths) {
+      Path tmpPath = new Path(segmentAndIndexZipFilePath.getTmpIndexZipFilePath());
+      Path finalIndexZipFilePath = new Path(segmentAndIndexZipFilePath.getFinalIndexZipFilePath());
+      final FileSystem outputFS = FileSystem.get(finalIndexZipFilePath.toUri(), configuration);
+      if (!renameIndexFile(outputFS, tmpPath, finalIndexZipFilePath)) {
+        throw new IOE(
+            "Unable to rename [%s] to [%s]",
+            tmpPath.toUri().toString(),
+            finalIndexZipFilePath.toUri().toString()
+        );
+      }
+    }
+  }
+
+  /**
+   * Rename the file. This works around some limitations of both FileContext (no s3n support) and NativeS3FileSystem.rename
    * which will not overwrite
    *
    * @param outputFS              The output fs
@@ -632,7 +664,7 @@ public class JobHelper
    *
    * @return False if a rename failed, true otherwise (rename success or no rename needed)
    */
-  private static boolean renameIndexFiles(
+  private static boolean renameIndexFile(
       final FileSystem outputFS,
       final Path indexZipFilePath,
       final Path finalIndexZipFilePath
@@ -705,7 +737,7 @@ public class JobHelper
       final Configuration configuration,
       final File outDir,
       final Progressable progressable,
-      final RetryPolicy retryPolicy
+      @Nullable final RetryPolicy retryPolicy
   ) throws IOException
   {
     final RetryPolicy effectiveRetryPolicy;

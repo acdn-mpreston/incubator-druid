@@ -24,12 +24,10 @@ import com.google.common.base.Supplier;
 import com.google.common.util.concurrent.ListenableFuture;
 import org.apache.druid.data.input.Committer;
 import org.apache.druid.data.input.InputRow;
-import org.apache.druid.java.util.common.parsers.ParseException;
 import org.apache.druid.query.QuerySegmentWalker;
 import org.apache.druid.segment.incremental.IndexSizeExceededException;
 
 import javax.annotation.Nullable;
-import java.io.Closeable;
 import java.util.Collection;
 import java.util.List;
 
@@ -46,8 +44,13 @@ import java.util.List;
  * all methods of the data appending and indexing lifecycle except {@link #drop} must be called from a single thread.
  * Methods inherited from {@link QuerySegmentWalker} can be called concurrently from multiple threads.
  */
-public interface Appenderator extends QuerySegmentWalker, Closeable
+public interface Appenderator extends QuerySegmentWalker
 {
+  /**
+   * Return the identifier of this Appenderator; useful for log messages and such.
+   */
+  String getId();
+
   /**
    * Return the name of the dataSource associated with this Appenderator.
    */
@@ -182,14 +185,14 @@ public interface Appenderator extends QuerySegmentWalker, Closeable
    * <p>
    * If committer is not provided, no metadata is persisted.
    *
-   * @param identifiers list of segments to push
-   * @param committer   a committer associated with all data that has been added so far
+   * @param identifiers   list of segments to push
+   * @param committer     a committer associated with all data that has been added so far
    * @param useUniquePath true if the segment should be written to a path with a unique identifier
    *
    * @return future that resolves when all segments have been pushed. The segment list will be the list of segments
    * that have been pushed and the commit metadata from the Committer.
    */
-  ListenableFuture<SegmentsAndMetadata> push(
+  ListenableFuture<SegmentsAndCommitMetadata> push(
       Collection<SegmentIdWithShardSpec> identifiers,
       @Nullable Committer committer,
       boolean useUniquePath
@@ -200,7 +203,6 @@ public interface Appenderator extends QuerySegmentWalker, Closeable
    * pushes to finish. This will not remove any on-disk persisted data, but it will drop any data that has not yet been
    * persisted.
    */
-  @Override
   void close();
 
   /**
@@ -211,6 +213,15 @@ public interface Appenderator extends QuerySegmentWalker, Closeable
    * in background thread then it does not cause any problems.
    */
   void closeNow();
+
+  /**
+   * Flag to tell internals whether appenderator is working on behalf of a real time task.
+   * This is to manage certain aspects as needed. For example, for batch, non-real time tasks,
+   * physical segments (i.e. hydrants) do not need to memory map their persisted
+   * files. In this case, the code will avoid memory mapping them thus ameliorating the occurance
+   * of OOMs.
+   */
+  boolean isRealTime();
 
   /**
    * Result of {@link Appenderator#add} containing following information
@@ -224,20 +235,15 @@ public interface Appenderator extends QuerySegmentWalker, Closeable
     private final int numRowsInSegment;
     private final boolean isPersistRequired;
 
-    @Nullable
-    private final ParseException parseException;
-
     AppenderatorAddResult(
         SegmentIdWithShardSpec identifier,
         int numRowsInSegment,
-        boolean isPersistRequired,
-        @Nullable ParseException parseException
+        boolean isPersistRequired
     )
     {
       this.segmentIdentifier = identifier;
       this.numRowsInSegment = numRowsInSegment;
       this.isPersistRequired = isPersistRequired;
-      this.parseException = parseException;
     }
 
     SegmentIdWithShardSpec getSegmentIdentifier()
@@ -245,7 +251,8 @@ public interface Appenderator extends QuerySegmentWalker, Closeable
       return segmentIdentifier;
     }
 
-    int getNumRowsInSegment()
+    @VisibleForTesting
+    public int getNumRowsInSegment()
     {
       return numRowsInSegment;
     }
@@ -253,12 +260,6 @@ public interface Appenderator extends QuerySegmentWalker, Closeable
     boolean isPersistRequired()
     {
       return isPersistRequired;
-    }
-
-    @Nullable
-    public ParseException getParseException()
-    {
-      return parseException;
     }
   }
 }

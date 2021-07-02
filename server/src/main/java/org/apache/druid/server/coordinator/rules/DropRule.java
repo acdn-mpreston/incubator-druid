@@ -33,8 +33,14 @@ public abstract class DropRule implements Rule
   public CoordinatorStats run(DruidCoordinator coordinator, DruidCoordinatorRuntimeParams params, DataSegment segment)
   {
     CoordinatorStats stats = new CoordinatorStats();
-    coordinator.removeSegment(segment);
+    coordinator.markSegmentAsUnused(segment);
     stats.addToGlobalStat("deletedCount", 1);
     return stats;
+  }
+
+  @Override
+  public boolean canLoadSegments()
+  {
+    return false;
   }
 }

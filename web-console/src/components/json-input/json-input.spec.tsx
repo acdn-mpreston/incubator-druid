@@ -16,15 +16,46 @@
  * limitations under the License.
  */
 
+import { render } from '@testing-library/react';
+import Hjson from 'hjson';
 import React from 'react';
-import { render } from 'react-testing-library';
 
-import { JSONInput } from './json-input';
+import { extractRowColumnFromHjsonError, JsonInput } from './json-input';
 
 describe('json input', () => {
-  it('matches snapshot', () => {
-    const jsonCollapse = <JSONInput onChange={() => {}} value={'test'} />;
+  it('matches snapshot (null)', () => {
+    const jsonCollapse = <JsonInput onChange={() => {}} value={null} />;
     const { container } = render(jsonCollapse);
     expect(container.firstChild).toMatchSnapshot();
+  });
+
+  it('matches snapshot (value)', () => {
+    const value = {
+      hello: ['world', { a: 1, b: 2 }],
+    };
+    const jsonCollapse = <JsonInput onChange={() => {}} value={value} />;
+    const { container } = render(jsonCollapse);
+    expect(container.firstChild).toMatchSnapshot();
+  });
+
+  it('extractRowColumnFromHjsonError is ok with non matching error', () => {
+    expect(extractRowColumnFromHjsonError(new Error('blah blah'))).toBeUndefined();
+  });
+
+  it('extractRowColumnFromHjsonError works with real error', () => {
+    let error: Error | undefined;
+    try {
+      Hjson.parse(`{\n"Hello" "World"\n}`);
+    } catch (e) {
+      error = e;
+    }
+
+    expect(error).toBeDefined();
+
+    const rc = extractRowColumnFromHjsonError(error!);
+    expect(rc).toEqual({
+      column: 8,
+      row: 1,
+    });
   });
 });

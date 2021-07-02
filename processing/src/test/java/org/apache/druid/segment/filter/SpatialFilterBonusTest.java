@@ -56,6 +56,7 @@ import org.apache.druid.segment.Segment;
 import org.apache.druid.segment.TestHelper;
 import org.apache.druid.segment.incremental.IncrementalIndex;
 import org.apache.druid.segment.incremental.IncrementalIndexSchema;
+import org.apache.druid.segment.incremental.OnheapIncrementalIndex;
 import org.apache.druid.segment.writeout.SegmentWriteOutMediumFactory;
 import org.joda.time.Interval;
 import org.junit.Test;
@@ -68,7 +69,6 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Random;
@@ -115,7 +115,7 @@ public class SpatialFilterBonusTest
 
   private static IncrementalIndex makeIncrementalIndex() throws IOException
   {
-    IncrementalIndex theIndex = new IncrementalIndex.Builder()
+    IncrementalIndex theIndex = new OnheapIncrementalIndex.Builder()
         .setIndexSchema(
             new IncrementalIndexSchema.Builder()
                 .withMinTimestamp(DATA_INTERVAL.getStartMillis())
@@ -134,9 +134,8 @@ public class SpatialFilterBonusTest
                     )
                 ).build()
         )
-        .setReportParseExceptions(false)
         .setMaxRowCount(NUM_POINTS)
-        .buildOnheap();
+        .build();
 
     theIndex.add(
         new MapBasedInputRow(
@@ -263,7 +262,7 @@ public class SpatialFilterBonusTest
   )
   {
     try {
-      IncrementalIndex first = new IncrementalIndex.Builder()
+      IncrementalIndex first = new OnheapIncrementalIndex.Builder()
           .setIndexSchema(
               new IncrementalIndexSchema.Builder()
                   .withMinTimestamp(DATA_INTERVAL.getStartMillis())
@@ -283,11 +282,10 @@ public class SpatialFilterBonusTest
 
                   ).build()
           )
-          .setReportParseExceptions(false)
           .setMaxRowCount(NUM_POINTS)
-          .buildOnheap();
+          .build();
 
-      IncrementalIndex second = new IncrementalIndex.Builder()
+      IncrementalIndex second = new OnheapIncrementalIndex.Builder()
           .setIndexSchema(
               new IncrementalIndexSchema.Builder()
                   .withMinTimestamp(DATA_INTERVAL.getStartMillis())
@@ -306,11 +304,10 @@ public class SpatialFilterBonusTest
                       )
                   ).build()
           )
-          .setReportParseExceptions(false)
           .setMaxRowCount(NUM_POINTS)
-          .buildOnheap();
+          .build();
 
-      IncrementalIndex third = new IncrementalIndex.Builder()
+      IncrementalIndex third = new OnheapIncrementalIndex.Builder()
           .setIndexSchema(
               new IncrementalIndexSchema.Builder()
                   .withMinTimestamp(DATA_INTERVAL.getStartMillis())
@@ -330,9 +327,8 @@ public class SpatialFilterBonusTest
 
                   ).build()
           )
-          .setReportParseExceptions(false)
           .setMaxRowCount(NUM_POINTS)
-          .buildOnheap();
+          .build();
 
       first.add(
           new MapBasedInputRow(
@@ -461,7 +457,8 @@ public class SpatialFilterBonusTest
               METRIC_AGGS,
               mergedFile,
               indexSpec,
-              null
+              null,
+              -1
           )
       );
 
@@ -506,8 +503,7 @@ public class SpatialFilterBonusTest
     );
     try {
       TimeseriesQueryRunnerFactory factory = new TimeseriesQueryRunnerFactory(
-          new TimeseriesQueryQueryToolChest(
-              QueryRunnerTestHelper.noopIntervalChunkingQueryRunnerDecorator()),
+          new TimeseriesQueryQueryToolChest(),
           new TimeseriesQueryEngine(),
           QueryRunnerTestHelper.NOOP_QUERYWATCHER
       );
@@ -516,8 +512,7 @@ public class SpatialFilterBonusTest
           factory.createRunner(segment),
           factory.getToolchest()
       );
-      HashMap<String, Object> context = new HashMap<String, Object>();
-      TestHelper.assertExpectedResults(expectedResults, runner.run(QueryPlus.wrap(query), context));
+      TestHelper.assertExpectedResults(expectedResults, runner.run(QueryPlus.wrap(query)));
     }
     catch (Exception e) {
       throw new RuntimeException(e);
@@ -594,8 +589,7 @@ public class SpatialFilterBonusTest
     );
     try {
       TimeseriesQueryRunnerFactory factory = new TimeseriesQueryRunnerFactory(
-          new TimeseriesQueryQueryToolChest(
-              QueryRunnerTestHelper.noopIntervalChunkingQueryRunnerDecorator()),
+          new TimeseriesQueryQueryToolChest(),
           new TimeseriesQueryEngine(),
           QueryRunnerTestHelper.NOOP_QUERYWATCHER
       );
@@ -604,8 +598,7 @@ public class SpatialFilterBonusTest
           factory.createRunner(segment),
           factory.getToolchest()
       );
-      HashMap<String, Object> context = new HashMap<String, Object>();
-      TestHelper.assertExpectedResults(expectedResults, runner.run(QueryPlus.wrap(query), context));
+      TestHelper.assertExpectedResults(expectedResults, runner.run(QueryPlus.wrap(query)));
     }
     catch (Exception e) {
       throw new RuntimeException(e);
@@ -688,8 +681,7 @@ public class SpatialFilterBonusTest
     );
     try {
       TimeseriesQueryRunnerFactory factory = new TimeseriesQueryRunnerFactory(
-          new TimeseriesQueryQueryToolChest(
-              QueryRunnerTestHelper.noopIntervalChunkingQueryRunnerDecorator()),
+          new TimeseriesQueryQueryToolChest(),
           new TimeseriesQueryEngine(),
           QueryRunnerTestHelper.NOOP_QUERYWATCHER
       );
@@ -698,8 +690,7 @@ public class SpatialFilterBonusTest
           factory.createRunner(segment),
           factory.getToolchest()
       );
-      HashMap<String, Object> context = new HashMap<String, Object>();
-      TestHelper.assertExpectedResults(expectedResults, runner.run(QueryPlus.wrap(query), context));
+      TestHelper.assertExpectedResults(expectedResults, runner.run(QueryPlus.wrap(query)));
     }
     catch (Exception e) {
       throw new RuntimeException(e);

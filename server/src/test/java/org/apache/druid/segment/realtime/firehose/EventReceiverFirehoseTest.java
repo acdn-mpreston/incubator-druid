@@ -93,6 +93,7 @@ public class EventReceiverFirehoseTest
                     null
                 ), new DimensionsSpec(DimensionsSpec.getDefaultSchemas(ImmutableList.of("d1")), null, null),
                 null,
+                null,
                 null
             )
         ),
@@ -240,6 +241,7 @@ public class EventReceiverFirehoseTest
                             null
                         ), new DimensionsSpec(DimensionsSpec.getDefaultSchemas(ImmutableList.of("d1")), null, null),
                         null,
+                        null,
                         null
                     )
                 ),
@@ -275,9 +277,7 @@ public class EventReceiverFirehoseTest
 
   private void awaitDelayedExecutorThreadTerminated() throws InterruptedException
   {
-    while (firehose.getDelayedCloseExecutor().getState() != Thread.State.TERMINATED) {
-      Thread.sleep(50);
-    }
+    firehose.getDelayedCloseExecutor().join();
   }
 
   @Test(timeout = 60_000L)

@@ -30,6 +30,8 @@ import org.apache.druid.segment.incremental.IncrementalIndexAddResult;
 import org.apache.druid.segment.incremental.IndexSizeExceededException;
 import org.apache.druid.segment.realtime.FireDepartmentMetrics;
 
+import java.io.IOException;
+
 public class Plumbers
 {
   private static final Logger log = new Logger(Plumbers.class);
@@ -45,7 +47,7 @@ public class Plumbers
       final Plumber plumber,
       final boolean reportParseExceptions,
       final FireDepartmentMetrics metrics
-  )
+  ) throws IOException
   {
     final InputRow inputRow;
     try {
@@ -74,7 +76,7 @@ public class Plumbers
     catch (IndexSizeExceededException e) {
       // Shouldn't happen if this is only being called by a single thread.
       // plumber.add should be swapping out indexes before they fill up.
-      throw new ISE(e, "WTF?! Index size exceeded, this shouldn't happen. Bad Plumber!");
+      throw new ISE(e, "Index size exceeded");
     }
 
     if (addResult.getRowCount() == -1) {

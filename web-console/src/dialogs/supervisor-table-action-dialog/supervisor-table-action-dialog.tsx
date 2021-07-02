@@ -16,99 +16,88 @@
  * limitations under the License.
  */
 
-import { IDialogProps } from '@blueprintjs/core';
-import React from 'react';
+import React, { useState } from 'react';
 
 import { ShowJson } from '../../components';
-import { BasicAction, basicActionsToButtons } from '../../utils/basic-action';
-import { deepGet } from '../../utils/object-change';
+import { ShowHistory } from '../../components/show-history/show-history';
+import { SupervisorStatisticsTable } from '../../components/supervisor-statistics-table/supervisor-statistics-table';
+import { Api } from '../../singletons';
+import { deepGet } from '../../utils';
+import { BasicAction } from '../../utils/basic-action';
 import { SideButtonMetaData, TableActionDialog } from '../table-action-dialog/table-action-dialog';
 
-interface SupervisorTableActionDialogProps extends IDialogProps {
+interface SupervisorTableActionDialogProps {
   supervisorId: string;
   actions: BasicAction[];
   onClose: () => void;
 }
 
-interface SupervisorTableActionDialogState {
-  activeTab: 'status' | 'payload' | 'stats' | 'history';
-}
+export const SupervisorTableActionDialog = React.memo(function SupervisorTableActionDialog(
+  props: SupervisorTableActionDialogProps,
+) {
+  const { supervisorId, actions, onClose } = props;
+  const [activeTab, setActiveTab] = useState('status');
 
-export class SupervisorTableActionDialog extends React.PureComponent<
-  SupervisorTableActionDialogProps,
-  SupervisorTableActionDialogState
-> {
-  constructor(props: SupervisorTableActionDialogProps) {
-    super(props);
-    this.state = {
-      activeTab: 'status',
-    };
-  }
-  render(): React.ReactNode {
-    const { supervisorId, actions, onClose } = this.props;
-    const { activeTab } = this.state;
+  const supervisorTableSideButtonMetadata: SideButtonMetaData[] = [
+    {
+      icon: 'dashboard',
+      text: 'Status',
+      active: activeTab === 'status',
+      onClick: () => setActiveTab('status'),
+    },
+    {
+      icon: 'chart',
+      text: 'Statistics',
+      active: activeTab === 'stats',
+      onClick: () => setActiveTab('stats'),
+    },
+    {
+      icon: 'align-left',
+      text: 'Payload',
+      active: activeTab === 'payload',
+      onClick: () => setActiveTab('payload'),
+    },
+    {
+      icon: 'history',
+      text: 'History',
+      active: activeTab === 'history',
+      onClick: () => setActiveTab('history'),
+    },
+  ];
 
-    const supervisorTableSideButtonMetadata: SideButtonMetaData[] = [
-      {
-        icon: 'dashboard',
-        text: 'Status',
-        active: activeTab === 'status',
-        onClick: () => this.setState({ activeTab: 'status' }),
-      },
-      {
-        icon: 'align-left',
-        text: 'Payload',
-        active: activeTab === 'payload',
-        onClick: () => this.setState({ activeTab: 'payload' }),
-      },
-      {
-        icon: 'chart',
-        text: 'Statistics',
-        active: activeTab === 'stats',
-        onClick: () => this.setState({ activeTab: 'stats' }),
-      },
-      {
-        icon: 'history',
-        text: 'History',
-        active: activeTab === 'history',
-        onClick: () => this.setState({ activeTab: 'history' }),
-      },
-    ];
-
-    return (
-      <TableActionDialog
-        isOpen
-        sideButtonMetadata={supervisorTableSideButtonMetadata}
-        onClose={onClose}
-        title={`Supervisor: ${supervisorId}`}
-        bottomButtons={basicActionsToButtons(actions)}
-      >
-        {activeTab === 'status' && (
-          <ShowJson
-            endpoint={`/druid/indexer/v1/supervisor/${supervisorId}/status`}
-            transform={x => deepGet(x, 'payload')}
-            downloadFilename={`supervisor-status-${supervisorId}.json`}
-          />
-        )}
-        {activeTab === 'payload' && (
-          <ShowJson
-            endpoint={`/druid/indexer/v1/supervisor/${supervisorId}`}
-            downloadFilename={`supervisor-payload-${supervisorId}.json`}
-          />
-        )}
-        {activeTab === 'stats' && (
-          <ShowJson
-            endpoint={`/druid/indexer/v1/supervisor/${supervisorId}/stats`}
-            downloadFilename={`supervisor-stats-${supervisorId}.json`}
-          />
-        )}
-        {activeTab === 'history' && (
-          <ShowJson
-            endpoint={`/druid/indexer/v1/supervisor/${supervisorId}/history`}
-            downloadFilename={`supervisor-history-${supervisorId}.json`}
-          />
-        )}
-      </TableActionDialog>
-    );
-  }
-}
+  const supervisorEndpointBase = `/druid/indexer/v1/supervisor/${Api.encodePath(supervisorId)}`;
+  return (
+    <TableActionDialog
+      sideButtonMetadata={supervisorTableSideButtonMetadata}
+      onClose={onClose}
+      title={`Supervisor: ${supervisorId}`}
+      actions={actions}
+    >
+      {activeTab === 'status' && (
+        <ShowJson
+          endpoint={`${supervisorEndpointBase}/status`}
+          transform={x => deepGet(x, 'payload')}
+          downloadFilename={`supervisor-status-${supervisorId}.json`}
+        />
+      )}
+      {activeTab === 'stats' && (
+        <SupervisorStatisticsTable
+          supervisorId={supervisorId}
+          downloadFilename={`supervisor-stats-${supervisorId}.json`}
+        />
+      )}
+      {activeTab === 'payload' && (
+        <ShowJson
+          endpoint={supervisorEndpointBase}
+          downloadFilename={`supervisor-payload-${supervisorId}.json`}
+        />
+      )}
+      {activeTab === 'history' && (
+        <ShowHistory
+          endpoint={`${supervisorEndpointBase}/history`}
+          downloadFilename={`supervisor-history-${supervisorId}.json`}
+        />
+      )}
+    </TableActionDialog>
+  );
+});

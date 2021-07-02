@@ -16,8 +16,8 @@
  * limitations under the License.
  */
 
+import { render } from '@testing-library/react';
 import React from 'react';
-import { render } from 'react-testing-library';
 
 import { AsyncActionDialog } from './async-action-dialog';
 
@@ -28,10 +28,10 @@ describe('async action dialog', () => {
         action={() => {
           return Promise.resolve();
         }}
-        onClose={() => null}
-        confirmButtonText={'test'}
-        successText={'test'}
-        failText={'test'}
+        onClose={() => {}}
+        confirmButtonText="test"
+        successText="test"
+        failText="test"
       />
     );
     render(asyncActionDialog);

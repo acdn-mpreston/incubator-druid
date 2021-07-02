@@ -18,13 +18,21 @@
 
 import { Intent } from '@blueprintjs/core';
 import { IconNames } from '@blueprintjs/icons';
-import axios from 'axios';
-import React from 'react';
+import React, { useState } from 'react';
 
-import { AutoForm, ExternalLink } from '../../components';
-import { AppToaster } from '../../singletons/toaster';
-import { getDruidErrorMessage, QueryManager } from '../../utils';
-import { SnitchDialog } from '../snitch-dialog/snitch-dialog';
+import {
+  AutoForm,
+  ExternalLink,
+  FormJsonSelector,
+  FormJsonTabs,
+  JsonInput,
+} from '../../components';
+import { COORDINATOR_DYNAMIC_CONFIG_FIELDS, CoordinatorDynamicConfig } from '../../druid-models';
+import { useQueryManager } from '../../hooks';
+import { getLink } from '../../links';
+import { Api, AppToaster } from '../../singletons';
+import { getDruidErrorMessage } from '../../utils';
+import { SnitchDialog } from '..';
 
 import './coordinator-dynamic-config-dialog.scss';
 
@@ -32,66 +40,44 @@ export interface CoordinatorDynamicConfigDialogProps {
   onClose: () => void;
 }
 
-export interface CoordinatorDynamicConfigDialogState {
-  dynamicConfig: Record<string, any> | null;
-  historyRecords: any[];
-}
+export const CoordinatorDynamicConfigDialog = React.memo(function CoordinatorDynamicConfigDialog(
+  props: CoordinatorDynamicConfigDialogProps,
+) {
+  const { onClose } = props;
+  const [currentTab, setCurrentTab] = useState<FormJsonTabs>('form');
+  const [dynamicConfig, setDynamicConfig] = useState<CoordinatorDynamicConfig>({});
+  const [jsonError, setJsonError] = useState<Error | undefined>();
 
-export class CoordinatorDynamicConfigDialog extends React.PureComponent<
-  CoordinatorDynamicConfigDialogProps,
-  CoordinatorDynamicConfigDialogState
-> {
-  private historyQueryManager: QueryManager<null, any>;
+  const [historyRecordsState] = useQueryManager<null, any[]>({
+    processQuery: async () => {
+      const historyResp = await Api.instance.get(`/druid/coordinator/v1/config/history?count=100`);
+      return historyResp.data;
+    },
+    initQuery: null,
+  });
 
-  constructor(props: CoordinatorDynamicConfigDialogProps) {
-    super(props);
-    this.state = {
-      dynamicConfig: null,
-      historyRecords: [],
-    };
-
-    this.historyQueryManager = new QueryManager({
-      processQuery: async () => {
-        const historyResp = await axios(`/druid/coordinator/v1/config/history?count=100`);
-        return historyResp.data;
-      },
-      onStateChange: ({ result }) => {
-        this.setState({
-          historyRecords: result,
+  useQueryManager<null, Record<string, any>>({
+    processQuery: async () => {
+      try {
+        const configResp = await Api.instance.get('/druid/coordinator/v1/config');
+        setDynamicConfig(configResp.data || {});
+      } catch (e) {
+        AppToaster.show({
+          icon: IconNames.ERROR,
+          intent: Intent.DANGER,
+          message: `Could not load coordinator dynamic config: ${getDruidErrorMessage(e)}`,
         });
-      },
-    });
-  }
+        setDynamicConfig({});
+        onClose();
+      }
+      return {};
+    },
+    initQuery: null,
+  });
 
-  componentDidMount() {
-    this.getClusterConfig();
-
-    this.historyQueryManager.runQuery(null);
-  }
-
-  async getClusterConfig() {
-    let config: Record<string, any> | null = null;
+  async function saveConfig(comment: string) {
     try {
-      const configResp = await axios.get('/druid/coordinator/v1/config');
-      config = configResp.data;
-    } catch (e) {
-      AppToaster.show({
-        icon: IconNames.ERROR,
-        intent: Intent.DANGER,
-        message: `Could not load coordinator dynamic config: ${getDruidErrorMessage(e)}`,
-      });
-      return;
-    }
-    this.setState({
-      dynamicConfig: config,
-    });
-  }
-
-  private saveClusterConfig = async (comment: string) => {
-    const { onClose } = this.props;
-    const newState: any = this.state.dynamicConfig;
-    try {
-      await axios.post('/druid/coordinator/v1/config', newState, {
+      await Api.instance.post('/druid/coordinator/v1/config', dynamicConfig, {
         headers: {
           'X-Druid-Author': 'console',
           'X-Druid-Comment': comment,
@@ -110,84 +96,43 @@ export class CoordinatorDynamicConfigDialog extends React.PureComponent<
       intent: Intent.SUCCESS,
     });
     onClose();
-  };
-
-  render() {
-    const { onClose } = this.props;
-    const { dynamicConfig, historyRecords } = this.state;
-
-    return (
-      <SnitchDialog
-        className="coordinator-dynamic-config-dialog"
-        isOpen
-        onSave={this.saveClusterConfig}
-        onClose={onClose}
-        title="Coordinator dynamic config"
-        historyRecords={historyRecords}
-      >
-        <p>
-          Edit the coordinator dynamic configuration on the fly. For more information please refer
-          to the{' '}
-          <ExternalLink href="https://druid.apache.org/docs/latest/configuration/index.html#dynamic-configuration">
-            documentation
-          </ExternalLink>
-          .
-        </p>
-        <AutoForm
-          fields={[
-            {
-              name: 'balancerComputeThreads',
-              type: 'number',
-            },
-            {
-              name: 'emitBalancingStats',
-              type: 'boolean',
-            },
-            {
-              name: 'killAllDataSources',
-              type: 'boolean',
-            },
-            {
-              name: 'killDataSourceWhitelist',
-              type: 'string-array',
-            },
-            {
-              name: 'killPendingSegmentsSkipList',
-              type: 'string-array',
-            },
-            {
-              name: 'maxSegmentsInNodeLoadingQueue',
-              type: 'number',
-            },
-            {
-              name: 'maxSegmentsToMove',
-              type: 'number',
-            },
-            {
-              name: 'mergeBytesLimit',
-              type: 'size-bytes',
-            },
-            {
-              name: 'mergeSegmentsLimit',
-              type: 'number',
-            },
-            {
-              name: 'millisToWaitBeforeDeleting',
-              type: 'number',
-            },
-            {
-              name: 'replicantLifetime',
-              type: 'number',
-            },
-            {
-              name: 'replicationThrottleLimit',
-              type: 'number',
-            },
-          ]}
-          model={dynamicConfig}
-          onChange={m => this.setState({ dynamicConfig: m })}
-        />
-      </SnitchDialog>
-    );
   }
-}
+
+  return (
+    <SnitchDialog
+      className="coordinator-dynamic-config-dialog"
+      saveDisabled={Boolean(jsonError)}
+      onSave={saveConfig}
+      onClose={onClose}
+      title="Coordinator dynamic config"
+      historyRecords={historyRecordsState.data}
+    >
+      <p>
+        Edit the coordinator dynamic configuration on the fly. For more information please refer to
+        the{' '}
+        <ExternalLink href={`${getLink('DOCS')}/configuration/index.html#dynamic-configuration`}>
+          documentation
+        </ExternalLink>
+        .
+      </p>
+      <FormJsonSelector tab={currentTab} onChange={setCurrentTab} />
+      {currentTab === 'form' ? (
+        <AutoForm
+          fields={COORDINATOR_DYNAMIC_CONFIG_FIELDS}
+          model={dynamicConfig}
+          onChange={setDynamicConfig}
+        />
+      ) : (
+        <JsonInput
+          value={dynamicConfig}
+          height="50vh"
+          onChange={v => {
+            setDynamicConfig(v);
+            setJsonError(undefined);
+          }}
+          onError={setJsonError}
+        />
+      )}
+    </SnitchDialog>
+  );
+});

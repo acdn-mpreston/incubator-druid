@@ -22,19 +22,19 @@ package org.apache.druid.query.filter;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.RangeSet;
-import com.google.common.collect.Sets;
 import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.query.extraction.ExtractionFn;
 
 import java.nio.ByteBuffer;
-import java.util.HashSet;
+import java.util.Set;
 
 /**
  * This class is deprecated, use SelectorDimFilter instead: {@link SelectorDimFilter}
  */
 @Deprecated
-public class ExtractionDimFilter implements DimFilter
+public class ExtractionDimFilter extends AbstractOptimizableDimFilter implements DimFilter
 {
   private final String dimension;
   private final String value;
@@ -113,9 +113,9 @@ public class ExtractionDimFilter implements DimFilter
   }
 
   @Override
-  public HashSet<String> getRequiredColumns()
+  public Set<String> getRequiredColumns()
   {
-    return Sets.newHashSet(dimension);
+    return ImmutableSet.of(dimension);
   }
 
   @Override

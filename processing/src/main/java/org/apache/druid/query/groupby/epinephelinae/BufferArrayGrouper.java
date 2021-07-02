@@ -21,15 +21,20 @@ package org.apache.druid.query.groupby.epinephelinae;
 
 import com.google.common.base.Preconditions;
 import com.google.common.base.Supplier;
+import com.google.common.primitives.Ints;
+import org.apache.datasketches.memory.Memory;
+import org.apache.datasketches.memory.WritableMemory;
+import org.apache.druid.java.util.common.IAE;
 import org.apache.druid.java.util.common.ISE;
-import org.apache.druid.java.util.common.logger.Logger;
 import org.apache.druid.java.util.common.parsers.CloseableIterator;
+import org.apache.druid.query.aggregation.AggregatorAdapters;
 import org.apache.druid.query.aggregation.AggregatorFactory;
-import org.apache.druid.query.aggregation.BufferAggregator;
 import org.apache.druid.query.groupby.epinephelinae.column.GroupByColumnSelectorStrategy;
-import org.apache.druid.segment.ColumnSelectorFactory;
 
+import javax.annotation.Nullable;
+import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.Arrays;
 import java.util.NoSuchElementException;
 
@@ -47,38 +52,54 @@ import java.util.NoSuchElementException;
  * different segments cannot be currently retrieved, this grouper can be used only when performing per-segment query
  * execution.
  */
-public class BufferArrayGrouper implements IntGrouper
+public class BufferArrayGrouper implements VectorGrouper, IntGrouper
 {
-  private static final Logger LOG = new Logger(BufferArrayGrouper.class);
-
   private final Supplier<ByteBuffer> bufferSupplier;
-  private final BufferAggregator[] aggregators;
-  private final int[] aggregatorOffsets;
+  private final AggregatorAdapters aggregators;
   private final int cardinalityWithMissingValue;
   private final int recordSize; // size of all aggregated values
 
   private boolean initialized = false;
-  private ByteBuffer usedFlagBuffer;
+  private WritableMemory usedFlagMemory;
   private ByteBuffer valBuffer;
 
-  static long requiredBufferCapacity(
-      int cardinality,
-      AggregatorFactory[] aggregatorFactories
-  )
+  // Scratch objects used by aggregateVector(). Only set if initVectorized() is called.
+  @Nullable
+  private int[] vAggregationPositions = null;
+  @Nullable
+  private int[] vAggregationRows = null;
+
+  /**
+   * Computes required buffer capacity for a grouping key of the given cardinaltiy and aggregatorFactories.
+   * This method assumes that the given cardinality doesn't count nulls.
+   *
+   * Returns -1 if cardinality + 1 (for null) > Integer.MAX_VALUE. Returns computed required buffer capacity
+   * otherwise.
+   */
+  static long requiredBufferCapacity(int cardinality, AggregatorFactory[] aggregatorFactories)
   {
-    final int cardinalityWithMissingValue = cardinality + 1;
-    final int recordSize = Arrays.stream(aggregatorFactories)
-                                 .mapToInt(AggregatorFactory::getMaxIntermediateSizeWithNulls)
-                                 .sum();
+    final long cardinalityWithMissingValue = computeCardinalityWithMissingValue(cardinality);
+    // Cardinality should be in the integer range. See DimensionDictionarySelector.
+    if (cardinalityWithMissingValue > Integer.MAX_VALUE) {
+      return -1;
+    }
+    final long recordSize = Arrays.stream(aggregatorFactories)
+                                  .mapToLong(AggregatorFactory::getMaxIntermediateSizeWithNulls)
+                                  .sum();
 
     return getUsedFlagBufferCapacity(cardinalityWithMissingValue) +  // total used flags size
-        (long) cardinalityWithMissingValue * recordSize;                 // total values size
+           cardinalityWithMissingValue * recordSize;                 // total values size
+  }
+
+  private static long computeCardinalityWithMissingValue(int cardinality)
+  {
+    return (long) cardinality + 1;
   }
 
   /**
    * Compute the number of bytes to store all used flag bits.
    */
-  private static int getUsedFlagBufferCapacity(int cardinalityWithMissingValue)
+  private static long getUsedFlagBufferCapacity(long cardinalityWithMissingValue)
   {
     return (cardinalityWithMissingValue + Byte.SIZE - 1) / Byte.SIZE;
   }
@@ -86,26 +107,17 @@ public class BufferArrayGrouper implements IntGrouper
   public BufferArrayGrouper(
       // the buffer returned from the below supplier can have dirty bits and should be cleared during initialization
       final Supplier<ByteBuffer> bufferSupplier,
-      final ColumnSelectorFactory columnSelectorFactory,
-      final AggregatorFactory[] aggregatorFactories,
+      final AggregatorAdapters aggregators,
       final int cardinality
   )
   {
-    Preconditions.checkNotNull(aggregatorFactories, "aggregatorFactories");
+    Preconditions.checkNotNull(aggregators, "aggregators");
     Preconditions.checkArgument(cardinality > 0, "Cardinality must a non-zero positive number");
 
     this.bufferSupplier = Preconditions.checkNotNull(bufferSupplier, "bufferSupplier");
-    this.aggregators = new BufferAggregator[aggregatorFactories.length];
-    this.aggregatorOffsets = new int[aggregatorFactories.length];
-    this.cardinalityWithMissingValue = cardinality + 1;
-
-    int offset = 0;
-    for (int i = 0; i < aggregatorFactories.length; i++) {
-      aggregators[i] = aggregatorFactories[i].factorizeBuffered(columnSelectorFactory);
-      aggregatorOffsets[i] = offset;
-      offset += aggregatorFactories[i].getMaxIntermediateSizeWithNulls();
-    }
-    recordSize = offset;
+    this.aggregators = aggregators;
+    this.cardinalityWithMissingValue = Ints.checkedCast(computeCardinalityWithMissingValue(cardinality));
+    this.recordSize = aggregators.spaceNeeded();
   }
 
   @Override
@@ -114,10 +126,24 @@ public class BufferArrayGrouper implements IntGrouper
     if (!initialized) {
       final ByteBuffer buffer = bufferSupplier.get();
 
-      final int usedFlagBufferEnd = getUsedFlagBufferCapacity(cardinalityWithMissingValue);
+      final int usedFlagBufferEnd = Ints.checkedCast(getUsedFlagBufferCapacity(cardinalityWithMissingValue));
+
+      // Sanity check on buffer capacity.
+      if (usedFlagBufferEnd + (long) cardinalityWithMissingValue * recordSize > buffer.capacity()) {
+        // Should not happen in production, since we should only select array-based aggregation if we have
+        // enough scratch space.
+        throw new ISE(
+            "Records of size[%,d] and possible cardinality[%,d] exceeds the buffer capacity[%,d].",
+            recordSize,
+            cardinalityWithMissingValue,
+            valBuffer.capacity()
+        );
+      }
+
+      // Slice up the buffer.
       buffer.position(0);
       buffer.limit(usedFlagBufferEnd);
-      usedFlagBuffer = buffer.slice();
+      usedFlagMemory = WritableMemory.wrap(buffer.slice(), ByteOrder.nativeOrder());
 
       buffer.position(usedFlagBufferEnd);
       buffer.limit(buffer.capacity());
@@ -130,13 +156,22 @@ public class BufferArrayGrouper implements IntGrouper
   }
 
   @Override
+  public void initVectorized(final int maxVectorSize)
+  {
+    init();
+
+    this.vAggregationPositions = new int[maxVectorSize];
+    this.vAggregationRows = new int[maxVectorSize];
+  }
+
+  @Override
   public boolean isInitialized()
   {
     return initialized;
   }
 
   @Override
-  public AggregateResult aggregateKeyHash(int dimIndex)
+  public AggregateResult aggregateKeyHash(final int dimIndex)
   {
     Preconditions.checkArgument(
         dimIndex >= 0 && dimIndex < cardinalityWithMissingValue,
@@ -144,39 +179,78 @@ public class BufferArrayGrouper implements IntGrouper
         dimIndex
     );
 
-    final int recordOffset = dimIndex * recordSize;
+    initializeSlotIfNeeded(dimIndex);
+    aggregators.aggregateBuffered(valBuffer, dimIndex * recordSize);
+    return AggregateResult.ok();
+  }
 
-    if (recordOffset + recordSize > valBuffer.capacity()) {
-      // This error cannot be recoverd, and the query must fail
-      throw new ISE(
-          "A record of size [%d] cannot be written to the array buffer at offset[%d] "
-          + "because it exceeds the buffer capacity[%d]. Try increasing druid.processing.buffer.sizeBytes",
-          recordSize,
-          recordOffset,
-          valBuffer.capacity()
+  @Override
+  public AggregateResult aggregateVector(Memory keySpace, int startRow, int endRow)
+  {
+    final int numRows = endRow - startRow;
+
+    // Hoisted bounds check on keySpace.
+    if (keySpace.getCapacity() < (long) numRows * Integer.BYTES) {
+      throw new IAE("Not enough keySpace capacity for the provided start/end rows");
+    }
+
+    // We use integer indexes into the keySpace.
+    if (keySpace.getCapacity() > Integer.MAX_VALUE) {
+      throw new ISE("keySpace too large to handle");
+    }
+
+    if (vAggregationPositions == null || vAggregationRows == null) {
+      throw new ISE("Grouper was not initialized for vectorization");
+    }
+
+    if (keySpace.getCapacity() == 0) {
+      // Empty key space, assume keys are all zeroes.
+      final int dimIndex = 1;
+
+      initializeSlotIfNeeded(dimIndex);
+
+      aggregators.aggregateVector(
+          valBuffer,
+          dimIndex * recordSize,
+          startRow,
+          endRow
       );
-    }
+    } else {
+      for (int i = 0; i < numRows; i++) {
+        // +1 matches what hashFunction() would do.
+        final int dimIndex = keySpace.getInt(((long) i) * Integer.BYTES) + 1;
 
-    if (!isUsedSlot(dimIndex)) {
-      initializeSlot(dimIndex);
-    }
+        if (dimIndex < 0 || dimIndex >= cardinalityWithMissingValue) {
+          throw new IAE("Invalid dimIndex[%s]", dimIndex);
+        }
 
-    for (int i = 0; i < aggregators.length; i++) {
-      aggregators[i].aggregate(valBuffer, recordOffset + aggregatorOffsets[i]);
+        vAggregationPositions[i] = dimIndex * recordSize;
+
+        initializeSlotIfNeeded(dimIndex);
+      }
+
+      aggregators.aggregateVector(
+          valBuffer,
+          numRows,
+          vAggregationPositions,
+          Groupers.writeAggregationRows(vAggregationRows, startRow, endRow)
+      );
     }
 
     return AggregateResult.ok();
   }
 
-  private void initializeSlot(int dimIndex)
+  private void initializeSlotIfNeeded(int dimIndex)
   {
     final int index = dimIndex / Byte.SIZE;
     final int extraIndex = dimIndex % Byte.SIZE;
-    usedFlagBuffer.put(index, (byte) (usedFlagBuffer.get(index) | (1 << extraIndex)));
+    final int usedFlagMask = 1 << extraIndex;
 
-    final int recordOffset = dimIndex * recordSize;
-    for (int i = 0; i < aggregators.length; i++) {
-      aggregators[i].init(valBuffer, recordOffset + aggregatorOffsets[i]);
+    final byte currentByte = usedFlagMemory.getByte(index);
+
+    if ((currentByte & usedFlagMask) == 0) {
+      usedFlagMemory.putByte(index, (byte) (currentByte | usedFlagMask));
+      aggregators.init(valBuffer, dimIndex * recordSize);
     }
   }
 
@@ -184,25 +258,16 @@ public class BufferArrayGrouper implements IntGrouper
   {
     final int index = dimIndex / Byte.SIZE;
     final int extraIndex = dimIndex % Byte.SIZE;
-    final int usedFlagByte = 1 << extraIndex;
-    return (usedFlagBuffer.get(index) & usedFlagByte) != 0;
+    final int usedFlagMask = 1 << extraIndex;
+
+    return (usedFlagMemory.getByte(index) & usedFlagMask) != 0;
   }
 
   @Override
   public void reset()
   {
     // Clear the entire usedFlagBuffer
-    final int usedFlagBufferCapacity = usedFlagBuffer.capacity();
-
-    // putLong() instead of put() can boost the performance of clearing the buffer
-    final int n = (usedFlagBufferCapacity / Long.BYTES) * Long.BYTES;
-    for (int i = 0; i < n; i += Long.BYTES) {
-      usedFlagBuffer.putLong(i, 0L);
-    }
-
-    for (int i = n; i < usedFlagBufferCapacity; i++) {
-      usedFlagBuffer.put(i, (byte) 0);
-    }
+    usedFlagMemory.clear();
   }
 
   @Override
@@ -214,14 +279,36 @@ public class BufferArrayGrouper implements IntGrouper
   @Override
   public void close()
   {
-    for (BufferAggregator aggregator : aggregators) {
-      try {
-        aggregator.close();
+    aggregators.close();
+  }
+
+  @Override
+  public CloseableIterator<Entry<Memory>> iterator()
+  {
+    final CloseableIterator<Entry<Integer>> iterator = iterator(false);
+    final WritableMemory keyMemory = WritableMemory.allocate(Integer.BYTES);
+    return new CloseableIterator<Entry<Memory>>()
+    {
+      @Override
+      public boolean hasNext()
+      {
+        return iterator.hasNext();
       }
-      catch (Exception e) {
-        LOG.warn(e, "Could not close aggregator [%s], skipping.", aggregator);
+
+      @Override
+      public Entry<Memory> next()
+      {
+        final Entry<Integer> integerEntry = iterator.next();
+        keyMemory.putInt(0, integerEntry.getKey());
+        return new Entry<>(keyMemory, integerEntry.getValues());
       }
-    }
+
+      @Override
+      public void close() throws IOException
+      {
+        iterator.close();
+      }
+    };
   }
 
   @Override
@@ -252,10 +339,10 @@ public class BufferArrayGrouper implements IntGrouper
         final int current = next;
         next = findNext(current);
 
-        final Object[] values = new Object[aggregators.length];
+        final Object[] values = new Object[aggregators.size()];
         final int recordOffset = current * recordSize;
-        for (int i = 0; i < aggregators.length; i++) {
-          values[i] = aggregators[i].get(valBuffer, recordOffset + aggregatorOffsets[i]);
+        for (int i = 0; i < aggregators.size(); i++) {
+          values[i] = aggregators.get(valBuffer, recordOffset, i);
         }
         // shift by -1 since values are initially shifted by +1 so they are all positive and
         // GroupByColumnSelectorStrategy.GROUP_BY_MISSING_VALUE is -1

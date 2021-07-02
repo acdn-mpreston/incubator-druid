@@ -24,7 +24,9 @@ import com.fasterxml.jackson.databind.JsonMappingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
+import com.google.common.base.Supplier;
 import com.google.common.base.Suppliers;
+import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
@@ -91,7 +93,7 @@ public class IndexIO
   private final Map<Integer, IndexLoader> indexLoaders;
 
   private static final EmittingLogger log = new EmittingLogger(IndexIO.class);
-  private static final SerializerUtils serializerUtils = new SerializerUtils();
+  private static final SerializerUtils SERIALIZER_UTILS = new SerializerUtils();
 
   private final ObjectMapper mapper;
 
@@ -180,12 +182,17 @@ public class IndexIO
 
   public QueryableIndex loadIndex(File inDir) throws IOException
   {
+    return loadIndex(inDir, false, SegmentLazyLoadFailCallback.NOOP);
+  }
+
+  public QueryableIndex loadIndex(File inDir, boolean lazy, SegmentLazyLoadFailCallback loadFailed) throws IOException
+  {
     final int version = SegmentUtils.getVersionFromDir(inDir);
 
     final IndexLoader loader = indexLoaders.get(version);
 
     if (loader != null) {
-      return loader.load(inDir, mapper);
+      return loader.load(inDir, mapper, lazy, loadFailed);
     } else {
       throw new ISE("Unknown index version[%s]", version);
     }
@@ -329,7 +336,7 @@ public class IndexIO
           GenericIndexed.STRING_STRATEGY,
           smooshedFiles
       );
-      final Interval dataInterval = Intervals.of(serializerUtils.readString(indexBuffer));
+      final Interval dataInterval = Intervals.of(SERIALIZER_UTILS.readString(indexBuffer));
       final BitmapSerdeFactory bitmapSerdeFactory = new BitmapSerde.LegacyBitmapSerdeFactory();
 
       CompressedColumnarLongsSupplier timestamps = CompressedColumnarLongsSupplier.fromByteBuffer(
@@ -349,12 +356,13 @@ public class IndexIO
       }
 
       Map<String, GenericIndexed<String>> dimValueLookups = new HashMap<>();
+      Map<String, GenericIndexed<ByteBuffer>> dimValueUtf8Lookups = new HashMap<>();
       Map<String, VSizeColumnarMultiInts> dimColumns = new HashMap<>();
       Map<String, GenericIndexed<ImmutableBitmap>> bitmaps = new HashMap<>();
 
       for (String dimension : IndexedIterable.create(availableDimensions)) {
         ByteBuffer dimBuffer = smooshedFiles.mapFile(makeDimFile(inDir, dimension).getName());
-        String fileDimensionName = serializerUtils.readString(dimBuffer);
+        String fileDimensionName = SERIALIZER_UTILS.readString(dimBuffer);
         Preconditions.checkState(
             dimension.equals(fileDimensionName),
             "Dimension file[%s] has dimension[%s] in it!?",
@@ -362,14 +370,16 @@ public class IndexIO
             fileDimensionName
         );
 
-        dimValueLookups.put(dimension, GenericIndexed.read(dimBuffer, GenericIndexed.STRING_STRATEGY));
+        // Duplicate the first buffer since we are reading the dictionary twice.
+        dimValueLookups.put(dimension, GenericIndexed.read(dimBuffer.duplicate(), GenericIndexed.STRING_STRATEGY));
+        dimValueUtf8Lookups.put(dimension, GenericIndexed.read(dimBuffer, GenericIndexed.BYTE_BUFFER_STRATEGY));
         dimColumns.put(dimension, VSizeColumnarMultiInts.readFromByteBuffer(dimBuffer));
       }
 
       ByteBuffer invertedBuffer = smooshedFiles.mapFile("inverted.drd");
       for (int i = 0; i < availableDimensions.size(); ++i) {
         bitmaps.put(
-            serializerUtils.readString(invertedBuffer),
+            SERIALIZER_UTILS.readString(invertedBuffer),
             GenericIndexed.read(invertedBuffer, bitmapSerdeFactory.getObjectStrategy())
         );
       }
@@ -378,7 +388,7 @@ public class IndexIO
       ByteBuffer spatialBuffer = smooshedFiles.mapFile("spatial.drd");
       while (spatialBuffer != null && spatialBuffer.hasRemaining()) {
         spatialIndexed.put(
-            serializerUtils.readString(spatialBuffer),
+            SERIALIZER_UTILS.readString(spatialBuffer),
             new ImmutableRTreeObjectStrategy(bitmapSerdeFactory.getBitmapFactory()).fromByteBufferWithSize(
                 spatialBuffer
             )
@@ -392,6 +402,7 @@ public class IndexIO
           timestamps,
           metrics,
           dimValueLookups,
+          dimValueUtf8Lookups,
           dimColumns,
           bitmaps,
           spatialIndexed,
@@ -406,7 +417,7 @@ public class IndexIO
 
   interface IndexLoader
   {
-    QueryableIndex load(File inDir, ObjectMapper mapper) throws IOException;
+    QueryableIndex load(File inDir, ObjectMapper mapper, boolean lazy, SegmentLazyLoadFailCallback loadFailed) throws IOException;
   }
 
   static class LegacyIndexLoader implements IndexLoader
@@ -421,11 +432,11 @@ public class IndexIO
     }
 
     @Override
-    public QueryableIndex load(File inDir, ObjectMapper mapper) throws IOException
+    public QueryableIndex load(File inDir, ObjectMapper mapper, boolean lazy, SegmentLazyLoadFailCallback loadFailed) throws IOException
     {
       MMappedIndex index = legacyHandler.mapDir(inDir);
 
-      Map<String, ColumnHolder> columns = new HashMap<>();
+      Map<String, Supplier<ColumnHolder>> columns = new HashMap<>();
 
       for (String dimension : index.getAvailableDimensions()) {
         ColumnBuilder builder = new ColumnBuilder()
@@ -434,6 +445,7 @@ public class IndexIO
             .setDictionaryEncodedColumnSupplier(
                 new DictionaryEncodedColumnSupplier(
                     index.getDimValueLookup(dimension),
+                    index.getDimValueUtf8Lookup(dimension),
                     null,
                     Suppliers.ofInstance(index.getDimColumn(dimension)),
                     columnConfig.columnCacheSizeBytes()
@@ -449,60 +461,60 @@ public class IndexIO
         if (index.getSpatialIndexes().get(dimension) != null) {
           builder.setSpatialIndex(new SpatialIndexColumnPartSupplier(index.getSpatialIndexes().get(dimension)));
         }
-        columns.put(
-            dimension,
-            builder.build()
-        );
+        columns.put(dimension, getColumnHolderSupplier(builder, lazy));
       }
 
       for (String metric : index.getAvailableMetrics()) {
         final MetricHolder metricHolder = index.getMetricHolder(metric);
         if (metricHolder.getType() == MetricHolder.MetricType.FLOAT) {
-          columns.put(
-              metric,
-              new ColumnBuilder()
-                  .setType(ValueType.FLOAT)
-                  .setNumericColumnSupplier(
-                      new FloatNumericColumnSupplier(
-                          metricHolder.floatType,
-                          LEGACY_FACTORY.getBitmapFactory().makeEmptyImmutableBitmap()
-                      )
+          ColumnBuilder builder = new ColumnBuilder()
+              .setType(ValueType.FLOAT)
+              .setNumericColumnSupplier(
+                  new FloatNumericColumnSupplier(
+                      metricHolder.floatType,
+                      LEGACY_FACTORY.getBitmapFactory().makeEmptyImmutableBitmap()
                   )
-                  .build()
-          );
+              );
+          columns.put(metric, getColumnHolderSupplier(builder, lazy));
         } else if (metricHolder.getType() == MetricHolder.MetricType.COMPLEX) {
-          columns.put(
-              metric,
-              new ColumnBuilder()
-                  .setType(ValueType.COMPLEX)
-                  .setComplexColumnSupplier(
-                      new ComplexColumnPartSupplier(metricHolder.getTypeName(), metricHolder.complexType)
-                  )
-                  .build()
-          );
+          ColumnBuilder builder = new ColumnBuilder()
+              .setType(ValueType.COMPLEX)
+              .setComplexColumnSupplier(
+                  new ComplexColumnPartSupplier(metricHolder.getTypeName(), metricHolder.complexType)
+              );
+          columns.put(metric, getColumnHolderSupplier(builder, lazy));
         }
       }
 
-      columns.put(
-          ColumnHolder.TIME_COLUMN_NAME,
-          new ColumnBuilder()
-              .setType(ValueType.LONG)
-              .setNumericColumnSupplier(
-                  new LongNumericColumnSupplier(
-                      index.timestamps,
-                      LEGACY_FACTORY.getBitmapFactory().makeEmptyImmutableBitmap()
-                  )
+      ColumnBuilder builder = new ColumnBuilder()
+          .setType(ValueType.LONG)
+          .setNumericColumnSupplier(
+              new LongNumericColumnSupplier(
+                  index.timestamps,
+                  LEGACY_FACTORY.getBitmapFactory().makeEmptyImmutableBitmap()
               )
-              .build()
-      );
+          );
+      columns.put(ColumnHolder.TIME_COLUMN_NAME, getColumnHolderSupplier(builder, lazy));
+
       return new SimpleQueryableIndex(
           index.getDataInterval(),
           index.getAvailableDimensions(),
           new ConciseBitmapFactory(),
           columns,
           index.getFileMapper(),
-          null
+          null,
+          lazy
       );
+    }
+
+    private Supplier<ColumnHolder> getColumnHolderSupplier(ColumnBuilder builder, boolean lazy)
+    {
+      if (lazy) {
+        return Suppliers.memoize(() -> builder.build());
+      } else {
+        ColumnHolder columnHolder = builder.build();
+        return () -> columnHolder;
+      }
     }
   }
 
@@ -516,7 +528,7 @@ public class IndexIO
     }
 
     @Override
-    public QueryableIndex load(File inDir, ObjectMapper mapper) throws IOException
+    public QueryableIndex load(File inDir, ObjectMapper mapper, boolean lazy, SegmentLazyLoadFailCallback loadFailed) throws IOException
     {
       log.debug("Mapping v9 index[%s]", inDir);
       long startTime = System.currentTimeMillis();
@@ -552,7 +564,7 @@ public class IndexIO
        * this information is appended to the end of index.drd.
        */
       if (indexBuffer.hasRemaining()) {
-        segmentBitmapSerdeFactory = mapper.readValue(serializerUtils.readString(indexBuffer), BitmapSerdeFactory.class);
+        segmentBitmapSerdeFactory = mapper.readValue(SERIALIZER_UTILS.readString(indexBuffer), BitmapSerdeFactory.class);
       } else {
         segmentBitmapSerdeFactory = new BitmapSerde.LegacyBitmapSerdeFactory();
       }
@@ -562,7 +574,7 @@ public class IndexIO
       if (metadataBB != null) {
         try {
           metadata = mapper.readValue(
-              serializerUtils.readBytes(metadataBB, metadataBB.remaining()),
+              SERIALIZER_UTILS.readBytes(metadataBB, metadataBB.remaining()),
               Metadata.class
           );
         }
@@ -576,17 +588,55 @@ public class IndexIO
         }
       }
 
-      Map<String, ColumnHolder> columns = new HashMap<>();
+      Map<String, Supplier<ColumnHolder>> columns = new HashMap<>();
 
       for (String columnName : cols) {
         if (Strings.isNullOrEmpty(columnName)) {
           log.warn("Null or Empty Dimension found in the file : " + inDir);
           continue;
         }
-        columns.put(columnName, deserializeColumn(mapper, smooshedFiles.mapFile(columnName), smooshedFiles));
+
+        ByteBuffer colBuffer = smooshedFiles.mapFile(columnName);
+
+        if (lazy) {
+          columns.put(columnName, Suppliers.memoize(
+              () -> {
+                try {
+                  return deserializeColumn(mapper, colBuffer, smooshedFiles);
+                }
+                catch (IOException | RuntimeException e) {
+                  log.warn(e, "Throw exceptions when deserialize column [%s].", columnName);
+                  loadFailed.execute();
+                  throw Throwables.propagate(e);
+                }
+              }
+          ));
+        } else {
+          ColumnHolder columnHolder = deserializeColumn(mapper, colBuffer, smooshedFiles);
+          columns.put(columnName, () -> columnHolder);
+        }
+
       }
 
-      columns.put(ColumnHolder.TIME_COLUMN_NAME, deserializeColumn(mapper, smooshedFiles.mapFile("__time"), smooshedFiles));
+      ByteBuffer timeBuffer = smooshedFiles.mapFile("__time");
+
+      if (lazy) {
+        columns.put(ColumnHolder.TIME_COLUMN_NAME, Suppliers.memoize(
+            () -> {
+              try {
+                return deserializeColumn(mapper, timeBuffer, smooshedFiles);
+              }
+              catch (IOException | RuntimeException e) {
+                log.warn(e, "Throw exceptions when deserialize column [%s]", ColumnHolder.TIME_COLUMN_NAME);
+                loadFailed.execute();
+                throw Throwables.propagate(e);
+              }
+            }
+        ));
+      } else {
+        ColumnHolder columnHolder = deserializeColumn(mapper, timeBuffer, smooshedFiles);
+        columns.put(ColumnHolder.TIME_COLUMN_NAME, () -> columnHolder);
+      }
 
       final QueryableIndex index = new SimpleQueryableIndex(
           dataInterval,
@@ -594,7 +644,8 @@ public class IndexIO
           segmentBitmapSerdeFactory.getBitmapFactory(),
           columns,
           smooshedFiles,
-          metadata
+          metadata,
+          lazy
       );
 
       log.debug("Mapped v9 index[%s] in %,d millis", inDir, System.currentTimeMillis() - startTime);
@@ -606,7 +657,7 @@ public class IndexIO
         throws IOException
     {
       ColumnDescriptor serde = mapper.readValue(
-          serializerUtils.readString(byteBuffer), ColumnDescriptor.class
+          SERIALIZER_UTILS.readString(byteBuffer), ColumnDescriptor.class
       );
       return serde.read(byteBuffer, columnConfig, smooshedFiles);
     }

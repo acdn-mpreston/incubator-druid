@@ -45,9 +45,21 @@ public class AllGranularity extends Granularity
   }
 
   @Override
+  public long increment(long time)
+  {
+    return DateTimes.MAX.getMillis();
+  }
+
+  @Override
   public DateTime increment(DateTime time)
   {
     return DateTimes.MAX;
+  }
+
+  @Override
+  public long bucketStart(long time)
+  {
+    return DateTimes.MIN.getMillis();
   }
 
   @Override
@@ -60,6 +72,15 @@ public class AllGranularity extends Granularity
   public DateTime toDate(String filePath, Formatter formatter)
   {
     throw new UnsupportedOperationException("This method should not be invoked for this granularity type");
+  }
+
+  /**
+   * No interval is aligned with all granularity since it's infinite.
+   */
+  @Override
+  public boolean isAligned(Interval interval)
+  {
+    return false;
   }
 
   @Override

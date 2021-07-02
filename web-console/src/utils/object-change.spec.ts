@@ -16,7 +16,9 @@
  * limitations under the License.
  */
 
-import { deepDelete, deepGet, deepSet, makePath, parsePath } from './object-change';
+import * as JSONBig from 'json-bigint-native';
+
+import { deepDelete, deepExtend, deepGet, deepSet, makePath, parsePath } from './object-change';
 
 describe('object-change', () => {
   describe('parsePath', () => {
@@ -38,7 +40,7 @@ describe('object-change', () => {
     const thing = {
       hello: {
         'consumer.props': 'lol',
-        wow: ['a', { test: 'moon' }],
+        'wow': ['a', { test: 'moon' }],
       },
       zetrix: null,
     };
@@ -136,7 +138,7 @@ describe('object-change', () => {
     });
 
     it('works with arrays', () => {
-      expect(JSON.parse(JSON.stringify(deepDelete(thing, 'hello.wow.0')))).toEqual({
+      expect(JSON.parse(JSONBig.stringify(deepDelete(thing, 'hello.wow.0')))).toEqual({
         hello: {
           moon: 1,
           wow: [
@@ -146,6 +148,45 @@ describe('object-change', () => {
           ],
         },
         zetrix: null,
+      });
+    });
+  });
+
+  describe('deepExtend', () => {
+    it('works', () => {
+      const obj1 = {
+        money: 1,
+        bag: 2,
+        nice: {
+          a: 1,
+          b: [],
+          c: { an: 123, ice: 321, bag: 1 },
+        },
+        swag: {
+          diamond: ['collar'],
+        },
+        pockets: { ice: 3 },
+        f: ['bag'],
+      };
+
+      const obj2 = {
+        bag: 3,
+        nice: null,
+        pockets: { need: 1, an: 2 },
+        swag: {
+          diamond: ['collar', 'molar'],
+        },
+      };
+
+      expect(deepExtend(obj1, obj2)).toEqual({
+        money: 1,
+        bag: 3,
+        nice: null,
+        swag: {
+          diamond: ['collar', 'molar'],
+        },
+        pockets: { need: 1, an: 2, ice: 3 },
+        f: ['bag'],
       });
     });
   });

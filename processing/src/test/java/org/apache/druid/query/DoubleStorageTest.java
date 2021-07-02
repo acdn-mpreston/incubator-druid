@@ -55,6 +55,7 @@ import org.apache.druid.segment.column.ValueType;
 import org.apache.druid.segment.incremental.IncrementalIndex;
 import org.apache.druid.segment.incremental.IncrementalIndexSchema;
 import org.apache.druid.segment.incremental.IndexSizeExceededException;
+import org.apache.druid.segment.incremental.OnheapIncrementalIndex;
 import org.apache.druid.segment.writeout.OffHeapMemorySegmentWriteOutMediumFactory;
 import org.apache.druid.timeline.SegmentId;
 import org.joda.time.Interval;
@@ -70,7 +71,6 @@ import java.io.IOException;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -86,13 +86,13 @@ public class DoubleStorageTest
       QueryRunnerTestHelper.NOOP_QUERYWATCHER
   );
 
-  private static final ScanQueryQueryToolChest scanQueryQueryToolChest = new ScanQueryQueryToolChest(
+  private static final ScanQueryQueryToolChest SCAN_QUERY_QUERY_TOOL_CHEST = new ScanQueryQueryToolChest(
       new ScanQueryConfig(),
       DefaultGenericQueryMetricsFactory.instance()
   );
 
   private static final ScanQueryRunnerFactory SCAN_QUERY_RUNNER_FACTORY = new ScanQueryRunnerFactory(
-      scanQueryQueryToolChest,
+      SCAN_QUERY_QUERY_TOOL_CHEST,
       new ScanQueryEngine(),
       new ScanQueryConfig()
   );
@@ -100,9 +100,9 @@ public class DoubleStorageTest
   private Druids.ScanQueryBuilder newTestQuery()
   {
     return Druids.newScanQueryBuilder()
-                 .dataSource(new TableDataSource(QueryRunnerTestHelper.dataSource))
+                 .dataSource(new TableDataSource(QueryRunnerTestHelper.DATA_SOURCE))
                  .columns(Collections.emptyList())
-                 .intervals(QueryRunnerTestHelper.fullOnIntervalSpec)
+                 .intervals(QueryRunnerTestHelper.FULL_ON_INTERVAL_SPEC)
                  .limit(Integer.MAX_VALUE)
                  .legacy(false);
   }
@@ -127,6 +127,7 @@ public class DoubleStorageTest
               ImmutableList.of(DIM_FLOAT_NAME),
               ImmutableList.of()
           ),
+          null,
           null,
           null
       )
@@ -156,6 +157,7 @@ public class DoubleStorageTest
             new ColumnAnalysis(
                 ValueType.LONG.toString(),
                 false,
+                false,
                 100,
                 null,
                 null,
@@ -166,6 +168,7 @@ public class DoubleStorageTest
             new ColumnAnalysis(
                 ValueType.STRING.toString(),
                 false,
+                false,
                 120,
                 1,
                 DIM_VALUE,
@@ -175,6 +178,7 @@ public class DoubleStorageTest
             DIM_FLOAT_NAME,
             new ColumnAnalysis(
                 ValueType.DOUBLE.toString(),
+                false,
                 false,
                 80,
                 null,
@@ -198,6 +202,7 @@ public class DoubleStorageTest
             new ColumnAnalysis(
                 ValueType.LONG.toString(),
                 false,
+                false,
                 100,
                 null,
                 null,
@@ -208,6 +213,7 @@ public class DoubleStorageTest
             new ColumnAnalysis(
                 ValueType.STRING.toString(),
                 false,
+                false,
                 120,
                 1,
                 DIM_VALUE,
@@ -217,6 +223,7 @@ public class DoubleStorageTest
             DIM_FLOAT_NAME,
             new ColumnAnalysis(
                 ValueType.FLOAT.toString(),
+                false,
                 false,
                 80,
                 null,
@@ -271,7 +278,7 @@ public class DoubleStorageTest
                                                       )
                                                       .merge(true)
                                                       .build();
-    List<SegmentAnalysis> results = runner.run(QueryPlus.wrap(segmentMetadataQuery), new HashMap<>()).toList();
+    List<SegmentAnalysis> results = runner.run(QueryPlus.wrap(segmentMetadataQuery)).toList();
 
     Assert.assertEquals(Collections.singletonList(expectedSegmentAnalysis), results);
 
@@ -292,8 +299,7 @@ public class DoubleStorageTest
         .virtualColumns()
         .build();
 
-    HashMap<String, Object> context = new HashMap<String, Object>();
-    Iterable<ScanResultValue> results = runner.run(QueryPlus.wrap(query), context).toList();
+    Iterable<ScanResultValue> results = runner.run(QueryPlus.wrap(query)).toList();
 
     ScanResultValue expectedScanResult = new ScanResultValue(
         SEGMENT_ID.toString(),
@@ -316,10 +322,10 @@ public class DoubleStorageTest
         )
         .build();
 
-    final IncrementalIndex index = new IncrementalIndex.Builder()
+    final IncrementalIndex index = new OnheapIncrementalIndex.Builder()
         .setIndexSchema(schema)
         .setMaxRowCount(MAX_ROWS)
-        .buildOnheap();
+        .build();
 
 
     getStreamOfEvents().forEach(o -> {

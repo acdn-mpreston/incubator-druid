@@ -16,16 +16,29 @@
  * limitations under the License.
  */
 
-import { Button, Classes, Dialog, Icon, Intent, ProgressBar } from '@blueprintjs/core';
-import { IconName } from '@blueprintjs/icons';
+import {
+  Button,
+  Classes,
+  Dialog,
+  FormGroup,
+  Icon,
+  IconName,
+  Intent,
+  ProgressBar,
+} from '@blueprintjs/core';
+import { IconNames } from '@blueprintjs/icons';
 import classNames from 'classnames';
-import React from 'react';
+import React, { ReactNode, useState } from 'react';
 
-import { AppToaster } from '../../singletons/toaster';
+import { WarningChecklist } from '../../components/warning-checklist/warning-checklist';
+import { AppToaster } from '../../singletons';
 
-export interface AsyncAlertDialogProps {
-  action: null | (() => Promise<void>);
-  onClose: (success: boolean) => void;
+import './async-action-dialog.scss';
+
+export interface AsyncActionDialogProps {
+  action: () => Promise<void>;
+  onClose: () => void;
+  onSuccess?: () => void;
   confirmButtonText: string;
   confirmButtonDisabled?: boolean;
   cancelButtonText?: string;
@@ -34,28 +47,36 @@ export interface AsyncAlertDialogProps {
   intent?: Intent;
   successText: string;
   failText: string;
+  warningChecks?: string[];
+  children?: ReactNode;
 }
 
-export interface AsyncAlertDialogState {
-  working: boolean;
-}
+export const AsyncActionDialog = React.memo(function AsyncActionDialog(
+  props: AsyncActionDialogProps,
+) {
+  const {
+    action,
+    onClose,
+    onSuccess,
+    successText,
+    failText,
+    className,
+    intent,
+    icon,
+    confirmButtonText,
+    confirmButtonDisabled,
+    cancelButtonText,
+    warningChecks,
+    children,
+  } = props;
+  const [working, setWorking] = useState(false);
+  const [allWarningsChecked, setAllWarningsChecked] = useState(false);
+  const needsMoreChecks = Boolean(warningChecks && !allWarningsChecked);
 
-export class AsyncActionDialog extends React.PureComponent<
-  AsyncAlertDialogProps,
-  AsyncAlertDialogState
-> {
-  constructor(props: AsyncAlertDialogProps) {
-    super(props);
-    this.state = {
-      working: false,
-    };
-  }
+  async function handleConfirm() {
+    if (needsMoreChecks) return;
 
-  private handleConfirm = async () => {
-    const { action, onClose, successText, failText } = this.props;
-    if (!action) throw new Error('should never get here');
-
-    this.setState({ working: true });
+    setWorking(true);
     try {
       await action();
     } catch (e) {
@@ -63,60 +84,61 @@ export class AsyncActionDialog extends React.PureComponent<
         message: `${failText}: ${e.message}`,
         intent: Intent.DANGER,
       });
-      this.setState({ working: false });
-      onClose(false);
+      setWorking(false);
+      onClose();
+
       return;
     }
     AppToaster.show({
       message: successText,
       intent: Intent.SUCCESS,
     });
-    this.setState({ working: false });
-    onClose(true);
-  };
 
-  render() {
-    const {
-      action,
-      onClose,
-      className,
-      icon,
-      intent,
-      confirmButtonText,
-      cancelButtonText,
-      confirmButtonDisabled,
-      children,
-    } = this.props;
-    const { working } = this.state;
-    if (!action) return null;
+    setWorking(false);
 
-    const handleClose = () => onClose(false);
+    if (onSuccess) onSuccess();
+    onClose();
+  }
 
-    return (
-      <Dialog
-        isOpen
-        className={classNames(Classes.ALERT, 'async-alert-dialog', className)}
-        canEscapeKeyClose={!working}
-        onClose={handleClose}
-      >
-        <div className={Classes.ALERT_BODY}>
-          {icon && <Icon icon={icon} />}
-          {!working && <div className={Classes.ALERT_CONTENTS}>{children}</div>}
-        </div>
+  return (
+    <Dialog
+      isOpen
+      className={classNames(Classes.ALERT, 'async-action-dialog', className)}
+      canEscapeKeyClose={!working}
+      onClose={onClose}
+    >
+      <div className={Classes.ALERT_BODY}>
         {working ? (
-          <ProgressBar />
+          <FormGroup className="progress-group" label="Processing action...">
+            <ProgressBar intent={intent || Intent.PRIMARY} />
+          </FormGroup>
         ) : (
-          <div className={Classes.ALERT_FOOTER}>
+          <>
+            {icon && <Icon icon={icon} />}
+            <div className={Classes.ALERT_CONTENTS}>
+              {children}
+              {warningChecks && (
+                <WarningChecklist checks={warningChecks} onChange={setAllWarningsChecked} />
+              )}
+            </div>
+          </>
+        )}
+      </div>
+      <div className={Classes.ALERT_FOOTER}>
+        {working ? (
+          <Button icon={IconNames.EYE_OFF} text="Run in background" onClick={onClose} />
+        ) : (
+          <>
             <Button
               intent={intent}
               text={confirmButtonText}
-              onClick={this.handleConfirm}
-              disabled={confirmButtonDisabled}
+              onClick={handleConfirm}
+              disabled={confirmButtonDisabled || needsMoreChecks}
             />
-            <Button text={cancelButtonText || 'Cancel'} onClick={handleClose} />
-          </div>
+            <Button text={cancelButtonText || 'Cancel'} onClick={onClose} />
+          </>
         )}
-      </Dialog>
-    );
-  }
-}
+      </div>
+    </Dialog>
+  );
+});

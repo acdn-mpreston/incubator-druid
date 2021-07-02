@@ -16,14 +16,31 @@
  * limitations under the License.
  */
 
+import { render } from '@testing-library/react';
+import * as JSONBig from 'json-bigint-native';
 import React from 'react';
-import { render } from 'react-testing-library';
 
 import { SnitchDialog } from './snitch-dialog';
 
 describe('snitch dialog', () => {
   it('matches snapshot', () => {
-    const snitchDialog = <SnitchDialog onSave={() => null} isOpen />;
+    const snitchDialog = <SnitchDialog title="Be snitchin" onSave={() => {}} onClose={() => {}} />;
+    render(snitchDialog);
+    expect(document.body.lastChild).toMatchSnapshot();
+  });
+
+  it('matches snapshot with history', () => {
+    const snitchDialog = (
+      <SnitchDialog
+        title="Be snitchin"
+        onSave={() => {}}
+        onClose={() => {}}
+        historyRecords={[
+          { auditTime: 'test', auditInfo: 'test', payload: JSONBig.stringify({ name: 'test' }) },
+          { auditTime: 'test', auditInfo: 'test', payload: JSONBig.stringify({ name: 'test' }) },
+        ]}
+      />
+    );
     render(snitchDialog);
     expect(document.body.lastChild).toMatchSnapshot();
   });

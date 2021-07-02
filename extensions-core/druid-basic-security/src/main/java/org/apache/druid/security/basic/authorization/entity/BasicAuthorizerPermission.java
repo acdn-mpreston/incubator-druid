@@ -44,7 +44,7 @@ public class BasicAuthorizerPermission
     this.resourceNamePattern = resourceNamePattern;
   }
 
-  public BasicAuthorizerPermission(
+  private BasicAuthorizerPermission(
       ResourceAction resourceAction
   )
   {
@@ -118,5 +118,14 @@ public class BasicAuthorizerPermission
                             ? getResourceNamePattern().pattern().hashCode()
                             : 0);
     return result;
+  }
+
+  @Override
+  public String toString()
+  {
+    return "BasicAuthorizerPermission{" +
+           "resourceAction=" + resourceAction +
+           ", resourceNamePattern=" + resourceNamePattern +
+           '}';
   }
 }

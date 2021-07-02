@@ -20,9 +20,10 @@
 package org.apache.druid.query.scan;
 
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableMap;
 import org.apache.druid.java.util.common.DateTimes;
+import org.apache.druid.java.util.common.Intervals;
 import org.apache.druid.java.util.common.UOE;
+import org.apache.druid.java.util.common.concurrent.Execs;
 import org.apache.druid.java.util.common.guava.Sequence;
 import org.apache.druid.java.util.common.guava.Sequences;
 import org.apache.druid.query.DefaultGenericQueryMetricsFactory;
@@ -30,7 +31,9 @@ import org.apache.druid.query.Druids;
 import org.apache.druid.query.QueryPlus;
 import org.apache.druid.query.QueryRunner;
 import org.apache.druid.query.QueryRunnerTestHelper;
+import org.apache.druid.query.ResourceLimitExceededException;
 import org.apache.druid.query.SegmentDescriptor;
+import org.apache.druid.query.context.ResponseContext;
 import org.apache.druid.query.spec.LegacySegmentSpec;
 import org.apache.druid.query.spec.MultipleIntervalSegmentSpec;
 import org.apache.druid.query.spec.MultipleSpecificSegmentSpec;
@@ -38,28 +41,47 @@ import org.apache.druid.query.spec.QuerySegmentSpec;
 import org.apache.druid.query.spec.SpecificSegmentSpec;
 import org.joda.time.Interval;
 import org.junit.Assert;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.runners.Enclosed;
+import org.junit.rules.ExpectedException;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 
 @RunWith(Enclosed.class)
 public class ScanQueryRunnerFactoryTest
 {
+  private static final ScanQueryConfig CONFIG = new ScanQueryConfig()
+  {
+    @Override
+    public int getMaxRowsQueuedForOrdering()
+    {
+      return 10000;
+    }
 
-  private static final ScanQueryRunnerFactory factory = new ScanQueryRunnerFactory(
+    @Override
+    public int getMaxSegmentPartitionsOrderedInMemory()
+    {
+      return 4;
+    }
+  };
+
+  private static final ScanQueryRunnerFactory FACTORY = new ScanQueryRunnerFactory(
       new ScanQueryQueryToolChest(
-          new ScanQueryConfig(),
+          CONFIG,
           DefaultGenericQueryMetricsFactory.instance()
       ),
       new ScanQueryEngine(),
-      new ScanQueryConfig()
+      CONFIG
   );
 
   @RunWith(Parameterized.class)
@@ -82,7 +104,7 @@ public class ScanQueryRunnerFactoryTest
                          .batchSize(batchSize)
                          .limit(limit)
                          .order(order)
-                         .intervals(QueryRunnerTestHelper.fullOnIntervalSpec)
+                         .intervals(QueryRunnerTestHelper.FULL_ON_INTERVAL_SPEC)
                          .dataSource("some datasource")
                          .resultFormat(resultFormat)
                          .build();
@@ -114,7 +136,7 @@ public class ScanQueryRunnerFactoryTest
     }
 
     @Test
-    public void testSortAndLimitScanResultValues()
+    public void testSortAndLimitScanResultValues() throws IOException
     {
       List<ScanResultValue> srvs = new ArrayList<>(numElements);
       List<Long> expectedEventTimestamps = new ArrayList<>();
@@ -137,7 +159,7 @@ public class ScanQueryRunnerFactoryTest
       });
       Sequence<ScanResultValue> inputSequence = Sequences.simple(srvs);
       try {
-        List<ScanResultValue> output = factory.priorityQueueSortAndLimit(
+        List<ScanResultValue> output = FACTORY.stableLimitingSort(
             inputSequence,
             query,
             ImmutableList.of(new Interval(
@@ -145,13 +167,13 @@ public class ScanQueryRunnerFactoryTest
                 DateTimes.of("2019-01-01").plusHours(1)
             ))
         ).toList();
-        if (query.getLimit() > Integer.MAX_VALUE) {
+        if (query.getScanRowsLimit() > Integer.MAX_VALUE) {
           Assert.fail("Unsupported exception should have been thrown due to high limit");
         }
         validateSortedOutput(output, expectedEventTimestamps);
       }
       catch (UOE e) {
-        if (query.getLimit() <= Integer.MAX_VALUE) {
+        if (query.getScanRowsLimit() <= Integer.MAX_VALUE) {
           Assert.fail("Unsupported operation exception should not have been thrown here");
         }
       }
@@ -226,10 +248,10 @@ public class ScanQueryRunnerFactoryTest
       });
 
       List<ScanResultValue> output =
-          factory.nWayMergeAndLimit(
+          FACTORY.nWayMergeAndLimit(
               groupedRunners,
               QueryPlus.wrap(query),
-              ImmutableMap.of()
+              ResponseContext.createEmpty()
           ).toList();
 
       validateSortedOutput(output, expectedEventTimestamps);
@@ -247,7 +269,7 @@ public class ScanQueryRunnerFactoryTest
       }
 
       // check total # of rows <= limit
-      Assert.assertTrue(output.size() <= query.getLimit());
+      Assert.assertTrue(output.size() <= query.getScanRowsLimit());
 
       // check ordering is correct
       for (int i = 1; i < output.size(); i++) {
@@ -261,7 +283,7 @@ public class ScanQueryRunnerFactoryTest
       }
 
       // check the values are correct
-      for (int i = 0; i < query.getLimit() && i < output.size(); i++) {
+      for (int i = 0; i < query.getScanRowsLimit() && i < output.size(); i++) {
         Assert.assertEquals((long) expectedEventTimestamps.get(i), output.get(i).getFirstEventTimestamp(resultFormat));
       }
     }
@@ -274,6 +296,9 @@ public class ScanQueryRunnerFactoryTest
         DateTimes.of("2019-01-01").plusHours(1)
     ), "1", 0);
 
+    @Rule
+    public ExpectedException expectedException = ExpectedException.none();
+
     @Test
     public void testGetValidIntervalsFromSpec()
     {
@@ -284,11 +309,11 @@ public class ScanQueryRunnerFactoryTest
       );
       QuerySegmentSpec singleSpecificSpec = new SpecificSegmentSpec(descriptor);
 
-      List<Interval> intervals = factory.getIntervalsFromSpecificQuerySpec(multiSpecificSpec);
+      List<Interval> intervals = FACTORY.getIntervalsFromSpecificQuerySpec(multiSpecificSpec);
       Assert.assertEquals(1, intervals.size());
       Assert.assertEquals(descriptor.getInterval(), intervals.get(0));
 
-      intervals = factory.getIntervalsFromSpecificQuerySpec(singleSpecificSpec);
+      intervals = FACTORY.getIntervalsFromSpecificQuerySpec(singleSpecificSpec);
       Assert.assertEquals(1, intervals.size());
       Assert.assertEquals(descriptor.getInterval(), intervals.get(0));
     }
@@ -304,7 +329,7 @@ public class ScanQueryRunnerFactoryTest
               )
           )
       );
-      factory.getIntervalsFromSpecificQuerySpec(multiIntervalSpec);
+      FACTORY.getIntervalsFromSpecificQuerySpec(multiIntervalSpec);
     }
 
     @Test(expected = UOE.class)
@@ -316,7 +341,45 @@ public class ScanQueryRunnerFactoryTest
               DateTimes.of("2019-01-01").plusHours(1)
           )
       );
-      factory.getIntervalsFromSpecificQuerySpec(legacySpec);
+      FACTORY.getIntervalsFromSpecificQuerySpec(legacySpec);
+    }
+
+
+    @Test
+    public void testMergeRunnersGuardrailsExceeded()
+    {
+      final QueryRunner<ScanResultValue> runner = FACTORY.mergeRunners(
+          Execs.directExecutor(),
+          IntStream.range(0, CONFIG.getMaxSegmentPartitionsOrderedInMemory() + 1)
+                   .mapToObj(i -> (QueryRunner<ScanResultValue>) (queryPlus, responseContext) -> Sequences.empty())
+                   .collect(Collectors.toList())
+      );
+
+      expectedException.expect(ResourceLimitExceededException.class);
+      expectedException.expectMessage(
+          "Time ordering is not supported for a Scan query with 5 segments per time chunk and a row limit of 10,001. "
+          + "Try reducing your query limit below maxRowsQueuedForOrdering (currently 10,000), or using compaction to "
+          + "reduce the number of segments per time chunk, or raising maxSegmentPartitionsOrderedInMemory "
+          + "(currently 4) above the number of segments you have per time chunk."
+      );
+
+      runner.run(
+          QueryPlus.wrap(
+              Druids.newScanQueryBuilder()
+                    .dataSource("foo")
+                    .limit(CONFIG.getMaxRowsQueuedForOrdering() + 1)
+                    .intervals(
+                        new MultipleSpecificSegmentSpec(
+                            IntStream.range(0, CONFIG.getMaxSegmentPartitionsOrderedInMemory() + 1)
+                                     .mapToObj(i -> new SegmentDescriptor(Intervals.ETERNITY, "v0", i))
+                                     .collect(Collectors.toList())
+                        )
+                    )
+                    .order(ScanQuery.Order.ASCENDING)
+                    .build()
+          ),
+          ResponseContext.createEmpty()
+      );
     }
   }
 }

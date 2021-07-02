@@ -24,8 +24,8 @@ import org.apache.druid.java.util.common.CloseableIterators;
 import org.apache.druid.java.util.common.IAE;
 import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.parsers.CloseableIterator;
+import org.apache.druid.query.aggregation.AggregatorAdapters;
 import org.apache.druid.query.aggregation.AggregatorFactory;
-import org.apache.druid.segment.ColumnSelectorFactory;
 
 import java.nio.ByteBuffer;
 import java.util.AbstractList;
@@ -39,8 +39,6 @@ public class LimitedBufferHashGrouper<KeyType> extends AbstractBufferHashGrouper
   private static final int MIN_INITIAL_BUCKETS = 4;
   private static final int DEFAULT_INITIAL_BUCKETS = 1024;
   private static final float DEFAULT_MAX_LOAD_FACTOR = 0.7f;
-
-  private final AggregatorFactory[] aggregatorFactories;
 
   // Limit to apply to results.
   private int limit;
@@ -63,11 +61,13 @@ public class LimitedBufferHashGrouper<KeyType> extends AbstractBufferHashGrouper
   private BufferGrouperOffsetHeapIndexUpdater heapIndexUpdater;
   private boolean initialized = false;
 
+  private boolean hasIterated = false;
+  private int offsetHeapIterableSize = 0;
+
   public LimitedBufferHashGrouper(
       final Supplier<ByteBuffer> bufferSupplier,
       final Grouper.KeySerde<KeyType> keySerde,
-      final ColumnSelectorFactory columnSelectorFactory,
-      final AggregatorFactory[] aggregatorFactories,
+      final AggregatorAdapters aggregators,
       final int bufferGrouperMaxSize,
       final float maxLoadFactor,
       final int initialBuckets,
@@ -75,7 +75,7 @@ public class LimitedBufferHashGrouper<KeyType> extends AbstractBufferHashGrouper
       final boolean sortHasNonGroupingFields
   )
   {
-    super(bufferSupplier, keySerde, aggregatorFactories, bufferGrouperMaxSize);
+    super(bufferSupplier, keySerde, aggregators, HASH_SIZE + keySerde.keySize(), bufferGrouperMaxSize);
     this.maxLoadFactor = maxLoadFactor > 0 ? maxLoadFactor : DEFAULT_MAX_LOAD_FACTOR;
     this.initialBuckets = initialBuckets > 0 ? Math.max(MIN_INITIAL_BUCKETS, initialBuckets) : DEFAULT_INITIAL_BUCKETS;
     this.limit = limit;
@@ -85,18 +85,9 @@ public class LimitedBufferHashGrouper<KeyType> extends AbstractBufferHashGrouper
       throw new IAE("Invalid maxLoadFactor[%f], must be < 1.0", maxLoadFactor);
     }
 
-    int offset = HASH_SIZE + keySize;
-    this.aggregatorFactories = aggregatorFactories;
-    for (int i = 0; i < aggregatorFactories.length; i++) {
-      aggregators[i] = aggregatorFactories[i].factorizeBuffered(columnSelectorFactory);
-      aggregatorOffsets[i] = offset;
-      offset += aggregatorFactories[i].getMaxIntermediateSizeWithNulls();
-    }
-
     // For each bucket, store an extra field indicating the bucket's current index within the heap when
-    // pushing down limits
-    offset += Integer.BYTES;
-    this.bucketSize = offset;
+    // pushing down limits (size Integer.BYTES).
+    this.bucketSize = HASH_SIZE + keySerde.keySize() + Integer.BYTES + aggregators.spaceNeeded();
   }
 
   @Override
@@ -110,7 +101,7 @@ public class LimitedBufferHashGrouper<KeyType> extends AbstractBufferHashGrouper
     // We check this already in SpillingGrouper to ensure that LimitedBufferHashGrouper is only used when there is
     // sufficient buffer capacity. If this error occurs, something went very wrong.
     if (!validateBufferCapacity(totalBuffer.capacity())) {
-      throw new IAE("WTF? Using LimitedBufferHashGrouper with insufficient buffer capacity.");
+      throw new IAE("LimitedBufferHashGrouper initialized with insufficient buffer capacity");
     }
 
     //only store offsets up to `limit` + 1 instead of up to # of buckets, we only keep the top results
@@ -157,34 +148,34 @@ public class LimitedBufferHashGrouper<KeyType> extends AbstractBufferHashGrouper
   @Override
   public void newBucketHook(int bucketOffset)
   {
+    checkHeapAlreadyIterated();
     heapIndexUpdater.updateHeapIndexForOffset(bucketOffset, -1);
+    if (!sortHasNonGroupingFields) {
+      offsetHeap.addOffset(bucketOffset);
+    }
   }
 
   @Override
-  public boolean canSkipAggregate(boolean bucketWasUsed, int bucketOffset)
+  public boolean canSkipAggregate(int bucketOffset)
   {
-    if (bucketWasUsed) {
-      if (!sortHasNonGroupingFields) {
-        if (heapIndexUpdater.getHeapIndexForOffset(bucketOffset) < 0) {
-          return true;
-        }
-      }
-    }
-    return false;
+    return !sortHasNonGroupingFields && heapIndexUpdater.getHeapIndexForOffset(bucketOffset) < 0;
   }
 
   @Override
   public void afterAggregateHook(int bucketOffset)
   {
-    int heapIndex = heapIndexUpdater.getHeapIndexForOffset(bucketOffset);
-    if (heapIndex < 0) {
-      // not in the heap, add it
-      offsetHeap.addOffset(bucketOffset);
-    } else if (sortHasNonGroupingFields) {
-      // Since the sorting columns contain at least one aggregator, we need to remove and reinsert
-      // the entries after aggregating to maintain proper ordering
-      offsetHeap.removeAt(heapIndex);
-      offsetHeap.addOffset(bucketOffset);
+    checkHeapAlreadyIterated();
+    if (sortHasNonGroupingFields) {
+      int heapIndex = heapIndexUpdater.getHeapIndexForOffset(bucketOffset);
+
+      if (heapIndex < 0) {
+        offsetHeap.addOffset(bucketOffset);
+      } else {
+        // Since the sorting columns contain at least one aggregator, we need to remove and reinsert
+        // the entries after aggregating to maintain proper ordering
+        offsetHeap.removeAt(heapIndex);
+        offsetHeap.addOffset(bucketOffset);
+      }
     }
   }
 
@@ -195,6 +186,8 @@ public class LimitedBufferHashGrouper<KeyType> extends AbstractBufferHashGrouper
     keySerde.reset();
     offsetHeap.reset();
     heapIndexUpdater.setHashTableBuffer(hashTable.getTableBuffer());
+    hasIterated = false;
+    offsetHeapIterableSize = 0;
   }
 
   @Override
@@ -332,41 +325,93 @@ public class LimitedBufferHashGrouper<KeyType> extends AbstractBufferHashGrouper
   private CloseableIterator<Entry<KeyType>> makeHeapIterator()
   {
     final int initialHeapSize = offsetHeap.getHeapSize();
-    return new CloseableIterator<Entry<KeyType>>()
-    {
-      int curr = 0;
 
-      @Override
-      public boolean hasNext()
+    // the first iteration destroys the heap, but writes out the sorted array in reverse
+    if (!hasIterated) {
+      hasIterated = true;
+      offsetHeapIterableSize = initialHeapSize;
+      return new CloseableIterator<Entry<KeyType>>()
       {
-        return curr < initialHeapSize;
-      }
+        int curr = 0;
 
-      @Override
-      public Grouper.Entry<KeyType> next()
-      {
-        if (curr >= initialHeapSize) {
-          throw new NoSuchElementException();
+        @Override
+        public boolean hasNext()
+        {
+          return curr < initialHeapSize;
         }
-        final int offset = offsetHeap.removeMin();
-        final Grouper.Entry<KeyType> entry = bucketEntryForOffset(offset);
-        curr++;
 
-        return entry;
-      }
+        @Override
+        public Grouper.Entry<KeyType> next()
+        {
+          if (curr >= initialHeapSize) {
+            throw new NoSuchElementException();
+          }
+          final int offset = offsetHeap.removeMin();
+          final Grouper.Entry<KeyType> entry = bucketEntryForOffset(offset);
+          curr++;
+          // write out offset to end of heap, which is no longer used after removing min
+          offsetHeap.setAt(initialHeapSize - curr, offset);
 
-      @Override
-      public void remove()
+          return entry;
+        }
+
+        @Override
+        public void remove()
+        {
+          throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void close()
+        {
+          // do nothing
+        }
+      };
+    } else {
+      // subsequent iterations just walk the buffer backwards
+      return new CloseableIterator<Entry<KeyType>>()
       {
-        throw new UnsupportedOperationException();
-      }
+        int curr = offsetHeapIterableSize - 1;
 
-      @Override
-      public void close()
-      {
-        // do nothing
-      }
-    };
+        @Override
+        public boolean hasNext()
+        {
+          return curr >= 0;
+        }
+
+        @Override
+        public Grouper.Entry<KeyType> next()
+        {
+          if (curr < 0) {
+            throw new NoSuchElementException();
+          }
+          final int offset = offsetHeap.getAt(curr);
+          final Grouper.Entry<KeyType> entry = bucketEntryForOffset(offset);
+          curr--;
+
+          return entry;
+        }
+
+        @Override
+        public void remove()
+        {
+          throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void close()
+        {
+          // do nothing
+        }
+      };
+    }
+  }
+
+  private void checkHeapAlreadyIterated()
+  {
+    if (hasIterated) {
+      throw new IllegalStateException("attempted to add offset after grouper was iterated");
+    }
   }
 
   private Comparator<Integer> makeHeapComparator()
@@ -374,8 +419,8 @@ public class LimitedBufferHashGrouper<KeyType> extends AbstractBufferHashGrouper
     return new Comparator<Integer>()
     {
       final BufferComparator bufferComparator = keySerde.bufferComparatorWithAggregators(
-          aggregatorFactories,
-          aggregatorOffsets
+          aggregators.factories().toArray(new AggregatorFactory[0]),
+          aggregators.aggregatorPositions()
       );
 
       @Override
@@ -389,10 +434,10 @@ public class LimitedBufferHashGrouper<KeyType> extends AbstractBufferHashGrouper
 
   public boolean validateBufferCapacity(int bufferCapacity)
   {
-    int numBucketsNeeded = (int) Math.ceil((limit + 1) / maxLoadFactor);
-    int targetTableArenaSize = numBucketsNeeded * bucketSize * 2;
-    int heapSize = (limit + 1) * (Integer.BYTES);
-    int requiredSize = targetTableArenaSize + heapSize;
+    long numBucketsNeeded = (long) Math.ceil((limit + 1) / maxLoadFactor);
+    long targetTableArenaSize = numBucketsNeeded * bucketSize * 2;
+    long heapSize = ((long) limit + 1) * (Integer.BYTES);
+    long requiredSize = targetTableArenaSize + heapSize;
 
     if (bufferCapacity < requiredSize) {
       log.debug(
@@ -499,7 +544,7 @@ public class LimitedBufferHashGrouper<KeyType> extends AbstractBufferHashGrouper
           final int newBucket = findBucket(true, maxBuckets, newTableBuffer, keyBuffer, keyHash);
 
           if (newBucket < 0) {
-            throw new ISE("WTF?! Couldn't find a bucket while resizing?!");
+            throw new ISE("Couldn't find a bucket while resizing");
           }
 
           final int newBucketOffset = newBucket * bucketSizeWithHash;
@@ -510,15 +555,13 @@ public class LimitedBufferHashGrouper<KeyType> extends AbstractBufferHashGrouper
           // Update the heap with the copied bucket's new offset in the new table
           offsetHeap.setAt(i, newBucketOffset);
 
-          // relocate aggregators (see https://github.com/apache/incubator-druid/pull/4071)
-          for (int j = 0; j < aggregators.length; j++) {
-            aggregators[j].relocate(
-                oldBucketOffset + aggregatorOffsets[j],
-                newBucketOffset + aggregatorOffsets[j],
-                tableBuffer,
-                newTableBuffer
-            );
-          }
+          // relocate aggregators (see https://github.com/apache/druid/pull/4071)
+          aggregators.relocate(
+              oldBucketOffset + baseAggregatorOffset,
+              newBucketOffset + baseAggregatorOffset,
+              tableBuffer,
+              newTableBuffer
+          );
         }
       }
 

@@ -395,7 +395,7 @@ public class LookupCoordinatorManager
                 lookupCoordinatorManagerConfig.getHostTimeout().getMillis() * 10,
                 TimeUnit.MILLISECONDS
             )) {
-          throw new ISE("WTF! LookupCoordinatorManager executor from last start() hasn't finished. Failed to Start.");
+          throw new ISE("LookupCoordinatorManager executor from last start() hasn't finished. Failed to Start.");
         }
 
         executorService = MoreExecutors.listeningDecorator(
@@ -557,16 +557,27 @@ public class LookupCoordinatorManager
 
     try {
       List<ListenableFuture<Map.Entry>> futures = new ArrayList<>();
-      for (Map.Entry<String, Map<String, LookupExtractorFactoryMapContainer>> tierEntry : allLookupTiers.entrySet()) {
 
-        LOG.debug("Starting lookup mgmt for tier [%s].", tierEntry.getKey());
+      Set<String> discoveredLookupTiers = lookupNodeDiscovery.getAllTiers();
 
-        final Map<String, LookupExtractorFactoryMapContainer> tierLookups = tierEntry.getValue();
-        for (final HostAndPortWithScheme node : lookupNodeDiscovery.getNodesInTier(tierEntry.getKey())) {
+      // Check and Log warnings about lookups configured by user in DB but no nodes discovered to load those.
+      for (String tierInDB : allLookupTiers.keySet()) {
+        if (!discoveredLookupTiers.contains(tierInDB) &&
+            !allLookupTiers.getOrDefault(tierInDB, ImmutableMap.of()).isEmpty()) {
+          LOG.warn("Found lookups for tier [%s] in DB, but no nodes discovered for it", tierInDB);
+        }
+      }
+
+      for (String tier : discoveredLookupTiers) {
+
+        LOG.debug("Starting lookup mgmt for tier [%s].", tier);
+
+        final Map<String, LookupExtractorFactoryMapContainer> tierLookups = allLookupTiers.getOrDefault(tier, ImmutableMap.of());
+        for (final HostAndPortWithScheme node : lookupNodeDiscovery.getNodesInTier(tier)) {
 
           LOG.debug(
               "Starting lookup mgmt for tier [%s] and host [%s:%s:%s].",
-              tierEntry.getKey(),
+              tier,
               node.getScheme(),
               node.getHostText(),
               node.getPort()

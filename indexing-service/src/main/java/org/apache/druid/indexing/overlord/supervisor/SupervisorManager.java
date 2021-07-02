@@ -23,6 +23,7 @@ import com.google.common.base.Optional;
 import com.google.common.base.Preconditions;
 import com.google.inject.Inject;
 import org.apache.druid.indexing.overlord.DataSourceMetadata;
+import org.apache.druid.indexing.overlord.supervisor.autoscaler.SupervisorTaskAutoScaler;
 import org.apache.druid.java.util.common.Pair;
 import org.apache.druid.java.util.common.lifecycle.LifecycleStart;
 import org.apache.druid.java.util.common.lifecycle.LifecycleStop;
@@ -30,6 +31,7 @@ import org.apache.druid.java.util.emitter.EmittingLogger;
 import org.apache.druid.metadata.MetadataSupervisorManager;
 
 import javax.annotation.Nullable;
+
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -44,6 +46,8 @@ public class SupervisorManager
 
   private final MetadataSupervisorManager metadataSupervisorManager;
   private final ConcurrentHashMap<String, Pair<Supervisor, SupervisorSpec>> supervisors = new ConcurrentHashMap<>();
+  // SupervisorTaskAutoScaler could be null
+  private final ConcurrentHashMap<String, SupervisorTaskAutoScaler> autoscalers = new ConcurrentHashMap<>();
   private final Object lock = new Object();
 
   private volatile boolean started = false;
@@ -52,6 +56,11 @@ public class SupervisorManager
   public SupervisorManager(MetadataSupervisorManager metadataSupervisorManager)
   {
     this.metadataSupervisorManager = metadataSupervisorManager;
+  }
+
+  public MetadataSupervisorManager getMetadataSupervisorManager()
+  {
+    return metadataSupervisorManager;
   }
 
   public Set<String> getSupervisorIds()
@@ -107,26 +116,6 @@ public class SupervisorManager
     }
   }
 
-  public void stopAndRemoveAllSupervisors()
-  {
-    Preconditions.checkState(started, "SupervisorManager not started");
-
-    synchronized (lock) {
-      Preconditions.checkState(started, "SupervisorManager not started");
-      supervisors.keySet().forEach(id -> possiblyStopAndRemoveSupervisorInternal(id, true));
-    }
-  }
-
-  public void suspendOrResumeAllSupervisors(boolean suspend)
-  {
-    Preconditions.checkState(started, "SupervisorManager not started");
-
-    synchronized (lock) {
-      Preconditions.checkState(started, "SupervisorManager not started");
-      supervisors.keySet().forEach(id -> possiblySuspendOrResumeSupervisorInternal(id, suspend));
-    }
-  }
-
   @LifecycleStart
   public void start()
   {
@@ -135,8 +124,8 @@ public class SupervisorManager
 
     synchronized (lock) {
       Map<String, SupervisorSpec> supervisors = metadataSupervisorManager.getLatest();
-      for (String id : supervisors.keySet()) {
-        SupervisorSpec spec = supervisors.get(id);
+      for (Map.Entry<String, SupervisorSpec> supervisor : supervisors.entrySet()) {
+        final SupervisorSpec spec = supervisor.getValue();
         if (!(spec instanceof NoopSupervisorSpec)) {
           try {
             createAndStartSupervisorInternal(spec, false);
@@ -160,12 +149,17 @@ public class SupervisorManager
       for (String id : supervisors.keySet()) {
         try {
           supervisors.get(id).lhs.stop(false);
+          SupervisorTaskAutoScaler autoscaler = autoscalers.get(id);
+          if (autoscaler != null) {
+            autoscaler.stop();
+          }
         }
         catch (Exception e) {
           log.warn(e, "Caught exception while stopping supervisor [%s]", id);
         }
       }
       supervisors.clear();
+      autoscalers.clear();
       started = false;
     }
 
@@ -207,15 +201,17 @@ public class SupervisorManager
     }
 
     supervisor.lhs.reset(dataSourceMetadata);
+    SupervisorTaskAutoScaler autoscaler = autoscalers.get(id);
+    if (autoscaler != null) {
+      autoscaler.reset();
+    }
     return true;
   }
 
   public boolean checkPointDataSourceMetadata(
       String supervisorId,
-      @Nullable Integer taskGroupId,
-      String baseSequenceName,
-      DataSourceMetadata previousDataSourceMetadata,
-      DataSourceMetadata currentDataSourceMetadata
+      int taskGroupId,
+      DataSourceMetadata previousDataSourceMetadata
   )
   {
     try {
@@ -226,7 +222,7 @@ public class SupervisorManager
 
       Preconditions.checkNotNull(supervisor, "supervisor could not be found");
 
-      supervisor.lhs.checkpoint(taskGroupId, baseSequenceName, previousDataSourceMetadata, currentDataSourceMetadata);
+      supervisor.lhs.checkpoint(taskGroupId, previousDataSourceMetadata);
       return true;
     }
     catch (Exception e) {
@@ -259,6 +255,12 @@ public class SupervisorManager
     }
     pair.lhs.stop(true);
     supervisors.remove(id);
+
+    SupervisorTaskAutoScaler autoscler = autoscalers.get(id);
+    if (autoscler != null) {
+      autoscler.stop();
+      autoscalers.remove(id);
+    }
 
     return true;
   }
@@ -304,9 +306,16 @@ public class SupervisorManager
     }
 
     Supervisor supervisor;
+    SupervisorTaskAutoScaler autoscaler;
     try {
       supervisor = spec.createSupervisor();
+      autoscaler = spec.createAutoscaler(supervisor);
+
       supervisor.start();
+      if (autoscaler != null) {
+        autoscaler.start();
+        autoscalers.put(id, autoscaler);
+      }
     }
     catch (Exception e) {
       // Supervisor creation or start failed write tombstone only when trying to start a new supervisor

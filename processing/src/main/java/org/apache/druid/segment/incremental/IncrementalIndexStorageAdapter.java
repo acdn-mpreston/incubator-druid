@@ -29,15 +29,15 @@ import org.apache.druid.query.BaseQuery;
 import org.apache.druid.query.QueryMetrics;
 import org.apache.druid.query.filter.Filter;
 import org.apache.druid.query.filter.ValueMatcher;
-import org.apache.druid.segment.Capabilities;
 import org.apache.druid.segment.ColumnSelectorFactory;
 import org.apache.druid.segment.Cursor;
+import org.apache.druid.segment.DimensionDictionarySelector;
 import org.apache.druid.segment.DimensionIndexer;
-import org.apache.druid.segment.DimensionSelector;
 import org.apache.druid.segment.Metadata;
 import org.apache.druid.segment.StorageAdapter;
 import org.apache.druid.segment.VirtualColumns;
 import org.apache.druid.segment.column.ColumnCapabilities;
+import org.apache.druid.segment.column.ColumnCapabilitiesImpl;
 import org.apache.druid.segment.column.ColumnHolder;
 import org.apache.druid.segment.data.Indexed;
 import org.apache.druid.segment.data.ListIndexed;
@@ -52,17 +52,79 @@ import java.util.Iterator;
  */
 public class IncrementalIndexStorageAdapter implements StorageAdapter
 {
-  private final IncrementalIndex<?> index;
+  private static final ColumnCapabilities.CoercionLogic STORAGE_ADAPTER_CAPABILITIES_COERCE_LOGIC =
+      new ColumnCapabilities.CoercionLogic()
+      {
+        @Override
+        public boolean dictionaryEncoded()
+        {
+          return false;
+        }
+
+        @Override
+        public boolean dictionaryValuesSorted()
+        {
+          return false;
+        }
+
+        @Override
+        public boolean dictionaryValuesUnique()
+        {
+          return true;
+        }
+
+        @Override
+        public boolean multipleValues()
+        {
+          return true;
+        }
+
+        @Override
+        public boolean hasNulls()
+        {
+          return true;
+        }
+      };
+
+  private static final ColumnCapabilities.CoercionLogic SNAPSHOT_STORAGE_ADAPTER_CAPABILITIES_COERCE_LOGIC =
+      new ColumnCapabilities.CoercionLogic()
+      {
+        @Override
+        public boolean dictionaryEncoded()
+        {
+          return true;
+        }
+
+        @Override
+        public boolean dictionaryValuesSorted()
+        {
+          return true;
+        }
+
+        @Override
+        public boolean dictionaryValuesUnique()
+        {
+          return true;
+        }
+
+        @Override
+        public boolean multipleValues()
+        {
+          return false;
+        }
+
+        @Override
+        public boolean hasNulls()
+        {
+          return false;
+        }
+      };
+
+  final IncrementalIndex<?> index;
 
   public IncrementalIndexStorageAdapter(IncrementalIndex<?> index)
   {
     this.index = index;
-  }
-
-  @Override
-  public String getSegmentIdentifier()
-  {
-    throw new UnsupportedOperationException();
   }
 
   @Override
@@ -97,7 +159,7 @@ public class IncrementalIndexStorageAdapter implements StorageAdapter
 
     DimensionIndexer indexer = desc.getIndexer();
     int cardinality = indexer.getCardinality();
-    return cardinality != DimensionSelector.CARDINALITY_UNKNOWN ? cardinality : Integer.MAX_VALUE;
+    return cardinality != DimensionDictionarySelector.CARDINALITY_UNKNOWN ? cardinality : Integer.MAX_VALUE;
   }
 
   @Override
@@ -144,17 +206,37 @@ public class IncrementalIndexStorageAdapter implements StorageAdapter
     return indexer.getMaxValue();
   }
 
-
-  @Override
-  public Capabilities getCapabilities()
-  {
-    return Capabilities.builder().dimensionValuesSorted(false).build();
-  }
-
   @Override
   public ColumnCapabilities getColumnCapabilities(String column)
   {
-    return index.getCapabilities(column);
+    // Different from index.getCapabilities because, in a way, IncrementalIndex's string-typed dimensions
+    // are always potentially multi-valued at query time. (Missing / null values for a row can potentially be
+    // represented by an empty array; see StringDimensionIndexer.IndexerDimensionSelector's getRow method.)
+    //
+    // We don't want to represent this as having-multiple-values in index.getCapabilities, because that's used
+    // at index-persisting time to determine if we need a multi-value column or not. However, that means we
+    // need to tweak the capabilities here in the StorageAdapter (a query-time construct), so at query time
+    // they appear multi-valued.
+    //
+    // Note that this could be improved if we snapshot the capabilities at cursor creation time and feed those through
+    // to the StringDimensionIndexer so the selector built on top of it can produce values from the snapshot state of
+    // multi-valuedness at cursor creation time, instead of the latest state, and getSnapshotColumnCapabilities could
+    // be removed.
+    return ColumnCapabilitiesImpl.snapshot(index.getCapabilities(column), STORAGE_ADAPTER_CAPABILITIES_COERCE_LOGIC);
+  }
+
+  /**
+   * Sad workaround for {@link org.apache.druid.query.metadata.SegmentAnalyzer} to deal with the fact that the
+   * response from {@link #getColumnCapabilities} is not accurate for string columns, in that it reports all string
+   * string columns as having multiple values. This method returns the actual capabilities of the underlying
+   * {@link IncrementalIndex}at the time this method is called.
+   */
+  public ColumnCapabilities getSnapshotColumnCapabilities(String column)
+  {
+    return ColumnCapabilitiesImpl.snapshot(
+        index.getCapabilities(column),
+        SNAPSHOT_STORAGE_ADAPTER_CAPABILITIES_COERCE_LOGIC
+    );
   }
 
   @Override
@@ -237,8 +319,13 @@ public class IncrementalIndexStorageAdapter implements StorageAdapter
     )
     {
       currEntry = new IncrementalIndexRowHolder();
-      columnSelectorFactory = new IncrementalIndexColumnSelectorFactory(index, virtualColumns, descending, currEntry);
-      // Set maxRowIndex before creating the filterMatcher. See https://github.com/apache/incubator-druid/pull/6340
+      columnSelectorFactory = new IncrementalIndexColumnSelectorFactory(
+          IncrementalIndexStorageAdapter.this,
+          virtualColumns,
+          descending,
+          currEntry
+      );
+      // Set maxRowIndex before creating the filterMatcher. See https://github.com/apache/druid/pull/6340
       maxRowIndex = index.getLastRowIndex();
       filterMatcher = filter == null ? BooleanValueMatcher.of(true) : filter.makeMatcher(columnSelectorFactory);
       numAdvanced = -1;
@@ -246,7 +333,7 @@ public class IncrementalIndexStorageAdapter implements StorageAdapter
       cursorIterable = index.getFacts().timeRangeIterable(
           descending,
           timeStart,
-          Math.min(actualInterval.getEndMillis(), gran.increment(interval.getStart()).getMillis())
+          Math.min(actualInterval.getEndMillis(), gran.increment(interval.getStartMillis()))
       );
       emptyRange = !cursorIterable.iterator().hasNext();
       time = gran.toDateTime(interval.getStartMillis());
@@ -318,16 +405,6 @@ public class IncrementalIndexStorageAdapter implements StorageAdapter
       }
 
       done = true;
-    }
-
-    @Override
-    public void advanceTo(int offset)
-    {
-      int count = 0;
-      while (count < offset && !isDone()) {
-        advance();
-        count++;
-      }
     }
 
     @Override

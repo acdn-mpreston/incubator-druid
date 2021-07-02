@@ -30,19 +30,14 @@ import java.util.Objects;
 public class PlannerConfig
 {
   public static final String CTX_KEY_USE_APPROXIMATE_COUNT_DISTINCT = "useApproximateCountDistinct";
+  public static final String CTX_KEY_USE_GROUPING_SET_FOR_EXACT_DISTINCT = "useGroupingSetForExactDistinct";
   public static final String CTX_KEY_USE_APPROXIMATE_TOPN = "useApproximateTopN";
 
   @JsonProperty
   private Period metadataRefreshPeriod = new Period("PT1M");
 
   @JsonProperty
-  private int maxSemiJoinRowsInMemory = 100000;
-
-  @JsonProperty
   private int maxTopNLimit = 100000;
-
-  @JsonProperty
-  private int maxQueryCount = 8;
 
   @JsonProperty
   private boolean useApproximateCountDistinct = true;
@@ -65,6 +60,9 @@ public class PlannerConfig
   @JsonProperty
   private long metadataSegmentPollPeriod = 60000;
 
+  @JsonProperty
+  private boolean useGroupingSetForExactDistinct = false;
+
   public long getMetadataSegmentPollPeriod()
   {
     return metadataSegmentPollPeriod;
@@ -82,24 +80,19 @@ public class PlannerConfig
     return metadataRefreshPeriod;
   }
 
-  public int getMaxSemiJoinRowsInMemory()
-  {
-    return maxSemiJoinRowsInMemory;
-  }
-
   public int getMaxTopNLimit()
   {
     return maxTopNLimit;
   }
 
-  public int getMaxQueryCount()
-  {
-    return maxQueryCount;
-  }
-
   public boolean isUseApproximateCountDistinct()
   {
     return useApproximateCountDistinct;
+  }
+
+  public boolean isUseGroupingSetForExactDistinct()
+  {
+    return useGroupingSetForExactDistinct;
   }
 
   public boolean isUseApproximateTopN()
@@ -135,13 +128,16 @@ public class PlannerConfig
 
     final PlannerConfig newConfig = new PlannerConfig();
     newConfig.metadataRefreshPeriod = getMetadataRefreshPeriod();
-    newConfig.maxSemiJoinRowsInMemory = getMaxSemiJoinRowsInMemory();
     newConfig.maxTopNLimit = getMaxTopNLimit();
-    newConfig.maxQueryCount = getMaxQueryCount();
     newConfig.useApproximateCountDistinct = getContextBoolean(
         context,
         CTX_KEY_USE_APPROXIMATE_COUNT_DISTINCT,
         isUseApproximateCountDistinct()
+    );
+    newConfig.useGroupingSetForExactDistinct = getContextBoolean(
+        context,
+        CTX_KEY_USE_GROUPING_SET_FOR_EXACT_DISTINCT,
+        isUseGroupingSetForExactDistinct()
     );
     newConfig.useApproximateTopN = getContextBoolean(
         context,
@@ -185,9 +181,7 @@ public class PlannerConfig
       return false;
     }
     final PlannerConfig that = (PlannerConfig) o;
-    return maxSemiJoinRowsInMemory == that.maxSemiJoinRowsInMemory &&
-           maxTopNLimit == that.maxTopNLimit &&
-           maxQueryCount == that.maxQueryCount &&
+    return maxTopNLimit == that.maxTopNLimit &&
            useApproximateCountDistinct == that.useApproximateCountDistinct &&
            useApproximateTopN == that.useApproximateTopN &&
            requireTimeCondition == that.requireTimeCondition &&
@@ -205,9 +199,7 @@ public class PlannerConfig
 
     return Objects.hash(
         metadataRefreshPeriod,
-        maxSemiJoinRowsInMemory,
         maxTopNLimit,
-        maxQueryCount,
         useApproximateCountDistinct,
         useApproximateTopN,
         requireTimeCondition,
@@ -224,9 +216,7 @@ public class PlannerConfig
   {
     return "PlannerConfig{" +
            "metadataRefreshPeriod=" + metadataRefreshPeriod +
-           ", maxSemiJoinRowsInMemory=" + maxSemiJoinRowsInMemory +
            ", maxTopNLimit=" + maxTopNLimit +
-           ", maxQueryCount=" + maxQueryCount +
            ", useApproximateCountDistinct=" + useApproximateCountDistinct +
            ", useApproximateTopN=" + useApproximateTopN +
            ", requireTimeCondition=" + requireTimeCondition +

@@ -271,6 +271,9 @@ public class AuthorizationUtils
           if (resourceActions == null) {
             return false;
           }
+          if (authorizer instanceof AllowAllAuthorizer) {
+            return true;
+          }
           for (ResourceAction resourceAction : resourceActions) {
             Access access = resultCache.computeIfAbsent(
                 resourceAction,
@@ -356,6 +359,51 @@ public class AuthorizationUtils
     return filteredResources;
   }
 
+  public static List<ResourceAction> makeSuperUserPermissions()
+  {
+    ResourceAction datasourceR = new ResourceAction(
+        new Resource(".*", ResourceType.DATASOURCE),
+        Action.READ
+    );
+
+    ResourceAction datasourceW = new ResourceAction(
+        new Resource(".*", ResourceType.DATASOURCE),
+        Action.WRITE
+    );
+
+    ResourceAction viewR = new ResourceAction(
+        new Resource(".*", ResourceType.VIEW),
+        Action.READ
+    );
+
+    ResourceAction viewW = new ResourceAction(
+        new Resource(".*", ResourceType.VIEW),
+        Action.WRITE
+    );
+
+    ResourceAction configR = new ResourceAction(
+        new Resource(".*", ResourceType.CONFIG),
+        Action.READ
+    );
+
+    ResourceAction configW = new ResourceAction(
+        new Resource(".*", ResourceType.CONFIG),
+        Action.WRITE
+    );
+
+    ResourceAction stateR = new ResourceAction(
+        new Resource(".*", ResourceType.STATE),
+        Action.READ
+    );
+
+    ResourceAction stateW = new ResourceAction(
+        new Resource(".*", ResourceType.STATE),
+        Action.WRITE
+    );
+
+    return Lists.newArrayList(datasourceR, datasourceW, viewR, viewW, configR, configW, stateR, stateW);
+  }
+
   /**
    * Function for the common pattern of generating a resource-action for reading from a datasource, using the
    * datasource name.
@@ -372,5 +420,22 @@ public class AuthorizationUtils
   public static final Function<String, ResourceAction> DATASOURCE_WRITE_RA_GENERATOR = input -> new ResourceAction(
       new Resource(input, ResourceType.DATASOURCE),
       Action.WRITE
+  );
+
+  /**
+   * Function for the common pattern of generating a resource-action for reading from a view, using the
+   * view name.
+   */
+  public static final Function<String, ResourceAction> VIEW_READ_RA_GENERATOR = input -> new ResourceAction(
+      new Resource(input, ResourceType.VIEW),
+      Action.READ
+  );
+
+  /**
+   * Function for the pattern of generating a {@link ResourceAction} for reading from a given {@link Resource}
+   */
+  public static final Function<Resource, ResourceAction> RESOURCE_READ_RA_GENERATOR = input -> new ResourceAction(
+      input,
+      Action.READ
   );
 }

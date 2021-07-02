@@ -76,6 +76,7 @@ public class FloatAndDoubleFilteringTest extends BaseFilterTest
   private static final String TIMESTAMP_COLUMN = "ts";
   private static int EXECUTOR_NUM_THREADS = 16;
   private static int EXECUTOR_NUM_TASKS = 2000;
+  private static final int NUM_FILTER_VALUES = 32;
 
   private static final InputRowParser<Map<String, Object>> PARSER = new MapInputRowParser(
       new TimeAndDimsParseSpec(
@@ -200,8 +201,8 @@ public class FloatAndDoubleFilteringTest extends BaseFilterTest
     );
 
     // cross the hashing threshold to test hashset implementation, filter on even values
-    List<String> infilterValues = new ArrayList<>(InDimFilter.NUMERIC_HASHING_THRESHOLD * 2);
-    for (int i = 0; i < InDimFilter.NUMERIC_HASHING_THRESHOLD * 2; i++) {
+    List<String> infilterValues = new ArrayList<>(NUM_FILTER_VALUES);
+    for (int i = 0; i < NUM_FILTER_VALUES; i++) {
       infilterValues.add(String.valueOf(i * 2));
     }
     assertFilterMatches(
@@ -211,13 +212,13 @@ public class FloatAndDoubleFilteringTest extends BaseFilterTest
 
 
     String jsFn = "function(x) { return(x === 3 || x === 5) }";
-    assertFilterMatches(
+    assertFilterMatchesSkipVectorize(
         new JavaScriptDimFilter(columnName, jsFn, null, JavaScriptConfig.getEnabledInstance()),
         ImmutableList.of("3", "5")
     );
 
     String jsFn2 = "function(x) { return(x === 3.0 || x === 5.0) }";
-    assertFilterMatches(
+    assertFilterMatchesSkipVectorize(
         new JavaScriptDimFilter(columnName, jsFn2, null, JavaScriptConfig.getEnabledInstance()),
         ImmutableList.of("3", "5")
     );
@@ -338,7 +339,7 @@ public class FloatAndDoubleFilteringTest extends BaseFilterTest
     );
 
     String jsFn = "function(x) { return(x === 'Wednesday' || x === 'Thursday') }";
-    assertFilterMatches(
+    assertFilterMatchesSkipVectorize(
         new JavaScriptDimFilter(columnName, jsFn, exfn, JavaScriptConfig.getEnabledInstance()),
         ImmutableList.of("3", "4")
     );
@@ -377,8 +378,8 @@ public class FloatAndDoubleFilteringTest extends BaseFilterTest
     );
 
     // cross the hashing threshold to test hashset implementation, filter on even values
-    List<String> infilterValues = new ArrayList<>(InDimFilter.NUMERIC_HASHING_THRESHOLD * 2);
-    for (int i = 0; i < InDimFilter.NUMERIC_HASHING_THRESHOLD * 2; i++) {
+    List<String> infilterValues = new ArrayList<>(NUM_FILTER_VALUES);
+    for (int i = 0; i < NUM_FILTER_VALUES; i++) {
       infilterValues.add(String.valueOf(i * 2));
     }
     assertFilterMatchesMultithreaded(

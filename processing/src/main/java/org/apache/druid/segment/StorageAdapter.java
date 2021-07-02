@@ -30,10 +30,8 @@ import javax.annotation.Nullable;
 /**
  */
 @PublicApi
-public interface StorageAdapter extends CursorFactory
+public interface StorageAdapter extends CursorFactory, ColumnInspector
 {
-  @PublicApi
-  String getSegmentIdentifier();
   Interval getInterval();
   Indexed<String> getAvailableDimensions();
   Iterable<String> getAvailableMetrics();
@@ -49,17 +47,22 @@ public interface StorageAdapter extends CursorFactory
   Comparable getMinValue(String column);
   @Nullable
   Comparable getMaxValue(String column);
-  Capabilities getCapabilities();
 
   /**
    * Returns capabilities of a particular column, if known. May be null if the column doesn't exist, or if
    * the column does exist but the capabilities are unknown. The latter is possible with dynamically discovered
    * columns.
    *
+   * Note that StorageAdapters are representations of "real" segments, so they are not aware of any virtual columns
+   * that may be involved in a query. In general, query engines should instead use the method
+   * {@link ColumnSelectorFactory#getColumnCapabilities(String)}, which returns capabilities for virtual columns as
+   * well.
+   *
    * @param column column name
    *
    * @return capabilities, or null
    */
+  @Override
   @Nullable
   ColumnCapabilities getColumnCapabilities(String column);
 

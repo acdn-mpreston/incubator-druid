@@ -20,22 +20,26 @@
 package org.apache.druid.segment.loading;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.Lists;
-import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.utils.JvmUtils;
-import org.hibernate.validator.constraints.NotEmpty;
 
 import java.io.File;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 
 /**
+ *
  */
 public class SegmentLoaderConfig
 {
   @JsonProperty
-  @NotEmpty
-  private List<StorageLocationConfig> locations = null;
+  private List<StorageLocationConfig> locations = Collections.emptyList();
+
+  @JsonProperty("lazyLoadOnStart")
+  private boolean lazyLoadOnStart = false;
 
   @JsonProperty("deleteOnRemove")
   private boolean deleteOnRemove = true;
@@ -47,7 +51,7 @@ public class SegmentLoaderConfig
   private int announceIntervalMillis = 0; // do not background announce
 
   @JsonProperty("numLoadingThreads")
-  private int numLoadingThreads = JvmUtils.getRuntimeInfo().getAvailableProcessors();
+  private int numLoadingThreads = Math.max(1, JvmUtils.getRuntimeInfo().getAvailableProcessors() / 6);
 
   @JsonProperty("numBootstrapThreads")
   private Integer numBootstrapThreads = null;
@@ -58,9 +62,16 @@ public class SegmentLoaderConfig
   @JsonProperty
   private int statusQueueMaxSize = 100;
 
+  private long combinedMaxSize = 0;
+
   public List<StorageLocationConfig> getLocations()
   {
     return locations;
+  }
+
+  public boolean isLazyLoadOnStart()
+  {
+    return lazyLoadOnStart;
   }
 
   public boolean isDeleteOnRemove()
@@ -91,19 +102,22 @@ public class SegmentLoaderConfig
   public File getInfoDir()
   {
     if (infoDir == null) {
-
-      if (locations == null || locations.size() == 0) {
-        throw new ISE("You have no segment cache locations defined. Please configure druid.segmentCache.locations to use one or more locations.");
-      }
       infoDir = new File(locations.get(0).getPath(), "info_dir");
     }
-
     return infoDir;
   }
 
   public int getStatusQueueMaxSize()
   {
     return statusQueueMaxSize;
+  }
+
+  public long getCombinedMaxSize()
+  {
+    if (combinedMaxSize == 0) {
+      combinedMaxSize = getLocations().stream().mapToLong(StorageLocationConfig::getMaxSize).sum();
+    }
+    return combinedMaxSize;
   }
 
   public SegmentLoaderConfig withLocations(List<StorageLocationConfig> locations)
@@ -113,6 +127,31 @@ public class SegmentLoaderConfig
     retVal.deleteOnRemove = this.deleteOnRemove;
     retVal.infoDir = this.infoDir;
     return retVal;
+  }
+
+  @VisibleForTesting
+  public SegmentLoaderConfig withInfoDir(File infoDir)
+  {
+    SegmentLoaderConfig retVal = new SegmentLoaderConfig();
+    retVal.locations = this.locations;
+    retVal.deleteOnRemove = this.deleteOnRemove;
+    retVal.infoDir = infoDir;
+    return retVal;
+  }
+
+  /**
+   * Convert StorageLocationConfig objects to StorageLocation objects
+   * <p>
+   * Note: {@link #getLocations} is called instead of variable access because some testcases overrides this method
+   */
+  public List<StorageLocation> toStorageLocations()
+  {
+    return this.getLocations()
+               .stream()
+               .map(locationConfig -> new StorageLocation(locationConfig.getPath(),
+                                                          locationConfig.getMaxSize(),
+                                                          locationConfig.getFreeSpacePercent()))
+               .collect(Collectors.toList());
   }
 
   @Override

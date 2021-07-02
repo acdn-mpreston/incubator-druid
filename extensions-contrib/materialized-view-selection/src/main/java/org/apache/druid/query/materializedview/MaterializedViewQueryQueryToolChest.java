@@ -20,6 +20,7 @@
 package org.apache.druid.query.materializedview;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.base.Function;
 import com.google.inject.Inject;
 import org.apache.druid.java.util.common.guava.Sequence;
@@ -30,8 +31,10 @@ import org.apache.druid.query.QueryRunner;
 import org.apache.druid.query.QueryToolChest;
 import org.apache.druid.query.QueryToolChestWarehouse;
 import org.apache.druid.query.aggregation.MetricManipulationFn;
+import org.apache.druid.query.context.ResponseContext;
 
-import java.util.Map;
+import java.util.Comparator;
+import java.util.function.BinaryOperator;
 
 public class MaterializedViewQueryQueryToolChest extends QueryToolChest 
 {
@@ -51,12 +54,26 @@ public class MaterializedViewQueryQueryToolChest extends QueryToolChest
   {
     return new QueryRunner() {
       @Override
-      public Sequence run(QueryPlus queryPlus, Map responseContext) 
+      public Sequence run(QueryPlus queryPlus, ResponseContext responseContext)
       {
         Query realQuery = getRealQuery(queryPlus.getQuery());
         return warehouse.getToolChest(realQuery).mergeResults(runner).run(queryPlus.withQuery(realQuery), responseContext);
       }
     };
+  }
+
+  @Override
+  public BinaryOperator createMergeFn(Query query)
+  {
+    final Query realQuery = getRealQuery(query);
+    return warehouse.getToolChest(realQuery).createMergeFn(realQuery);
+  }
+
+  @Override
+  public Comparator createResultComparator(Query query)
+  {
+    final Query realQuery = getRealQuery(query);
+    return warehouse.getToolChest(realQuery).createResultComparator(realQuery);
   }
 
   @Override
@@ -81,6 +98,13 @@ public class MaterializedViewQueryQueryToolChest extends QueryToolChest
   }
 
   @Override
+  public ObjectMapper decorateObjectMapper(final ObjectMapper objectMapper, final Query query)
+  {
+    Query realQuery = getRealQuery(query);
+    return warehouse.getToolChest(realQuery).decorateObjectMapper(objectMapper, realQuery);
+  }
+
+  @Override
   public TypeReference getResultTypeReference()
   {
     return null;
@@ -91,7 +115,7 @@ public class MaterializedViewQueryQueryToolChest extends QueryToolChest
   {
     return new QueryRunner() {
       @Override
-      public Sequence run(QueryPlus queryPlus, Map responseContext)
+      public Sequence run(QueryPlus queryPlus, ResponseContext responseContext)
       {
         Query realQuery = getRealQuery(queryPlus.getQuery());
         QueryToolChest realQueryToolChest = warehouse.getToolChest(realQuery);

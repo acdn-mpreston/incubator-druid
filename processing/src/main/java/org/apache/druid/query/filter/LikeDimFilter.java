@@ -20,11 +20,13 @@
 package org.apache.druid.query.filter;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Predicate;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.RangeSet;
-import com.google.common.collect.Sets;
 import com.google.common.io.BaseEncoding;
 import com.google.common.primitives.Chars;
 import org.apache.druid.common.config.NullHandling;
@@ -35,10 +37,11 @@ import org.apache.druid.segment.filter.LikeFilter;
 
 import javax.annotation.Nullable;
 import java.nio.ByteBuffer;
-import java.util.HashSet;
+import java.util.Objects;
+import java.util.Set;
 import java.util.regex.Pattern;
 
-public class LikeDimFilter implements DimFilter
+public class LikeDimFilter extends AbstractOptimizableDimFilter implements DimFilter
 {
   // Regex matching characters that are definitely okay to include unescaped in a regex.
   // Leads to excessively paranoid escaping, although shouldn't affect runtime beyond compiling the regex.
@@ -47,21 +50,27 @@ public class LikeDimFilter implements DimFilter
 
   private final String dimension;
   private final String pattern;
+  @Nullable
   private final Character escapeChar;
+  @Nullable
   private final ExtractionFn extractionFn;
+  @Nullable
+  private final FilterTuning filterTuning;
   private final LikeMatcher likeMatcher;
 
   @JsonCreator
   public LikeDimFilter(
       @JsonProperty("dimension") final String dimension,
       @JsonProperty("pattern") final String pattern,
-      @JsonProperty("escape") final String escape,
-      @JsonProperty("extractionFn") final ExtractionFn extractionFn
+      @JsonProperty("escape") @Nullable final String escape,
+      @JsonProperty("extractionFn") @Nullable final ExtractionFn extractionFn,
+      @JsonProperty("filterTuning") @Nullable final FilterTuning filterTuning
   )
   {
     this.dimension = Preconditions.checkNotNull(dimension, "dimension");
     this.pattern = Preconditions.checkNotNull(pattern, "pattern");
     this.extractionFn = extractionFn;
+    this.filterTuning = filterTuning;
 
     if (escape != null && escape.length() != 1) {
       throw new IllegalArgumentException("Escape must be null or a single character");
@@ -70,6 +79,129 @@ public class LikeDimFilter implements DimFilter
     }
 
     this.likeMatcher = LikeMatcher.from(pattern, this.escapeChar);
+  }
+
+  @VisibleForTesting
+  public LikeDimFilter(
+      final String dimension,
+      final String pattern,
+      @Nullable final String escape,
+      @Nullable final ExtractionFn extractionFn
+  )
+  {
+    this(dimension, pattern, escape, extractionFn, null);
+  }
+
+  @JsonProperty
+  public String getDimension()
+  {
+    return dimension;
+  }
+
+  @JsonProperty
+  public String getPattern()
+  {
+    return pattern;
+  }
+
+  @Nullable
+  @JsonProperty
+  public String getEscape()
+  {
+    return escapeChar != null ? escapeChar.toString() : null;
+  }
+
+  @Nullable
+  @JsonProperty
+  public ExtractionFn getExtractionFn()
+  {
+    return extractionFn;
+  }
+
+  @Nullable
+  @JsonInclude(JsonInclude.Include.NON_NULL)
+  @JsonProperty
+  public FilterTuning getFilterTuning()
+  {
+    return filterTuning;
+  }
+
+  @Override
+  public byte[] getCacheKey()
+  {
+    final byte[] dimensionBytes = StringUtils.toUtf8(dimension);
+    final byte[] patternBytes = StringUtils.toUtf8(pattern);
+    final byte[] escapeBytes = escapeChar == null ? new byte[0] : Chars.toByteArray(escapeChar);
+    final byte[] extractionFnBytes = extractionFn == null ? new byte[0] : extractionFn.getCacheKey();
+    final int sz = 4 + dimensionBytes.length + patternBytes.length + escapeBytes.length + extractionFnBytes.length;
+    return ByteBuffer.allocate(sz)
+                     .put(DimFilterUtils.LIKE_CACHE_ID)
+                     .put(dimensionBytes)
+                     .put(DimFilterUtils.STRING_SEPARATOR)
+                     .put(patternBytes)
+                     .put(DimFilterUtils.STRING_SEPARATOR)
+                     .put(escapeBytes)
+                     .put(DimFilterUtils.STRING_SEPARATOR)
+                     .put(extractionFnBytes)
+                     .array();
+  }
+
+  @Override
+  public DimFilter optimize()
+  {
+    return this;
+  }
+
+  @Override
+  public Filter toFilter()
+  {
+    return new LikeFilter(dimension, extractionFn, likeMatcher, filterTuning);
+  }
+
+  @Override
+  public RangeSet<String> getDimensionRangeSet(String dimension)
+  {
+    return null;
+  }
+
+  @Override
+  public Set<String> getRequiredColumns()
+  {
+    return ImmutableSet.of(dimension);
+  }
+
+  @Override
+  public boolean equals(Object o)
+  {
+    if (this == o) {
+      return true;
+    }
+    if (o == null || getClass() != o.getClass()) {
+      return false;
+    }
+    LikeDimFilter that = (LikeDimFilter) o;
+    return dimension.equals(that.dimension) &&
+           pattern.equals(that.pattern) &&
+           Objects.equals(escapeChar, that.escapeChar) &&
+           Objects.equals(extractionFn, that.extractionFn) &&
+           Objects.equals(filterTuning, that.filterTuning);
+  }
+
+  @Override
+  public int hashCode()
+  {
+    return Objects.hash(dimension, pattern, escapeChar, extractionFn, filterTuning);
+  }
+
+  @Override
+  public String toString()
+  {
+    final DimFilterToStringBuilder builder = new DimFilterToStringBuilder();
+    builder.appendDimension(dimension, extractionFn).append(" LIKE '").append(pattern).append("'");
+    if (escapeChar != null) {
+      builder.append(" ESCAPE '").append(escapeChar).append("'");
+    }
+    return builder.appendFilterTuning(filterTuning).build();
   }
 
   public static class LikeMatcher
@@ -139,7 +271,7 @@ public class LikeDimFilter implements DimFilter
         }
       }
 
-      return new LikeMatcher(suffixMatch, prefix.toString(), Pattern.compile(regex.toString()));
+      return new LikeMatcher(suffixMatch, prefix.toString(), Pattern.compile(regex.toString(), Pattern.DOTALL));
     }
 
     private static void addPatternCharacter(final StringBuilder patternBuilder, final char c)
@@ -152,6 +284,11 @@ public class LikeDimFilter implements DimFilter
     }
 
     public boolean matches(@Nullable final String s)
+    {
+      return matches(s, pattern);
+    }
+
+    private static boolean matches(@Nullable final String s, Pattern pattern)
     {
       String val = NullHandling.nullToEmptyIfNeeded(s);
       return val != null && pattern.matcher(val).matches();
@@ -178,48 +315,7 @@ public class LikeDimFilter implements DimFilter
 
     public DruidPredicateFactory predicateFactory(final ExtractionFn extractionFn)
     {
-      return new DruidPredicateFactory()
-      {
-        @Override
-        public Predicate<String> makeStringPredicate()
-        {
-          if (extractionFn != null) {
-            return input -> matches(extractionFn.apply(input));
-          } else {
-            return input -> matches(input);
-          }
-        }
-
-        @Override
-        public DruidLongPredicate makeLongPredicate()
-        {
-          if (extractionFn != null) {
-            return input -> matches(extractionFn.apply(input));
-          } else {
-            return input -> matches(String.valueOf(input));
-          }
-        }
-
-        @Override
-        public DruidFloatPredicate makeFloatPredicate()
-        {
-          if (extractionFn != null) {
-            return input -> matches(extractionFn.apply(input));
-          } else {
-            return input -> matches(String.valueOf(input));
-          }
-        }
-
-        @Override
-        public DruidDoublePredicate makeDoublePredicate()
-        {
-          if (extractionFn != null) {
-            return input -> matches(extractionFn.apply(input));
-          } else {
-            return input -> matches(String.valueOf(input));
-          }
-        }
-      };
+      return new PatternDruidPredicateFactory(extractionFn, pattern);
     }
 
     public String getPrefix()
@@ -231,132 +327,99 @@ public class LikeDimFilter implements DimFilter
     {
       return suffixMatch;
     }
-  }
 
-  @JsonProperty
-  public String getDimension()
-  {
-    return dimension;
-  }
+    @VisibleForTesting
+    static class PatternDruidPredicateFactory implements DruidPredicateFactory
+    {
+      private final ExtractionFn extractionFn;
+      private final Pattern pattern;
 
-  @JsonProperty
-  public String getPattern()
-  {
-    return pattern;
-  }
+      PatternDruidPredicateFactory(ExtractionFn extractionFn, Pattern pattern)
+      {
+        this.extractionFn = extractionFn;
+        this.pattern = pattern;
+      }
 
-  @JsonProperty
-  public String getEscape()
-  {
-    return escapeChar != null ? escapeChar.toString() : null;
-  }
+      @Override
+      public Predicate<String> makeStringPredicate()
+      {
+        if (extractionFn != null) {
+          return input -> matches(extractionFn.apply(input), pattern);
+        } else {
+          return input -> matches(input, pattern);
+        }
+      }
 
-  @JsonProperty
-  public ExtractionFn getExtractionFn()
-  {
-    return extractionFn;
-  }
+      @Override
+      public DruidLongPredicate makeLongPredicate()
+      {
+        if (extractionFn != null) {
+          return input -> matches(extractionFn.apply(input), pattern);
+        } else {
+          return input -> matches(String.valueOf(input), pattern);
+        }
+      }
 
-  @Override
-  public byte[] getCacheKey()
-  {
-    final byte[] dimensionBytes = StringUtils.toUtf8(dimension);
-    final byte[] patternBytes = StringUtils.toUtf8(pattern);
-    final byte[] escapeBytes = escapeChar == null ? new byte[0] : Chars.toByteArray(escapeChar);
-    final byte[] extractionFnBytes = extractionFn == null ? new byte[0] : extractionFn.getCacheKey();
-    final int sz = 4 + dimensionBytes.length + patternBytes.length + escapeBytes.length + extractionFnBytes.length;
-    return ByteBuffer.allocate(sz)
-                     .put(DimFilterUtils.LIKE_CACHE_ID)
-                     .put(dimensionBytes)
-                     .put(DimFilterUtils.STRING_SEPARATOR)
-                     .put(patternBytes)
-                     .put(DimFilterUtils.STRING_SEPARATOR)
-                     .put(escapeBytes)
-                     .put(DimFilterUtils.STRING_SEPARATOR)
-                     .put(extractionFnBytes)
-                     .array();
-  }
+      @Override
+      public DruidFloatPredicate makeFloatPredicate()
+      {
+        if (extractionFn != null) {
+          return input -> matches(extractionFn.apply(input), pattern);
+        } else {
+          return input -> matches(String.valueOf(input), pattern);
+        }
+      }
 
-  @Override
-  public DimFilter optimize()
-  {
-    return this;
-  }
+      @Override
+      public DruidDoublePredicate makeDoublePredicate()
+      {
+        if (extractionFn != null) {
+          return input -> matches(extractionFn.apply(input), pattern);
+        } else {
+          return input -> matches(String.valueOf(input), pattern);
+        }
+      }
 
-  @Override
-  public Filter toFilter()
-  {
-    return new LikeFilter(dimension, extractionFn, likeMatcher);
-  }
+      @Override
+      public boolean equals(Object o)
+      {
+        if (this == o) {
+          return true;
+        }
+        if (o == null || getClass() != o.getClass()) {
+          return false;
+        }
+        PatternDruidPredicateFactory that = (PatternDruidPredicateFactory) o;
+        return Objects.equals(extractionFn, that.extractionFn) &&
+               Objects.equals(pattern.toString(), that.pattern.toString());
+      }
 
-  @Override
-  public RangeSet<String> getDimensionRangeSet(String dimension)
-  {
-    return null;
-  }
-
-  @Override
-  public HashSet<String> getRequiredColumns()
-  {
-    return Sets.newHashSet(dimension);
-  }
-
-  @Override
-  public boolean equals(Object o)
-  {
-    if (this == o) {
-      return true;
-    }
-    if (o == null || getClass() != o.getClass()) {
-      return false;
+      @Override
+      public int hashCode()
+      {
+        return Objects.hash(extractionFn, pattern.toString());
+      }
     }
 
-    LikeDimFilter that = (LikeDimFilter) o;
-
-    if (dimension != null ? !dimension.equals(that.dimension) : that.dimension != null) {
-      return false;
-    }
-    if (pattern != null ? !pattern.equals(that.pattern) : that.pattern != null) {
-      return false;
-    }
-    if (escapeChar != null ? !escapeChar.equals(that.escapeChar) : that.escapeChar != null) {
-      return false;
-    }
-    return extractionFn != null ? extractionFn.equals(that.extractionFn) : that.extractionFn == null;
-
-  }
-
-  @Override
-  public int hashCode()
-  {
-    int result = dimension != null ? dimension.hashCode() : 0;
-    result = 31 * result + (pattern != null ? pattern.hashCode() : 0);
-    result = 31 * result + (escapeChar != null ? escapeChar.hashCode() : 0);
-    result = 31 * result + (extractionFn != null ? extractionFn.hashCode() : 0);
-    return result;
-  }
-
-  @Override
-  public String toString()
-  {
-    final StringBuilder builder = new StringBuilder();
-
-    if (extractionFn != null) {
-      builder.append(extractionFn).append("(");
+    @Override
+    public boolean equals(Object o)
+    {
+      if (this == o) {
+        return true;
+      }
+      if (o == null || getClass() != o.getClass()) {
+        return false;
+      }
+      LikeMatcher that = (LikeMatcher) o;
+      return getSuffixMatch() == that.getSuffixMatch() &&
+             Objects.equals(getPrefix(), that.getPrefix()) &&
+             Objects.equals(pattern.toString(), that.pattern.toString());
     }
 
-    builder.append(dimension);
-
-    if (extractionFn != null) {
-      builder.append(")");
+    @Override
+    public int hashCode()
+    {
+      return Objects.hash(getSuffixMatch(), getPrefix(), pattern.toString());
     }
-
-    builder.append(" LIKE '").append(pattern).append("'");
-
-    if (escapeChar != null) {
-      builder.append(" ESCAPE '").append(escapeChar).append("'");
-    }
-
-    return builder.toString();
   }
 }

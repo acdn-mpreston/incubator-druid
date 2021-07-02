@@ -33,11 +33,17 @@ import org.apache.druid.query.aggregation.AggregatorUtil;
 import org.apache.druid.query.aggregation.BufferAggregator;
 import org.apache.druid.query.aggregation.NoopAggregator;
 import org.apache.druid.query.aggregation.NoopBufferAggregator;
+import org.apache.druid.query.aggregation.NoopVectorAggregator;
+import org.apache.druid.query.aggregation.VectorAggregator;
 import org.apache.druid.query.aggregation.cardinality.HyperLogLogCollectorAggregateCombiner;
 import org.apache.druid.query.cache.CacheKeyBuilder;
 import org.apache.druid.segment.BaseObjectColumnValueSelector;
+import org.apache.druid.segment.ColumnInspector;
 import org.apache.druid.segment.ColumnSelectorFactory;
 import org.apache.druid.segment.NilColumnValueSelector;
+import org.apache.druid.segment.column.ColumnCapabilities;
+import org.apache.druid.segment.column.ValueType;
+import org.apache.druid.segment.vector.VectorColumnSelectorFactory;
 
 import javax.annotation.Nullable;
 import java.nio.ByteBuffer;
@@ -52,17 +58,13 @@ public class HyperUniquesAggregatorFactory extends AggregatorFactory
 {
   public static Object estimateCardinality(@Nullable Object object, boolean round)
   {
-    if (object == null) {
-      return 0;
-    }
-
     final HyperLogLogCollector collector = (HyperLogLogCollector) object;
 
-    // Avoid ternary, it causes estimateCardinalityRound to be cast to double.
+    // Avoid ternary for round check as it causes estimateCardinalityRound to be cast to double.
     if (round) {
-      return collector.estimateCardinalityRound();
+      return collector == null ? 0L : collector.estimateCardinalityRound();
     } else {
-      return collector.estimateCardinality();
+      return collector == null ? 0d : collector.estimateCardinality();
     }
   }
 
@@ -121,6 +123,23 @@ public class HyperUniquesAggregatorFactory extends AggregatorFactory
     }
 
     throw new IAE("Incompatible type for metric[%s], expected a HyperUnique, got a %s", fieldName, classOfObject);
+  }
+
+  @Override
+  public VectorAggregator factorizeVector(final VectorColumnSelectorFactory selectorFactory)
+  {
+    final ColumnCapabilities capabilities = selectorFactory.getColumnCapabilities(fieldName);
+    if (capabilities == null || capabilities.getType() != ValueType.COMPLEX) {
+      return NoopVectorAggregator.instance();
+    } else {
+      return new HyperUniquesVectorAggregator(selectorFactory.makeObjectSelector(fieldName));
+    }
+  }
+
+  @Override
+  public boolean canVectorize(ColumnInspector columnInspector)
+  {
+    return true;
   }
 
   @Override
@@ -241,13 +260,28 @@ public class HyperUniquesAggregatorFactory extends AggregatorFactory
   }
 
   @Override
-  public String getTypeName()
+  public String getComplexTypeName()
   {
     if (isInputHyperUnique) {
       return "preComputedHyperUnique";
     } else {
       return "hyperUnique";
     }
+  }
+
+  /**
+   * actual type is {@link HyperLogLogCollector}
+   */
+  @Override
+  public ValueType getType()
+  {
+    return ValueType.COMPLEX;
+  }
+
+  @Override
+  public ValueType getFinalizedType()
+  {
+    return round ? ValueType.LONG : ValueType.DOUBLE;
   }
 
   @Override

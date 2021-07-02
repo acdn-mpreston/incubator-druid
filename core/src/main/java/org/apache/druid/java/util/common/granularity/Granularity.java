@@ -31,6 +31,7 @@ import org.joda.time.Interval;
 import org.joda.time.format.DateTimeFormatter;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.Iterator;
 import java.util.List;
 import java.util.NoSuchElementException;
@@ -40,14 +41,38 @@ import java.util.regex.Pattern;
 
 public abstract class Granularity implements Cacheable
 {
+
+  public static Comparator<Granularity> IS_FINER_THAN = new Comparator<Granularity>()
+  {
+    @Override
+    /**
+     * Decide whether this granularity is finer than the other granularity
+     *
+     * @param left The left granularity
+     * @param right The right granularity
+     * @return -1 if left granularity is finer, 0 if it is the same, 1 if it is greater
+     */
+    public int compare(Granularity left, Granularity right)
+    {
+      long leftDuration = left.bucket(DateTimes.EPOCH).toDurationMillis();
+      long rightDuration = right.bucket(DateTimes.EPOCH).toDurationMillis();
+      if (leftDuration < rightDuration) {
+        return -1;
+      } else if (leftDuration == rightDuration) {
+        return 0;
+      } else {
+        return 1;
+      }
+    }
+  };
   /**
    * Default patterns for parsing paths.
    */
-  private static final Pattern defaultPathPattern =
+  private static final Pattern DEFAULT_PATH_PATTERN =
       Pattern.compile(
           "^.*[Yy]=(\\d{4})/(?:[Mm]=(\\d{2})/(?:[Dd]=(\\d{2})/(?:[Hh]=(\\d{2})/(?:[Mm]=(\\d{2})/(?:[Ss]=(\\d{2})/)?)?)?)?)?.*$"
       );
-  private static final Pattern hivePathPattern =
+  private static final Pattern HIVE_PATH_PATTERN =
       Pattern.compile("^.*dt=(\\d{4})(?:-(\\d{2})(?:-(\\d{2})(?:-(\\d{2})(?:-(\\d{2})(?:-(\\d{2})?)?)?)?)?)?/.*$");
 
   @JsonCreator
@@ -107,11 +132,20 @@ public abstract class Granularity implements Cacheable
 
   public abstract DateTimeFormatter getFormatter(Formatter type);
 
+  public abstract long increment(long time);
+
   public abstract DateTime increment(DateTime time);
+
+  public abstract long bucketStart(long time);
 
   public abstract DateTime bucketStart(DateTime time);
 
   public abstract DateTime toDate(String filePath, Formatter formatter);
+
+  /**
+   * Return true if time chunks populated by this granularity includes the given interval time chunk.
+   */
+  public abstract boolean isAligned(Interval interval);
 
   public DateTime bucketEnd(DateTime time)
   {
@@ -145,13 +179,13 @@ public abstract class Granularity implements Cacheable
   // Used by the toDate implementations.
   final Integer[] getDateValues(String filePath, Formatter formatter)
   {
-    Pattern pattern = defaultPathPattern;
+    Pattern pattern = DEFAULT_PATH_PATTERN;
     switch (formatter) {
       case DEFAULT:
       case LOWER_DEFAULT:
         break;
       case HIVE:
-        pattern = hivePathPattern;
+        pattern = HIVE_PATH_PATTERN;
         break;
       default:
         throw new IAE("Format %s not supported", formatter);

@@ -21,15 +21,33 @@ package org.apache.druid.query.groupby.epinephelinae.column;
 
 import com.google.common.base.Preconditions;
 import org.apache.druid.common.config.NullHandling;
+import org.apache.druid.query.groupby.ResultRow;
+import org.apache.druid.query.groupby.epinephelinae.Grouper;
+import org.apache.druid.query.ordering.StringComparator;
+import org.apache.druid.query.ordering.StringComparators;
 import org.apache.druid.segment.ColumnValueSelector;
 import org.apache.druid.segment.DimensionSelector;
+import org.apache.druid.segment.column.ColumnCapabilities;
 import org.apache.druid.segment.data.IndexedInts;
 
+import javax.annotation.Nullable;
 import java.nio.ByteBuffer;
-import java.util.Map;
+import java.util.function.IntFunction;
 
 public class StringGroupByColumnSelectorStrategy implements GroupByColumnSelectorStrategy
 {
+  @Nullable
+  private final ColumnCapabilities capabilities;
+
+  @Nullable
+  private final IntFunction<String> dictionaryLookup;
+
+  public StringGroupByColumnSelectorStrategy(IntFunction<String> dictionaryLookup, ColumnCapabilities capabilities)
+  {
+    this.dictionaryLookup = dictionaryLookup;
+    this.capabilities = capabilities;
+  }
+
   @Override
   public int getGroupingKeySize()
   {
@@ -40,7 +58,7 @@ public class StringGroupByColumnSelectorStrategy implements GroupByColumnSelecto
   public void processValueFromGroupingKey(
       GroupByColumnSelectorPlus selectorPlus,
       ByteBuffer key,
-      Map<String, Object> resultMap,
+      ResultRow resultRow,
       int keyBufferPosition
   )
   {
@@ -48,12 +66,12 @@ public class StringGroupByColumnSelectorStrategy implements GroupByColumnSelecto
 
     // GROUP_BY_MISSING_VALUE is used to indicate empty rows, which are omitted from the result map.
     if (id != GROUP_BY_MISSING_VALUE) {
-      resultMap.put(
-          selectorPlus.getOutputName(),
+      resultRow.set(
+          selectorPlus.getResultRowPosition(),
           ((DimensionSelector) selectorPlus.getSelector()).lookupName(id)
       );
     } else {
-      resultMap.put(selectorPlus.getOutputName(), NullHandling.defaultStringValue());
+      resultRow.set(selectorPlus.getResultRowPosition(), NullHandling.defaultStringValue());
     }
   }
 
@@ -81,7 +99,13 @@ public class StringGroupByColumnSelectorStrategy implements GroupByColumnSelecto
   }
 
   @Override
-  public void initGroupingKeyColumnValue(int keyBufferPosition, int columnIndex, Object rowObj, ByteBuffer keyBuffer, int[] stack)
+  public void initGroupingKeyColumnValue(
+      int keyBufferPosition,
+      int columnIndex,
+      Object rowObj,
+      ByteBuffer keyBuffer,
+      int[] stack
+  )
   {
     IndexedInts row = (IndexedInts) rowObj;
     int rowSize = row.size();
@@ -91,7 +115,12 @@ public class StringGroupByColumnSelectorStrategy implements GroupByColumnSelecto
   }
 
   @Override
-  public boolean checkRowIndexAndAddValueToGroupingKey(int keyBufferPosition, Object rowObj, int rowValIdx, ByteBuffer keyBuffer)
+  public boolean checkRowIndexAndAddValueToGroupingKey(
+      int keyBufferPosition,
+      Object rowObj,
+      int rowValIdx,
+      ByteBuffer keyBuffer
+  )
   {
     IndexedInts row = (IndexedInts) rowObj;
     int rowSize = row.size();
@@ -118,6 +147,29 @@ public class StringGroupByColumnSelectorStrategy implements GroupByColumnSelecto
       keyBuffer.putInt(keyBufferPosition, GROUP_BY_MISSING_VALUE);
     } else {
       keyBuffer.putInt(keyBufferPosition, values.get(0));
+    }
+  }
+
+  @Override
+  public Grouper.BufferComparator bufferComparator(int keyBufferPosition, @Nullable StringComparator stringComparator)
+  {
+    final boolean canCompareInts =
+        capabilities != null &&
+        capabilities.hasBitmapIndexes() &&
+        capabilities.areDictionaryValuesSorted().and(capabilities.areDictionaryValuesUnique()).isTrue();
+    final StringComparator comparator = stringComparator == null ? StringComparators.LEXICOGRAPHIC : stringComparator;
+    if (canCompareInts && StringComparators.LEXICOGRAPHIC.equals(comparator)) {
+      return (lhsBuffer, rhsBuffer, lhsPosition, rhsPosition) -> Integer.compare(
+          lhsBuffer.getInt(lhsPosition + keyBufferPosition),
+          rhsBuffer.getInt(rhsPosition + keyBufferPosition)
+      );
+    } else {
+      Preconditions.checkState(dictionaryLookup != null, "null dictionary lookup");
+      return (lhsBuffer, rhsBuffer, lhsPosition, rhsPosition) -> {
+        String lhsStr = dictionaryLookup.apply(lhsBuffer.getInt(lhsPosition + keyBufferPosition));
+        String rhsStr = dictionaryLookup.apply(rhsBuffer.getInt(rhsPosition + keyBufferPosition));
+        return comparator.compare(lhsStr, rhsStr);
+      };
     }
   }
 }

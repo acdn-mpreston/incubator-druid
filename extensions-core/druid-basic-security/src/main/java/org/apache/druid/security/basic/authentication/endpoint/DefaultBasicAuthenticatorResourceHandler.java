@@ -37,6 +37,7 @@ public class DefaultBasicAuthenticatorResourceHandler implements BasicAuthentica
 {
   private static final Logger log = new Logger(DefaultBasicAuthenticatorResourceHandler.class);
   private static final Response NOT_FOUND_RESPONSE = Response.status(Response.Status.NOT_FOUND).build();
+  private static final String UNKNOWN_AUTHENTICATOR_MSG_FORMAT = "Received user update for unknown authenticator[%s]";
 
   private final BasicAuthenticatorCacheManager cacheManager;
   private final Map<String, BasicHTTPAuthenticator> authenticatorMap;
@@ -109,21 +110,20 @@ public class DefaultBasicAuthenticatorResourceHandler implements BasicAuthentica
   }
 
   @Override
-  public Response authenticatorUpdateListener(String authenticatorName, byte[] serializedUserMap)
+  public Response authenticatorUserUpdateListener(String authenticatorName, byte[] serializedUserMap)
   {
     final BasicHTTPAuthenticator authenticator = authenticatorMap.get(authenticatorName);
     if (authenticator == null) {
-      String errMsg = StringUtils.format("Received update for unknown authenticator[%s]", authenticatorName);
-      log.error(errMsg);
+      log.error(UNKNOWN_AUTHENTICATOR_MSG_FORMAT, authenticatorName);
       return Response.status(Response.Status.BAD_REQUEST)
                      .entity(ImmutableMap.<String, Object>of(
                          "error",
-                         StringUtils.format(errMsg)
+                         StringUtils.format(UNKNOWN_AUTHENTICATOR_MSG_FORMAT, authenticatorName)
                      ))
                      .build();
     }
 
-    cacheManager.handleAuthenticatorUpdate(authenticatorName, serializedUserMap);
+    cacheManager.handleAuthenticatorUserMapUpdate(authenticatorName, serializedUserMap);
     return Response.ok().build();
   }
 
@@ -131,10 +131,8 @@ public class DefaultBasicAuthenticatorResourceHandler implements BasicAuthentica
   public Response getLoadStatus()
   {
     Map<String, Boolean> loadStatus = new HashMap<>();
-    authenticatorMap.forEach(
-        (authenticatorName, authenticator) -> {
-          loadStatus.put(authenticatorName, cacheManager.getUserMap(authenticatorName) != null);
-        }
+    authenticatorMap.forEach((authenticatorName, authenticator) ->
+                                 loadStatus.put(authenticatorName, cacheManager.getUserMap(authenticatorName) != null)
     );
     return Response.ok(loadStatus).build();
   }

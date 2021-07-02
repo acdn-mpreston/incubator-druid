@@ -23,12 +23,17 @@ package org.apache.druid.query.aggregation;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Supplier;
-import com.google.common.base.Suppliers;
 import org.apache.druid.math.expr.Expr;
 import org.apache.druid.math.expr.ExprMacroTable;
 import org.apache.druid.math.expr.Parser;
 import org.apache.druid.segment.BaseFloatColumnValueSelector;
+import org.apache.druid.segment.ColumnInspector;
 import org.apache.druid.segment.ColumnSelectorFactory;
+import org.apache.druid.segment.ColumnValueSelector;
+import org.apache.druid.segment.column.ColumnCapabilities;
+import org.apache.druid.segment.column.ValueType;
+import org.apache.druid.segment.vector.VectorColumnSelectorFactory;
+import org.apache.druid.segment.vector.VectorValueSelector;
 
 import javax.annotation.Nullable;
 import java.util.Collections;
@@ -36,7 +41,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
 
-public abstract class SimpleFloatAggregatorFactory extends NullableAggregatorFactory<BaseFloatColumnValueSelector>
+public abstract class SimpleFloatAggregatorFactory extends NullableNumericAggregatorFactory<ColumnValueSelector>
 {
   protected final String name;
   @Nullable
@@ -57,7 +62,7 @@ public abstract class SimpleFloatAggregatorFactory extends NullableAggregatorFac
     this.name = name;
     this.fieldName = fieldName;
     this.expression = expression;
-    this.fieldExpression = Suppliers.memoize(() -> expression == null ? null : Parser.parse(expression, macroTable));
+    this.fieldExpression = Parser.lazyParse(expression, macroTable);
     Preconditions.checkNotNull(name, "Must have a valid, non-null aggregator name");
     Preconditions.checkArgument(
         fieldName == null ^ expression == null,
@@ -65,14 +70,52 @@ public abstract class SimpleFloatAggregatorFactory extends NullableAggregatorFac
     );
   }
 
-  BaseFloatColumnValueSelector getFloatColumnSelector(ColumnSelectorFactory metricFactory, float nullValue)
+  @Override
+  protected Aggregator factorize(ColumnSelectorFactory metricFactory, ColumnValueSelector selector)
+  {
+    if (shouldUseStringColumnAggregatorWrapper(metricFactory)) {
+      return new StringColumnFloatAggregatorWrapper(
+          selector,
+          SimpleFloatAggregatorFactory.this::buildAggregator,
+          nullValue()
+      );
+    } else {
+      return buildAggregator(selector);
+    }
+  }
+
+  @Override
+  protected BufferAggregator factorizeBuffered(
+      ColumnSelectorFactory metricFactory,
+      ColumnValueSelector selector
+  )
+  {
+    if (shouldUseStringColumnAggregatorWrapper(metricFactory)) {
+      return new StringColumnFloatBufferAggregatorWrapper(
+          selector,
+          SimpleFloatAggregatorFactory.this::buildBufferAggregator,
+          nullValue()
+      );
+    } else {
+      return buildBufferAggregator(selector);
+    }
+  }
+
+  @Override
+  protected ColumnValueSelector selector(ColumnSelectorFactory metricFactory)
   {
     return AggregatorUtil.makeColumnValueSelectorWithFloatDefault(
         metricFactory,
         fieldName,
         fieldExpression.get(),
-        nullValue
+        nullValue()
     );
+  }
+
+  @Override
+  protected VectorValueSelector vectorSelector(VectorColumnSelectorFactory columnSelectorFactory)
+  {
+    return AggregatorUtil.makeVectorValueSelector(columnSelectorFactory, fieldName, expression, fieldExpression);
   }
 
   @Override
@@ -86,9 +129,9 @@ public abstract class SimpleFloatAggregatorFactory extends NullableAggregatorFac
   }
 
   @Override
-  public String getTypeName()
+  public ValueType getType()
   {
-    return "float";
+    return ValueType.FLOAT;
   }
 
   @Override
@@ -115,7 +158,7 @@ public abstract class SimpleFloatAggregatorFactory extends NullableAggregatorFac
   {
     return fieldName != null
            ? Collections.singletonList(fieldName)
-           : fieldExpression.get().analyzeInputs().getRequiredColumns();
+           : fieldExpression.get().analyzeInputs().getRequiredBindingsList();
   }
 
   @Override
@@ -178,4 +221,25 @@ public abstract class SimpleFloatAggregatorFactory extends NullableAggregatorFac
   {
     return expression;
   }
+
+  @Override
+  public boolean canVectorize(ColumnInspector columnInspector)
+  {
+    return AggregatorUtil.canVectorize(columnInspector, fieldName, expression, fieldExpression);
+  }
+
+  private boolean shouldUseStringColumnAggregatorWrapper(ColumnSelectorFactory columnSelectorFactory)
+  {
+    if (fieldName != null) {
+      ColumnCapabilities capabilities = columnSelectorFactory.getColumnCapabilities(fieldName);
+      return capabilities != null && capabilities.getType() == ValueType.STRING;
+    }
+    return false;
+  }
+
+  protected abstract float nullValue();
+
+  protected abstract Aggregator buildAggregator(BaseFloatColumnValueSelector selector);
+
+  protected abstract BufferAggregator buildBufferAggregator(BaseFloatColumnValueSelector selector);
 }

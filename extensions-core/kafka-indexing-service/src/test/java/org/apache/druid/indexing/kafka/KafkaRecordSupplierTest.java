@@ -24,13 +24,19 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import org.apache.curator.test.TestingCluster;
+import org.apache.druid.data.input.kafka.KafkaRecordEntity;
+import org.apache.druid.indexing.kafka.supervisor.KafkaSupervisorIOConfig;
 import org.apache.druid.indexing.kafka.test.TestBroker;
 import org.apache.druid.indexing.seekablestream.common.OrderedPartitionableRecord;
 import org.apache.druid.indexing.seekablestream.common.StreamPartition;
 import org.apache.druid.java.util.common.StringUtils;
+import org.apache.druid.metadata.DynamicConfigProvider;
+import org.apache.druid.metadata.MapStringDynamicConfigProvider;
 import org.apache.druid.segment.TestHelper;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.common.serialization.Deserializer;
 import org.junit.AfterClass;
 import org.junit.Assert;
 import org.junit.Before;
@@ -42,6 +48,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.stream.Collectors;
@@ -53,7 +60,7 @@ public class KafkaRecordSupplierTest
   private static long poll_timeout_millis = 1000;
   private static int pollRetry = 5;
   private static int topicPosFix = 0;
-  private static final ObjectMapper objectMapper = TestHelper.makeJsonMapper();
+  private static final ObjectMapper OBJECT_MAPPER = TestHelper.makeJsonMapper();
 
   private static TestingCluster zkServer;
   private static TestBroker kafkaServer;
@@ -106,7 +113,7 @@ public class KafkaRecordSupplierTest
     return "topic-" + topicPosFix++;
   }
 
-  private List<OrderedPartitionableRecord<Integer, Long>> createOrderedPartitionableRecords()
+  private List<OrderedPartitionableRecord<Integer, Long, KafkaRecordEntity>> createOrderedPartitionableRecords()
   {
     Map<Integer, Long> partitionToOffset = new HashMap<>();
     return records.stream().map(r -> {
@@ -121,9 +128,32 @@ public class KafkaRecordSupplierTest
           topic,
           r.partition(),
           offset,
-          r.value() == null ? null : Collections.singletonList(r.value())
+          r.value() == null ? null : Collections.singletonList(new KafkaRecordEntity(
+              new ConsumerRecord<>(r.topic(), r.partition(), offset, r.key(), r.value())
+          ))
       );
     }).collect(Collectors.toList());
+  }
+
+  public static class TestKafkaDeserializer implements Deserializer<byte[]>
+  {
+    @Override
+    public void configure(Map<String, ?> map, boolean b)
+    {
+
+    }
+
+    @Override
+    public void close()
+    {
+
+    }
+
+    @Override
+    public byte[] deserialize(String topic, byte[] data)
+    {
+      return data;
+    }
   }
 
   @BeforeClass
@@ -172,7 +202,7 @@ public class KafkaRecordSupplierTest
     );
 
     KafkaRecordSupplier recordSupplier = new KafkaRecordSupplier(
-        kafkaServer.consumerProperties(), objectMapper);
+        kafkaServer.consumerProperties(), OBJECT_MAPPER);
 
     Assert.assertTrue(recordSupplier.getAssignment().isEmpty());
 
@@ -180,6 +210,76 @@ public class KafkaRecordSupplierTest
 
     Assert.assertEquals(partitions, recordSupplier.getAssignment());
     Assert.assertEquals(ImmutableSet.of(0, 1), recordSupplier.getPartitionIds(topic));
+
+    recordSupplier.close();
+  }
+
+  @Test
+  public void testSupplierSetupCustomDeserializer() throws ExecutionException, InterruptedException
+  {
+
+    // Insert data
+    insertData();
+
+    Set<StreamPartition<Integer>> partitions = ImmutableSet.of(
+        StreamPartition.of(topic, 0),
+        StreamPartition.of(topic, 1)
+    );
+
+    Map<String, Object> properties = kafkaServer.consumerProperties();
+    properties.put("key.deserializer", KafkaRecordSupplierTest.TestKafkaDeserializer.class.getName());
+    properties.put("value.deserializer", KafkaRecordSupplierTest.TestKafkaDeserializer.class.getName());
+
+    KafkaRecordSupplier recordSupplier = new KafkaRecordSupplier(
+        properties,
+        OBJECT_MAPPER
+    );
+
+    Assert.assertTrue(recordSupplier.getAssignment().isEmpty());
+
+    recordSupplier.assign(partitions);
+
+    Assert.assertEquals(partitions, recordSupplier.getAssignment());
+    Assert.assertEquals(ImmutableSet.of(0, 1), recordSupplier.getPartitionIds(topic));
+
+    recordSupplier.close();
+  }
+
+  @Test
+  public void testPollCustomDeserializer() throws InterruptedException, ExecutionException
+  {
+
+    // Insert data
+    insertData();
+
+    Set<StreamPartition<Integer>> partitions = ImmutableSet.of(
+        StreamPartition.of(topic, 0),
+        StreamPartition.of(topic, 1)
+    );
+
+    Map<String, Object> properties = kafkaServer.consumerProperties();
+    properties.put("key.deserializer", KafkaRecordSupplierTest.TestKafkaDeserializer.class.getName());
+    properties.put("value.deserializer", KafkaRecordSupplierTest.TestKafkaDeserializer.class.getName());
+
+    KafkaRecordSupplier recordSupplier = new KafkaRecordSupplier(
+        properties,
+        OBJECT_MAPPER
+    );
+
+    recordSupplier.assign(partitions);
+    recordSupplier.seekToEarliest(partitions);
+
+    List<OrderedPartitionableRecord<Integer, Long, KafkaRecordEntity>> initialRecords = new ArrayList<>(createOrderedPartitionableRecords());
+
+    List<OrderedPartitionableRecord<Integer, Long, KafkaRecordEntity>> polledRecords = recordSupplier.poll(poll_timeout_millis);
+    for (int i = 0; polledRecords.size() != initialRecords.size() && i < pollRetry; i++) {
+      polledRecords.addAll(recordSupplier.poll(poll_timeout_millis));
+      Thread.sleep(200);
+    }
+
+    Assert.assertEquals(partitions, recordSupplier.getAssignment());
+    Assert.assertEquals(initialRecords.size(), polledRecords.size());
+    Assert.assertTrue(initialRecords.containsAll(polledRecords));
 
     recordSupplier.close();
   }
@@ -197,14 +297,14 @@ public class KafkaRecordSupplierTest
     );
 
     KafkaRecordSupplier recordSupplier = new KafkaRecordSupplier(
-        kafkaServer.consumerProperties(), objectMapper);
+        kafkaServer.consumerProperties(), OBJECT_MAPPER);
 
     recordSupplier.assign(partitions);
     recordSupplier.seekToEarliest(partitions);
 
-    List<OrderedPartitionableRecord<Integer, Long>> initialRecords = new ArrayList<>(createOrderedPartitionableRecords());
+    List<OrderedPartitionableRecord<Integer, Long, KafkaRecordEntity>> initialRecords = new ArrayList<>(createOrderedPartitionableRecords());
 
-    List<OrderedPartitionableRecord<Integer, Long>> polledRecords = recordSupplier.poll(poll_timeout_millis);
+    List<OrderedPartitionableRecord<Integer, Long, KafkaRecordEntity>> polledRecords = recordSupplier.poll(poll_timeout_millis);
     for (int i = 0; polledRecords.size() != initialRecords.size() && i < pollRetry; i++) {
       polledRecords.addAll(recordSupplier.poll(poll_timeout_millis));
       Thread.sleep(200);
@@ -238,12 +338,12 @@ public class KafkaRecordSupplierTest
 
 
     KafkaRecordSupplier recordSupplier = new KafkaRecordSupplier(
-        kafkaServer.consumerProperties(), objectMapper);
+        kafkaServer.consumerProperties(), OBJECT_MAPPER);
 
     recordSupplier.assign(partitions);
     recordSupplier.seekToEarliest(partitions);
 
-    List<OrderedPartitionableRecord<Integer, Long>> polledRecords = recordSupplier.poll(poll_timeout_millis);
+    List<OrderedPartitionableRecord<Integer, Long, KafkaRecordEntity>> polledRecords = recordSupplier.poll(poll_timeout_millis);
     for (int i = 0; polledRecords.size() != 13 && i < pollRetry; i++) {
       polledRecords.addAll(recordSupplier.poll(poll_timeout_millis));
       Thread.sleep(200);
@@ -265,7 +365,7 @@ public class KafkaRecordSupplierTest
       Thread.sleep(200);
     }
 
-    List<OrderedPartitionableRecord<Integer, Long>> initialRecords = createOrderedPartitionableRecords();
+    List<OrderedPartitionableRecord<Integer, Long, KafkaRecordEntity>> initialRecords = createOrderedPartitionableRecords();
 
     Assert.assertEquals(records.size(), polledRecords.size());
     Assert.assertEquals(partitions, recordSupplier.getAssignment());
@@ -309,7 +409,7 @@ public class KafkaRecordSupplierTest
     );
 
     KafkaRecordSupplier recordSupplier = new KafkaRecordSupplier(
-        kafkaServer.consumerProperties(), objectMapper);
+        kafkaServer.consumerProperties(), OBJECT_MAPPER);
 
     recordSupplier.assign(partitions);
     recordSupplier.seekToEarliest(partitions);
@@ -320,9 +420,9 @@ public class KafkaRecordSupplierTest
     recordSupplier.seek(partition0, 2L);
     recordSupplier.seek(partition1, 2L);
 
-    List<OrderedPartitionableRecord<Integer, Long>> initialRecords = createOrderedPartitionableRecords();
+    List<OrderedPartitionableRecord<Integer, Long, KafkaRecordEntity>> initialRecords = createOrderedPartitionableRecords();
 
-    List<OrderedPartitionableRecord<Integer, Long>> polledRecords = recordSupplier.poll(poll_timeout_millis);
+    List<OrderedPartitionableRecord<Integer, Long, KafkaRecordEntity>> polledRecords = recordSupplier.poll(poll_timeout_millis);
     for (int i = 0; polledRecords.size() != 11 && i < pollRetry; i++) {
       polledRecords.addAll(recordSupplier.poll(poll_timeout_millis));
       Thread.sleep(200);
@@ -352,7 +452,7 @@ public class KafkaRecordSupplierTest
     );
 
     KafkaRecordSupplier recordSupplier = new KafkaRecordSupplier(
-        kafkaServer.consumerProperties(), objectMapper);
+        kafkaServer.consumerProperties(), OBJECT_MAPPER);
 
     recordSupplier.assign(partitions);
     recordSupplier.seekToEarliest(partitions);
@@ -361,7 +461,7 @@ public class KafkaRecordSupplierTest
     Assert.assertEquals(0L, (long) recordSupplier.getEarliestSequenceNumber(partition1));
 
     recordSupplier.seekToLatest(partitions);
-    List<OrderedPartitionableRecord<Integer, Long>> polledRecords = recordSupplier.poll(poll_timeout_millis);
+    List<OrderedPartitionableRecord<Integer, Long, KafkaRecordEntity>> polledRecords = recordSupplier.poll(poll_timeout_millis);
 
     Assert.assertEquals(Collections.emptyList(), polledRecords);
     recordSupplier.close();
@@ -385,7 +485,7 @@ public class KafkaRecordSupplierTest
     );
 
     KafkaRecordSupplier recordSupplier = new KafkaRecordSupplier(
-        kafkaServer.consumerProperties(), objectMapper);
+        kafkaServer.consumerProperties(), OBJECT_MAPPER);
 
     recordSupplier.assign(partitions);
 
@@ -411,7 +511,7 @@ public class KafkaRecordSupplierTest
     );
 
     KafkaRecordSupplier recordSupplier = new KafkaRecordSupplier(
-        kafkaServer.consumerProperties(), objectMapper);
+        kafkaServer.consumerProperties(), OBJECT_MAPPER);
 
     recordSupplier.assign(partitions);
     recordSupplier.seekToEarliest(partitions);
@@ -440,6 +540,81 @@ public class KafkaRecordSupplierTest
 
 
     recordSupplier.close();
+  }
+
+  @Test
+  public void getLatestSequenceNumberWhenPartitionIsEmptyAndUseEarliestOffsetShouldReturnsValidNonNull()
+  {
+    KafkaRecordSupplier recordSupplier = new KafkaRecordSupplier(
+        kafkaServer.consumerProperties(), OBJECT_MAPPER);
+    StreamPartition<Integer> streamPartition = StreamPartition.of(topic, 0);
+    Set<StreamPartition<Integer>> partitions = ImmutableSet.of(streamPartition);
+    recordSupplier.assign(partitions);
+    recordSupplier.seekToEarliest(partitions);
+    Assert.assertEquals(new Long(0), recordSupplier.getLatestSequenceNumber(streamPartition));
+  }
+
+  @Test
+  public void getEarliestSequenceNumberWhenPartitionIsEmptyAndUseEarliestOffsetShouldReturnsValidNonNull()
+  {
+    KafkaRecordSupplier recordSupplier = new KafkaRecordSupplier(
+        kafkaServer.consumerProperties(), OBJECT_MAPPER);
+    StreamPartition<Integer> streamPartition = StreamPartition.of(topic, 0);
+    Set<StreamPartition<Integer>> partitions = ImmutableSet.of(streamPartition);
+    recordSupplier.assign(partitions);
+    recordSupplier.seekToEarliest(partitions);
+    Assert.assertEquals(new Long(0), recordSupplier.getEarliestSequenceNumber(streamPartition));
+  }
+
+  @Test
+  public void getLatestSequenceNumberWhenPartitionIsEmptyAndUseLatestOffsetShouldReturnsValidNonNull()
+  {
+    KafkaRecordSupplier recordSupplier = new KafkaRecordSupplier(
+        kafkaServer.consumerProperties(), OBJECT_MAPPER);
+    StreamPartition<Integer> streamPartition = StreamPartition.of(topic, 0);
+    Set<StreamPartition<Integer>> partitions = ImmutableSet.of(streamPartition);
+    recordSupplier.assign(partitions);
+    recordSupplier.seekToLatest(partitions);
+    Assert.assertEquals(new Long(0), recordSupplier.getLatestSequenceNumber(streamPartition));
+  }
+
+  @Test
+  public void getEarliestSequenceNumberWhenPartitionIsEmptyAndUseLatestOffsetShouldReturnsValidNonNull()
+  {
+    KafkaRecordSupplier recordSupplier = new KafkaRecordSupplier(
+        kafkaServer.consumerProperties(), OBJECT_MAPPER);
+    StreamPartition<Integer> streamPartition = StreamPartition.of(topic, 0);
+    Set<StreamPartition<Integer>> partitions = ImmutableSet.of(streamPartition);
+    recordSupplier.assign(partitions);
+    recordSupplier.seekToLatest(partitions);
+    Assert.assertEquals(new Long(0), recordSupplier.getEarliestSequenceNumber(streamPartition));
+  }
+
+  @Test
+  public void testAddConsumerPropertiesFromConfig()
+  {
+    DynamicConfigProvider dynamicConfigProvider = new MapStringDynamicConfigProvider(
+        ImmutableMap.of("kafka.prop.2", "value.2", KafkaSupervisorIOConfig.TRUST_STORE_PASSWORD_KEY, "pwd2")
+    );
+
+    Properties properties = new Properties();
+
+    Map<String, Object> consumerProperties = ImmutableMap.of(
+        KafkaSupervisorIOConfig.TRUST_STORE_PASSWORD_KEY, "pwd1",
+        "kafka.prop.1", "value.1",
+        "druid.dynamic.config.provider", OBJECT_MAPPER.convertValue(dynamicConfigProvider, Map.class)
+    );
+
+    KafkaRecordSupplier.addConsumerPropertiesFromConfig(
+        properties,
+        OBJECT_MAPPER,
+        consumerProperties
+    );
+
+    Assert.assertEquals(3, properties.size());
+    Assert.assertEquals("value.1", properties.getProperty("kafka.prop.1"));
+    Assert.assertEquals("value.2", properties.getProperty("kafka.prop.2"));
+    Assert.assertEquals("pwd2", properties.getProperty(KafkaSupervisorIOConfig.TRUST_STORE_PASSWORD_KEY));
   }
 
   private void insertData() throws ExecutionException, InterruptedException

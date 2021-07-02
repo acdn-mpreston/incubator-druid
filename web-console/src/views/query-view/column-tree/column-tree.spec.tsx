@@ -16,31 +16,43 @@
  * limitations under the License.
  */
 
+import { SqlQuery } from 'druid-query-toolkit';
+import { shallow } from 'enzyme';
 import React from 'react';
-import { render } from 'react-testing-library';
 
-import { ColumnMetadata } from '../../../utils/column-metadata';
+import { ColumnMetadata } from '../../../utils';
 
 import { ColumnTree } from './column-tree';
 
-describe('column tree', () => {
+describe('ColumnTree', () => {
   it('matches snapshot', () => {
-    const columnTree = (
+    const columnTree = shallow(
       <ColumnTree
+        getParsedQuery={() => {
+          return SqlQuery.parse(`SELECT channel, count(*) as cnt FROM wikipedia GROUP BY 1`);
+        }}
+        defaultSchema="druid"
+        defaultTable="wikipedia"
         columnMetadataLoading={false}
         columnMetadata={
           [
             {
               TABLE_SCHEMA: 'druid',
-              TABLE_NAME: 'deletion-tutorial',
+              TABLE_NAME: 'wikipedia',
               COLUMN_NAME: '__time',
               DATA_TYPE: 'TIMESTAMP',
             },
             {
               TABLE_SCHEMA: 'druid',
-              TABLE_NAME: 'deletion-tutorial',
+              TABLE_NAME: 'wikipedia',
               COLUMN_NAME: 'added',
               DATA_TYPE: 'BIGINT',
+            },
+            {
+              TABLE_SCHEMA: 'druid',
+              TABLE_NAME: 'wikipedia',
+              COLUMN_NAME: 'addedBy10',
+              DATA_TYPE: 'FLOAT',
             },
             {
               TABLE_SCHEMA: 'sys',
@@ -50,11 +62,10 @@ describe('column tree', () => {
             },
           ] as ColumnMetadata[]
         }
-        onQueryStringChange={() => null}
-      />
+        onQueryChange={() => {}}
+      />,
     );
 
-    const { container } = render(columnTree);
-    expect(container.firstChild).toMatchSnapshot();
+    expect(columnTree).toMatchSnapshot();
   });
 });

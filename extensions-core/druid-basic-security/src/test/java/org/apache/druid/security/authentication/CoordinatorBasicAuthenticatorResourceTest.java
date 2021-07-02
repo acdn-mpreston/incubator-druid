@@ -35,6 +35,7 @@ import org.apache.druid.security.basic.authentication.endpoint.CoordinatorBasicA
 import org.apache.druid.security.basic.authentication.entity.BasicAuthenticatorCredentialUpdate;
 import org.apache.druid.security.basic.authentication.entity.BasicAuthenticatorCredentials;
 import org.apache.druid.security.basic.authentication.entity.BasicAuthenticatorUser;
+import org.apache.druid.server.security.AuthValidator;
 import org.apache.druid.server.security.AuthenticatorMapper;
 import org.easymock.EasyMock;
 import org.junit.After;
@@ -43,16 +44,21 @@ import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.ExpectedException;
+import org.junit.runner.RunWith;
+import org.mockito.Mock;
+import org.mockito.junit.MockitoJUnitRunner;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.ws.rs.core.Response;
 import java.util.Map;
 import java.util.Set;
 
+@RunWith(MockitoJUnitRunner.class)
 public class CoordinatorBasicAuthenticatorResourceTest
 {
   private static final String AUTHENTICATOR_NAME = "test";
   private static final String AUTHENTICATOR_NAME2 = "test2";
+  private static final String AUTHENTICATOR_NAME_LDAP = "testLdap";
 
   @Rule
   public ExpectedException expectedException = ExpectedException.none();
@@ -60,19 +66,21 @@ public class CoordinatorBasicAuthenticatorResourceTest
   @Rule
   public final TestDerbyConnector.DerbyConnectorRule derbyConnectorRule = new TestDerbyConnector.DerbyConnectorRule();
 
-  private TestDerbyConnector connector;
-  private MetadataStorageTablesConfig tablesConfig;
+  @Mock
+  private AuthValidator authValidator;
   private BasicAuthenticatorResource resource;
   private CoordinatorBasicAuthenticatorMetadataStorageUpdater storageUpdater;
   private HttpServletRequest req;
+  private ObjectMapper objectMapper;
 
   @Before
   public void setUp()
   {
     req = EasyMock.createStrictMock(HttpServletRequest.class);
 
-    connector = derbyConnectorRule.getConnector();
-    tablesConfig = derbyConnectorRule.metadataTablesConfigSupplier().get();
+    objectMapper = new ObjectMapper(new SmileFactory());
+    TestDerbyConnector connector = derbyConnectorRule.getConnector();
+    MetadataStorageTablesConfig tablesConfig = derbyConnectorRule.metadataTablesConfigSupplier().get();
     connector.createConfigTable();
 
     ObjectMapper objectMapper = new ObjectMapper(new SmileFactory());
@@ -83,22 +91,39 @@ public class CoordinatorBasicAuthenticatorResourceTest
             new BasicHTTPAuthenticator(
                 null,
                 AUTHENTICATOR_NAME,
-                "test",
+                null,
                 new DefaultPasswordProvider("druid"),
                 new DefaultPasswordProvider("druid"),
                 null,
                 null,
+                null,
+                false,
                 null
             ),
             AUTHENTICATOR_NAME2,
             new BasicHTTPAuthenticator(
                 null,
                 AUTHENTICATOR_NAME2,
-                "test",
+                null,
                 new DefaultPasswordProvider("druid"),
                 new DefaultPasswordProvider("druid"),
                 null,
                 null,
+                null,
+                false,
+                null
+            ),
+            AUTHENTICATOR_NAME_LDAP,
+            new BasicHTTPAuthenticator(
+                null,
+                AUTHENTICATOR_NAME2,
+                null,
+                new DefaultPasswordProvider("druid"),
+                new DefaultPasswordProvider("druid"),
+                null,
+                null,
+                null,
+                false,
                 null
             )
         )
@@ -119,7 +144,8 @@ public class CoordinatorBasicAuthenticatorResourceTest
             storageUpdater,
             authenticatorMapper,
             objectMapper
-        )
+        ),
+        authValidator
     );
 
     storageUpdater.start();
@@ -164,10 +190,26 @@ public class CoordinatorBasicAuthenticatorResourceTest
     response = resource.getAllUsers(req, AUTHENTICATOR_NAME);
     Assert.assertEquals(200, response.getStatus());
     Assert.assertEquals(expectedUsers, response.getEntity());
+
+    // Verify cached user map is also getting updated
+    response = resource.getCachedSerializedUserMap(req, AUTHENTICATOR_NAME);
+    Assert.assertEquals(200, response.getStatus());
+    Assert.assertTrue(response.getEntity() instanceof byte[]);
+    Map<String, BasicAuthenticatorUser> cachedUserMap = BasicAuthUtils.deserializeAuthenticatorUserMap(objectMapper, (byte[]) response.getEntity());
+    Assert.assertNotNull(cachedUserMap.get(BasicAuthUtils.ADMIN_NAME));
+    Assert.assertEquals(cachedUserMap.get(BasicAuthUtils.ADMIN_NAME).getName(), BasicAuthUtils.ADMIN_NAME);
+    Assert.assertNotNull(cachedUserMap.get(BasicAuthUtils.INTERNAL_USER_NAME));
+    Assert.assertEquals(cachedUserMap.get(BasicAuthUtils.ADMIN_NAME).getName(), BasicAuthUtils.ADMIN_NAME);
+    Assert.assertNotNull(cachedUserMap.get("druid"));
+    Assert.assertEquals(cachedUserMap.get("druid").getName(), "druid");
+    Assert.assertNotNull(cachedUserMap.get("druid2"));
+    Assert.assertEquals(cachedUserMap.get("druid2").getName(), "druid2");
+    Assert.assertNotNull(cachedUserMap.get("druid3"));
+    Assert.assertEquals(cachedUserMap.get("druid3").getName(), "druid3");
   }
 
   @Test
-  public void testSeparateDatabaseTables()
+  public void testGetAllUsersSeparateDatabaseTables()
   {
     Response response = resource.getAllUsers(req, AUTHENTICATOR_NAME);
     Assert.assertEquals(200, response.getStatus());
@@ -201,9 +243,43 @@ public class CoordinatorBasicAuthenticatorResourceTest
     Assert.assertEquals(200, response.getStatus());
     Assert.assertEquals(expectedUsers, response.getEntity());
 
+    // Verify cached user map for AUTHENTICATOR_NAME authenticator is also getting updated
+    response = resource.getCachedSerializedUserMap(req, AUTHENTICATOR_NAME);
+    Assert.assertEquals(200, response.getStatus());
+    Assert.assertTrue(response.getEntity() instanceof byte[]);
+
+    Map<String, BasicAuthenticatorUser> cachedUserMap = BasicAuthUtils.deserializeAuthenticatorUserMap(objectMapper, (byte[]) response.getEntity());
+    Assert.assertNotNull(cachedUserMap.get(BasicAuthUtils.ADMIN_NAME));
+    Assert.assertEquals(cachedUserMap.get(BasicAuthUtils.ADMIN_NAME).getName(), BasicAuthUtils.ADMIN_NAME);
+    Assert.assertNotNull(cachedUserMap.get(BasicAuthUtils.INTERNAL_USER_NAME));
+    Assert.assertEquals(cachedUserMap.get(BasicAuthUtils.ADMIN_NAME).getName(), BasicAuthUtils.ADMIN_NAME);
+    Assert.assertNotNull(cachedUserMap.get("druid"));
+    Assert.assertEquals(cachedUserMap.get("druid").getName(), "druid");
+    Assert.assertNotNull(cachedUserMap.get("druid2"));
+    Assert.assertEquals(cachedUserMap.get("druid2").getName(), "druid2");
+    Assert.assertNotNull(cachedUserMap.get("druid3"));
+    Assert.assertEquals(cachedUserMap.get("druid3").getName(), "druid3");
+
     response = resource.getAllUsers(req, AUTHENTICATOR_NAME2);
     Assert.assertEquals(200, response.getStatus());
     Assert.assertEquals(expectedUsers2, response.getEntity());
+
+    // Verify cached user map for each AUTHENTICATOR_NAME2 is also getting updated
+    response = resource.getCachedSerializedUserMap(req, AUTHENTICATOR_NAME2);
+    Assert.assertEquals(200, response.getStatus());
+    Assert.assertTrue(response.getEntity() instanceof byte[]);
+
+    cachedUserMap = BasicAuthUtils.deserializeAuthenticatorUserMap(objectMapper, (byte[]) response.getEntity());
+    Assert.assertNotNull(cachedUserMap.get(BasicAuthUtils.ADMIN_NAME));
+    Assert.assertEquals(cachedUserMap.get(BasicAuthUtils.ADMIN_NAME).getName(), BasicAuthUtils.ADMIN_NAME);
+    Assert.assertNotNull(cachedUserMap.get(BasicAuthUtils.INTERNAL_USER_NAME));
+    Assert.assertEquals(cachedUserMap.get(BasicAuthUtils.ADMIN_NAME).getName(), BasicAuthUtils.ADMIN_NAME);
+    Assert.assertNotNull(cachedUserMap.get("druid4"));
+    Assert.assertEquals(cachedUserMap.get("druid4").getName(), "druid4");
+    Assert.assertNotNull(cachedUserMap.get("druid5"));
+    Assert.assertEquals(cachedUserMap.get("druid5").getName(), "druid5");
+    Assert.assertNotNull(cachedUserMap.get("druid6"));
+    Assert.assertEquals(cachedUserMap.get("druid6").getName(), "druid6");
   }
 
   @Test
@@ -219,6 +295,13 @@ public class CoordinatorBasicAuthenticatorResourceTest
 
     response = resource.deleteUser(req, AUTHENTICATOR_NAME, "druid");
     Assert.assertEquals(200, response.getStatus());
+
+    response = resource.getCachedSerializedUserMap(req, AUTHENTICATOR_NAME);
+    Assert.assertEquals(200, response.getStatus());
+    Assert.assertTrue(response.getEntity() instanceof byte[]);
+    Map<String, BasicAuthenticatorUser> cachedUserMap = BasicAuthUtils.deserializeAuthenticatorUserMap(objectMapper, (byte[]) response.getEntity());
+    Assert.assertNotNull(cachedUserMap);
+    Assert.assertNull(cachedUserMap.get("druid"));
 
     response = resource.deleteUser(req, AUTHENTICATOR_NAME, "druid");
     Assert.assertEquals(400, response.getStatus());
@@ -263,6 +346,29 @@ public class CoordinatorBasicAuthenticatorResourceTest
     );
     Assert.assertArrayEquals(recalculatedHash, hash);
 
+    response = resource.getCachedSerializedUserMap(req, AUTHENTICATOR_NAME);
+    Assert.assertEquals(200, response.getStatus());
+    Assert.assertTrue(response.getEntity() instanceof byte[]);
+    Map<String, BasicAuthenticatorUser> cachedUserMap = BasicAuthUtils.deserializeAuthenticatorUserMap(objectMapper, (byte[]) response.getEntity());
+    Assert.assertNotNull(cachedUserMap);
+    Assert.assertNotNull(cachedUserMap.get("druid"));
+    Assert.assertEquals("druid", cachedUserMap.get("druid").getName());
+    BasicAuthenticatorCredentials cachedUserCredentials = cachedUserMap.get("druid").getCredentials();
+
+    salt = cachedUserCredentials.getSalt();
+    hash = cachedUserCredentials.getHash();
+    iterations = cachedUserCredentials.getIterations();
+    Assert.assertEquals(BasicAuthUtils.SALT_LENGTH, salt.length);
+    Assert.assertEquals(BasicAuthUtils.KEY_LENGTH / 8, hash.length);
+    Assert.assertEquals(BasicAuthUtils.DEFAULT_KEY_ITERATIONS, iterations);
+
+    recalculatedHash = BasicAuthUtils.hashPassword(
+        "helloworld".toCharArray(),
+        salt,
+        iterations
+    );
+    Assert.assertArrayEquals(recalculatedHash, hash);
+
     response = resource.deleteUser(req, AUTHENTICATOR_NAME, "druid");
     Assert.assertEquals(200, response.getStatus());
 
@@ -284,5 +390,4 @@ public class CoordinatorBasicAuthenticatorResourceTest
   {
     return ImmutableMap.of("error", errorMsg);
   }
-
 }

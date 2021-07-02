@@ -21,6 +21,7 @@ package org.apache.druid.indexing.overlord.supervisor;
 
 import com.google.common.collect.ImmutableMap;
 import org.apache.druid.indexing.overlord.DataSourceMetadata;
+import org.apache.druid.indexing.overlord.supervisor.autoscaler.LagStats;
 
 import javax.annotation.Nullable;
 import java.util.Map;
@@ -57,18 +58,19 @@ public interface Supervisor
   /**
    * The definition of checkpoint is not very strict as currently it does not affect data or control path.
    * On this call Supervisor can potentially checkpoint data processed so far to some durable storage
-   * for example - Kafka Supervisor uses this to merge and handoff segments containing at least the data
+   * for example - Kafka/Kinesis Supervisor uses this to merge and handoff segments containing at least the data
    * represented by {@param currentCheckpoint} DataSourceMetadata
    *
    * @param taskGroupId        unique Identifier to figure out for which sequence to do checkpointing
-   * @param baseSequenceName   baseSequenceName
-   * @param previousCheckPoint DataSourceMetadata checkpointed in previous call
-   * @param currentCheckPoint  current DataSourceMetadata to be checkpointed
+   * @param checkpointMetadata metadata for the sequence to currently checkpoint
    */
-  void checkpoint(
-      @Nullable Integer taskGroupId,
-      @Deprecated String baseSequenceName,
-      DataSourceMetadata previousCheckPoint,
-      DataSourceMetadata currentCheckPoint
-  );
+  void checkpoint(int taskGroupId, DataSourceMetadata checkpointMetadata);
+
+  /**
+   * Computes maxLag, totalLag and avgLag
+   * Only supports Kafka ingestion so far.
+   */
+  LagStats computeLagStats();
+
+  int getActiveTaskGroupsCount();
 }

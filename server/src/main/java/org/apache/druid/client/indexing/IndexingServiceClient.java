@@ -27,26 +27,29 @@ import org.joda.time.Interval;
 import javax.annotation.Nullable;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 public interface IndexingServiceClient
 {
-  void killSegments(String dataSource, Interval interval);
+  void killUnusedSegments(String idPrefix, String dataSource, Interval interval);
 
   int killPendingSegments(String dataSource, DateTime end);
 
   String compactSegments(
+      String idPrefix,
       List<DataSegment> segments,
-      @Nullable Long targetCompactionSizeBytes,
       int compactionTaskPriority,
-      @Nullable ClientCompactQueryTuningConfig tuningConfig,
+      @Nullable ClientCompactionTaskQueryTuningConfig tuningConfig,
+      @Nullable ClientCompactionTaskGranularitySpec granularitySpec,
+      @Nullable Boolean dropExisting,
       @Nullable Map<String, Object> context
   );
 
   int getTotalWorkerCapacity();
 
-  String runTask(Object taskObject);
+  String runTask(String taskId, Object taskObject);
 
-  String killTask(String taskId);
+  String cancelTask(String taskId);
 
   /**
    * Gets all tasks that are waiting, pending, or running.
@@ -55,9 +58,25 @@ public interface IndexingServiceClient
 
   TaskStatusResponse getTaskStatus(String taskId);
 
+  Map<String, TaskStatus> getTaskStatuses(Set<String> taskIds) throws InterruptedException;
+
   @Nullable
   TaskStatusPlus getLastCompleteTask();
 
   @Nullable
   TaskPayloadResponse getTaskPayload(String taskId);
+
+  /**
+   * Gets a List of Intervals locked by higher priority tasks for each datasource.
+   *
+   * @param minTaskPriority Minimum task priority for each datasource. Only the
+   *                        Intervals that are locked by Tasks higher than this
+   *                        priority are returned. Tasks for datasources that
+   *                        are not present in this Map are not returned.
+   * @return Map from Datasource to List of Intervals locked by Tasks that have
+   * priority strictly greater than the {@code minTaskPriority} for that datasource.
+   */
+  Map<String, List<Interval>> getLockedIntervals(Map<String, Integer> minTaskPriority);
+
+  SamplerResponse sample(SamplerSpec samplerSpec);
 }

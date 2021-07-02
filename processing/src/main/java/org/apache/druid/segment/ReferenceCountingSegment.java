@@ -19,135 +19,157 @@
 
 package org.apache.druid.segment;
 
-import org.apache.druid.java.util.emitter.EmittingLogger;
+import com.google.common.base.Preconditions;
+import org.apache.druid.timeline.Overshadowable;
 import org.apache.druid.timeline.SegmentId;
+import org.apache.druid.timeline.partition.ShardSpec;
 import org.joda.time.Interval;
 
+import javax.annotation.Nullable;
 import java.io.Closeable;
-import java.util.concurrent.Phaser;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.Optional;
 
 /**
- * ReferenceCountingSegment allows to call {@link #close()} before some other "users", which called {@link
- * #increment()}, has not called {@link #decrement()} yet, and the wrapped {@link Segment} won't be actually closed
- * until that. So ReferenceCountingSegment implements something like automatic reference count-based resource
- * management.
+ * {@link Segment} that is also a {@link ReferenceCountingSegment}, allowing query engines that operate directly on
+ * segments to track references so that dropping a {@link Segment} can be done safely to ensure there are no in-flight
+ * queries.
  */
-public class ReferenceCountingSegment extends AbstractSegment
+public class ReferenceCountingSegment extends ReferenceCountingCloseableObject<Segment>
+    implements SegmentReference, Overshadowable<ReferenceCountingSegment>
 {
-  private static final EmittingLogger log = new EmittingLogger(ReferenceCountingSegment.class);
+  private final short startRootPartitionId;
+  private final short endRootPartitionId;
+  private final short minorVersion;
+  private final short atomicUpdateGroupSize;
 
-  private final Segment baseSegment;
-  private final AtomicBoolean closed = new AtomicBoolean(false);
-  private final Phaser referents = new Phaser(1)
+  public static ReferenceCountingSegment wrapRootGenerationSegment(Segment baseSegment)
   {
-    @Override
-    protected boolean onAdvance(int phase, int registeredParties)
-    {
-      // Ensure that onAdvance() doesn't throw exception, otherwise termination won't happen
-      if (registeredParties != 0) {
-        log.error("registeredParties[%s] is not 0", registeredParties);
-      }
-      try {
-        baseSegment.close();
-      }
-      catch (Exception e) {
-        try {
-          log.error(e, "Exception while closing segment[%s]", baseSegment.getId());
-        }
-        catch (Exception e2) {
-          // ignore
-        }
-      }
-      // Always terminate.
-      return true;
-    }
-  };
-
-  public ReferenceCountingSegment(Segment baseSegment)
-  {
-    this.baseSegment = baseSegment;
+    return new ReferenceCountingSegment(
+        Preconditions.checkNotNull(baseSegment, "baseSegment"),
+        baseSegment.getId().getPartitionNum(),
+        (baseSegment.getId().getPartitionNum() + 1),
+        (short) 0,
+        (short) 1
+    );
   }
 
+  public static ReferenceCountingSegment wrapSegment(
+      Segment baseSegment,
+      ShardSpec shardSpec
+  )
+  {
+    return new ReferenceCountingSegment(
+        baseSegment,
+        shardSpec.getStartRootPartitionId(),
+        shardSpec.getEndRootPartitionId(),
+        shardSpec.getMinorVersion(),
+        shardSpec.getAtomicUpdateGroupSize()
+    );
+  }
+
+  private ReferenceCountingSegment(
+      Segment baseSegment,
+      int startRootPartitionId,
+      int endRootPartitionId,
+      short minorVersion,
+      short atomicUpdateGroupSize
+  )
+  {
+    super(baseSegment);
+    this.startRootPartitionId = (short) startRootPartitionId;
+    this.endRootPartitionId = (short) endRootPartitionId;
+    this.minorVersion = minorVersion;
+    this.atomicUpdateGroupSize = atomicUpdateGroupSize;
+  }
+
+  @Nullable
   public Segment getBaseSegment()
   {
-    return !isClosed() ? baseSegment : null;
-  }
-
-  public int getNumReferences()
-  {
-    return Math.max(referents.getRegisteredParties() - 1, 0);
-  }
-
-  public boolean isClosed()
-  {
-    return referents.isTerminated();
+    return !isClosed() ? baseObject : null;
   }
 
   @Override
+  @Nullable
   public SegmentId getId()
   {
-    return !isClosed() ? baseSegment.getId() : null;
+    return !isClosed() ? baseObject.getId() : null;
   }
 
   @Override
+  @Nullable
   public Interval getDataInterval()
   {
-    return !isClosed() ? baseSegment.getDataInterval() : null;
+    return !isClosed() ? baseObject.getDataInterval() : null;
   }
 
   @Override
+  @Nullable
   public QueryableIndex asQueryableIndex()
   {
-    return !isClosed() ? baseSegment.asQueryableIndex() : null;
+    return !isClosed() ? baseObject.asQueryableIndex() : null;
   }
 
   @Override
+  @Nullable
   public StorageAdapter asStorageAdapter()
   {
-    return !isClosed() ? baseSegment.asStorageAdapter() : null;
+    return !isClosed() ? baseObject.asStorageAdapter() : null;
   }
 
   @Override
-  public void close()
+  public boolean overshadows(ReferenceCountingSegment other)
   {
-    if (closed.compareAndSet(false, true)) {
-      referents.arriveAndDeregister();
-    } else {
-      log.warn("close() is called more than once on ReferenceCountingSegment");
-    }
-  }
-
-  public boolean increment()
-  {
-    // Negative return from referents.register() means the Phaser is terminated.
-    return referents.register() >= 0;
-  }
-
-  /**
-   * Returns a {@link Closeable} which action is to call {@link #decrement()} only once. If close() is called on the
-   * returned Closeable object for the second time, it won't call {@link #decrement()} again.
-   */
-  public Closeable decrementOnceCloseable()
-  {
-    AtomicBoolean decremented = new AtomicBoolean(false);
-    return () -> {
-      if (decremented.compareAndSet(false, true)) {
-        decrement();
-      } else {
-        log.warn("close() is called more than once on ReferenceCountingSegment.decrementOnceCloseable()");
+    if (baseObject.getId().getDataSource().equals(other.baseObject.getId().getDataSource())
+        && baseObject.getId().getInterval().overlaps(other.baseObject.getId().getInterval())) {
+      final int majorVersionCompare = baseObject.getId().getVersion().compareTo(other.baseObject.getId().getVersion());
+      if (majorVersionCompare > 0) {
+        return true;
+      } else if (majorVersionCompare == 0) {
+        return includeRootPartitions(other) && getMinorVersion() > other.getMinorVersion();
       }
-    };
+    }
+    return false;
   }
 
-  public void decrement()
+  private boolean includeRootPartitions(ReferenceCountingSegment other)
   {
-    referents.arriveAndDeregister();
+    return startRootPartitionId <= other.startRootPartitionId
+           && endRootPartitionId >= other.endRootPartitionId;
   }
 
   @Override
-  public <T> T as(Class<T> clazz)
+  public int getStartRootPartitionId()
   {
-    return getBaseSegment().as(clazz);
+    return startRootPartitionId;
+  }
+
+  @Override
+  public int getEndRootPartitionId()
+  {
+    return endRootPartitionId;
+  }
+
+  @Override
+  public String getVersion()
+  {
+    return baseObject.getId().getVersion();
+  }
+
+  @Override
+  public short getMinorVersion()
+  {
+    return minorVersion;
+  }
+
+  @Override
+  public short getAtomicUpdateGroupSize()
+  {
+    return atomicUpdateGroupSize;
+  }
+
+  @Override
+  public Optional<Closeable> acquireReferences()
+  {
+    return incrementReferenceAndDecrementOnceCloseable();
   }
 }

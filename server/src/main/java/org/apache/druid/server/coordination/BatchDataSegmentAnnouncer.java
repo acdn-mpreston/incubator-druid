@@ -21,14 +21,17 @@ package org.apache.druid.server.coordination;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Function;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.SettableFuture;
 import com.google.inject.Inject;
+import com.google.inject.Provider;
 import org.apache.curator.utils.ZKPaths;
 import org.apache.druid.common.utils.UUIDUtils;
+import org.apache.druid.curator.ZkEnablementConfig;
 import org.apache.druid.curator.announcement.Announcer;
 import org.apache.druid.java.util.common.DateTimes;
 import org.apache.druid.java.util.common.ISE;
@@ -57,7 +60,10 @@ public class BatchDataSegmentAnnouncer implements DataSegmentAnnouncer
   private static final Logger log = new Logger(BatchDataSegmentAnnouncer.class);
 
   private final BatchDataSegmentAnnouncerConfig config;
+
+  @Nullable //Null if zk is disabled or isSkipSegmentAnnouncementOnZk = true
   private final Announcer announcer;
+
   private final ObjectMapper jsonMapper;
   private final String liveSegmentLocation;
   private final DruidServerMetadata server;
@@ -69,10 +75,49 @@ public class BatchDataSegmentAnnouncer implements DataSegmentAnnouncer
   private final ConcurrentMap<DataSegment, SegmentZNode> segmentLookup = new ConcurrentHashMap<>();
   private final Function<DataSegment, DataSegment> segmentTransformer;
 
-  private final ChangeRequestHistory<DataSegmentChangeRequest> changes = new ChangeRequestHistory();
+  private final ChangeRequestHistory<DataSegmentChangeRequest> changes = new ChangeRequestHistory<>();
+  @Nullable
   private final SegmentZNode dummyZnode;
 
+  private final boolean isSkipSegmentAnnouncementOnZk;
+
   @Inject
+  public BatchDataSegmentAnnouncer(
+      DruidServerMetadata server,
+      final BatchDataSegmentAnnouncerConfig config,
+      ZkPathsConfig zkPaths,
+      Provider<Announcer> announcerProvider,
+      ObjectMapper jsonMapper,
+      ZkEnablementConfig zkEnablementConfig
+  )
+  {
+    this.config = config;
+    this.jsonMapper = jsonMapper;
+    this.server = server;
+
+    this.liveSegmentLocation = ZKPaths.makePath(zkPaths.getLiveSegmentsPath(), server.getName());
+    segmentTransformer = input -> {
+      DataSegment rv = input;
+      if (config.isSkipDimensionsAndMetrics()) {
+        rv = rv.withDimensions(null).withMetrics(null);
+      }
+      if (config.isSkipLoadSpec()) {
+        rv = rv.withLoadSpec(null);
+      }
+      return rv;
+    };
+
+    isSkipSegmentAnnouncementOnZk = !zkEnablementConfig.isEnabled() || config.isSkipSegmentAnnouncementOnZk();
+    if (isSkipSegmentAnnouncementOnZk) {
+      dummyZnode = new SegmentZNode("PLACE_HOLDER_ONLY");
+      this.announcer = null;
+    } else {
+      dummyZnode = null;
+      this.announcer = announcerProvider.get();
+    }
+  }
+
+  @VisibleForTesting
   public BatchDataSegmentAnnouncer(
       DruidServerMetadata server,
       final BatchDataSegmentAnnouncerConfig config,
@@ -81,33 +126,7 @@ public class BatchDataSegmentAnnouncer implements DataSegmentAnnouncer
       ObjectMapper jsonMapper
   )
   {
-    this.config = config;
-    this.announcer = announcer;
-    this.jsonMapper = jsonMapper;
-    this.server = server;
-
-    this.liveSegmentLocation = ZKPaths.makePath(zkPaths.getLiveSegmentsPath(), server.getName());
-    segmentTransformer = new Function<DataSegment, DataSegment>()
-    {
-      @Override
-      public DataSegment apply(DataSegment input)
-      {
-        DataSegment rv = input;
-        if (config.isSkipDimensionsAndMetrics()) {
-          rv = rv.withDimensions(null).withMetrics(null);
-        }
-        if (config.isSkipLoadSpec()) {
-          rv = rv.withLoadSpec(null);
-        }
-        return rv;
-      }
-    };
-
-    if (this.config.isSkipSegmentAnnouncementOnZk()) {
-      dummyZnode = new SegmentZNode("PLACE_HOLDER_ONLY");
-    } else {
-      dummyZnode = null;
-    }
+    this(server, config, zkPaths, () -> announcer, jsonMapper, ZkEnablementConfig.ENABLED);
   }
 
   @Override
@@ -128,7 +147,7 @@ public class BatchDataSegmentAnnouncer implements DataSegmentAnnouncer
 
       changes.addChangeRequest(new SegmentChangeRequestLoad(toAnnounce));
 
-      if (config.isSkipSegmentAnnouncementOnZk()) {
+      if (isSkipSegmentAnnouncementOnZk) {
         segmentLookup.put(segment, dummyZnode);
         return;
       }
@@ -196,7 +215,7 @@ public class BatchDataSegmentAnnouncer implements DataSegmentAnnouncer
 
       changes.addChangeRequest(new SegmentChangeRequestDrop(segment));
 
-      if (config.isSkipSegmentAnnouncementOnZk()) {
+      if (isSkipSegmentAnnouncementOnZk) {
         return;
       }
 
@@ -235,7 +254,7 @@ public class BatchDataSegmentAnnouncer implements DataSegmentAnnouncer
 
         changesBatch.add(new SegmentChangeRequestLoad(segment));
 
-        if (config.isSkipSegmentAnnouncementOnZk()) {
+        if (isSkipSegmentAnnouncementOnZk) {
           segmentLookup.put(segment, dummyZnode);
           continue;
         }
@@ -266,7 +285,7 @@ public class BatchDataSegmentAnnouncer implements DataSegmentAnnouncer
 
     changes.addChangeRequests(changesBatch);
 
-    if (!config.isSkipSegmentAnnouncementOnZk()) {
+    if (!isSkipSegmentAnnouncementOnZk) {
       segmentZNode.addSegments(batch);
       announcer.announce(segmentZNode.getPath(), segmentZNode.getBytes());
     }

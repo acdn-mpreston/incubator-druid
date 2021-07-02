@@ -29,12 +29,17 @@ import org.apache.calcite.sql.SqlOperator;
 import org.apache.calcite.sql.SqlOperatorTable;
 import org.apache.calcite.sql.SqlSyntax;
 import org.apache.calcite.sql.fun.SqlStdOperatorTable;
+import org.apache.calcite.sql.validate.SqlNameMatcher;
 import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.sql.calcite.aggregation.SqlAggregator;
 import org.apache.druid.sql.calcite.aggregation.builtin.ApproxCountDistinctSqlAggregator;
+import org.apache.druid.sql.calcite.aggregation.builtin.ArraySqlAggregator;
 import org.apache.druid.sql.calcite.aggregation.builtin.AvgSqlAggregator;
+import org.apache.druid.sql.calcite.aggregation.builtin.BitwiseSqlAggregator;
 import org.apache.druid.sql.calcite.aggregation.builtin.CountSqlAggregator;
+import org.apache.druid.sql.calcite.aggregation.builtin.EarliestLatestAnySqlAggregator;
+import org.apache.druid.sql.calcite.aggregation.builtin.GroupingSqlAggregator;
 import org.apache.druid.sql.calcite.aggregation.builtin.MaxSqlAggregator;
 import org.apache.druid.sql.calcite.aggregation.builtin.MinSqlAggregator;
 import org.apache.druid.sql.calcite.aggregation.builtin.SumSqlAggregator;
@@ -42,40 +47,61 @@ import org.apache.druid.sql.calcite.aggregation.builtin.SumZeroSqlAggregator;
 import org.apache.druid.sql.calcite.expression.AliasedOperatorConversion;
 import org.apache.druid.sql.calcite.expression.BinaryOperatorConversion;
 import org.apache.druid.sql.calcite.expression.DirectOperatorConversion;
+import org.apache.druid.sql.calcite.expression.OperatorConversions;
 import org.apache.druid.sql.calcite.expression.SqlOperatorConversion;
 import org.apache.druid.sql.calcite.expression.UnaryFunctionOperatorConversion;
 import org.apache.druid.sql.calcite.expression.UnaryPrefixOperatorConversion;
 import org.apache.druid.sql.calcite.expression.UnarySuffixOperatorConversion;
+import org.apache.druid.sql.calcite.expression.builtin.ArrayAppendOperatorConversion;
+import org.apache.druid.sql.calcite.expression.builtin.ArrayConcatOperatorConversion;
 import org.apache.druid.sql.calcite.expression.builtin.ArrayConstructorOperatorConversion;
 import org.apache.druid.sql.calcite.expression.builtin.ArrayContainsOperatorConversion;
+import org.apache.druid.sql.calcite.expression.builtin.ArrayLengthOperatorConversion;
+import org.apache.druid.sql.calcite.expression.builtin.ArrayOffsetOfOperatorConversion;
+import org.apache.druid.sql.calcite.expression.builtin.ArrayOffsetOperatorConversion;
+import org.apache.druid.sql.calcite.expression.builtin.ArrayOrdinalOfOperatorConversion;
+import org.apache.druid.sql.calcite.expression.builtin.ArrayOrdinalOperatorConversion;
 import org.apache.druid.sql.calcite.expression.builtin.ArrayOverlapOperatorConversion;
+import org.apache.druid.sql.calcite.expression.builtin.ArrayPrependOperatorConversion;
+import org.apache.druid.sql.calcite.expression.builtin.ArraySliceOperatorConversion;
+import org.apache.druid.sql.calcite.expression.builtin.ArrayToStringOperatorConversion;
 import org.apache.druid.sql.calcite.expression.builtin.BTrimOperatorConversion;
 import org.apache.druid.sql.calcite.expression.builtin.CastOperatorConversion;
 import org.apache.druid.sql.calcite.expression.builtin.CeilOperatorConversion;
 import org.apache.druid.sql.calcite.expression.builtin.ConcatOperatorConversion;
+import org.apache.druid.sql.calcite.expression.builtin.ContainsOperatorConversion;
 import org.apache.druid.sql.calcite.expression.builtin.DateTruncOperatorConversion;
 import org.apache.druid.sql.calcite.expression.builtin.ExtractOperatorConversion;
 import org.apache.druid.sql.calcite.expression.builtin.FloorOperatorConversion;
+import org.apache.druid.sql.calcite.expression.builtin.GreatestOperatorConversion;
+import org.apache.druid.sql.calcite.expression.builtin.IPv4AddressMatchOperatorConversion;
+import org.apache.druid.sql.calcite.expression.builtin.IPv4AddressParseOperatorConversion;
+import org.apache.druid.sql.calcite.expression.builtin.IPv4AddressStringifyOperatorConversion;
 import org.apache.druid.sql.calcite.expression.builtin.LPadOperatorConversion;
 import org.apache.druid.sql.calcite.expression.builtin.LTrimOperatorConversion;
+import org.apache.druid.sql.calcite.expression.builtin.LeastOperatorConversion;
 import org.apache.druid.sql.calcite.expression.builtin.LeftOperatorConversion;
 import org.apache.druid.sql.calcite.expression.builtin.LikeOperatorConversion;
 import org.apache.druid.sql.calcite.expression.builtin.MillisToTimestampOperatorConversion;
+import org.apache.druid.sql.calcite.expression.builtin.MultiValueStringOperatorConversions;
 import org.apache.druid.sql.calcite.expression.builtin.ParseLongOperatorConversion;
 import org.apache.druid.sql.calcite.expression.builtin.PositionOperatorConversion;
 import org.apache.druid.sql.calcite.expression.builtin.RPadOperatorConversion;
 import org.apache.druid.sql.calcite.expression.builtin.RTrimOperatorConversion;
 import org.apache.druid.sql.calcite.expression.builtin.RegexpExtractOperatorConversion;
+import org.apache.druid.sql.calcite.expression.builtin.RegexpLikeOperatorConversion;
 import org.apache.druid.sql.calcite.expression.builtin.ReinterpretOperatorConversion;
 import org.apache.druid.sql.calcite.expression.builtin.RepeatOperatorConversion;
 import org.apache.druid.sql.calcite.expression.builtin.ReverseOperatorConversion;
 import org.apache.druid.sql.calcite.expression.builtin.RightOperatorConversion;
 import org.apache.druid.sql.calcite.expression.builtin.RoundOperatorConversion;
 import org.apache.druid.sql.calcite.expression.builtin.StringFormatOperatorConversion;
+import org.apache.druid.sql.calcite.expression.builtin.StringToArrayOperatorConversion;
 import org.apache.druid.sql.calcite.expression.builtin.StrposOperatorConversion;
 import org.apache.druid.sql.calcite.expression.builtin.SubstringOperatorConversion;
 import org.apache.druid.sql.calcite.expression.builtin.TextcatOperatorConversion;
 import org.apache.druid.sql.calcite.expression.builtin.TimeArithmeticOperatorConversion;
+import org.apache.druid.sql.calcite.expression.builtin.TimeCeilOperatorConversion;
 import org.apache.druid.sql.calcite.expression.builtin.TimeExtractOperatorConversion;
 import org.apache.druid.sql.calcite.expression.builtin.TimeFloorOperatorConversion;
 import org.apache.druid.sql.calcite.expression.builtin.TimeFormatOperatorConversion;
@@ -99,14 +125,22 @@ public class DruidOperatorTable implements SqlOperatorTable
 {
   private static final List<SqlAggregator> STANDARD_AGGREGATORS =
       ImmutableList.<SqlAggregator>builder()
-          .add(new ApproxCountDistinctSqlAggregator())
-          .add(new AvgSqlAggregator())
-          .add(new CountSqlAggregator())
-          .add(new MinSqlAggregator())
-          .add(new MaxSqlAggregator())
-          .add(new SumSqlAggregator())
-          .add(new SumZeroSqlAggregator())
-          .build();
+                   .add(new ApproxCountDistinctSqlAggregator())
+                   .add(new AvgSqlAggregator())
+                   .add(new CountSqlAggregator())
+                   .add(EarliestLatestAnySqlAggregator.EARLIEST)
+                   .add(EarliestLatestAnySqlAggregator.LATEST)
+                   .add(EarliestLatestAnySqlAggregator.ANY_VALUE)
+                   .add(new MinSqlAggregator())
+                   .add(new MaxSqlAggregator())
+                   .add(new SumSqlAggregator())
+                   .add(new SumZeroSqlAggregator())
+                   .add(new GroupingSqlAggregator())
+                   .add(new ArraySqlAggregator())
+                   .add(new BitwiseSqlAggregator(BitwiseSqlAggregator.Op.AND))
+                   .add(new BitwiseSqlAggregator(BitwiseSqlAggregator.Op.OR))
+                   .add(new BitwiseSqlAggregator(BitwiseSqlAggregator.Op.XOR))
+                   .build();
 
 
   // STRLEN has so many aliases.
@@ -115,104 +149,201 @@ public class DruidOperatorTable implements SqlOperatorTable
       "strlen"
   );
 
+  private static final List<SqlOperatorConversion> TIME_OPERATOR_CONVERSIONS =
+      ImmutableList.<SqlOperatorConversion>builder()
+                   .add(new CeilOperatorConversion())
+                   .add(new DateTruncOperatorConversion())
+                   .add(new ExtractOperatorConversion())
+                   .add(new FloorOperatorConversion())
+                   .add(new MillisToTimestampOperatorConversion())
+                   .add(new TimeArithmeticOperatorConversion.TimeMinusIntervalOperatorConversion())
+                   .add(new TimeArithmeticOperatorConversion.TimePlusIntervalOperatorConversion())
+                   .add(new TimeExtractOperatorConversion())
+                   .add(new TimeCeilOperatorConversion())
+                   .add(new TimeFloorOperatorConversion())
+                   .add(new TimeFormatOperatorConversion())
+                   .add(new TimeParseOperatorConversion())
+                   .add(new TimeShiftOperatorConversion())
+                   .add(new TimestampToMillisOperatorConversion())
+                   .build();
+
+  private static final List<SqlOperatorConversion> STRING_OPERATOR_CONVERSIONS =
+      ImmutableList.<SqlOperatorConversion>builder()
+                   .add(new BTrimOperatorConversion())
+                   .add(new LikeOperatorConversion())
+                   .add(new LTrimOperatorConversion())
+                   .add(new PositionOperatorConversion())
+                   .add(new RegexpExtractOperatorConversion())
+                   .add(new RegexpLikeOperatorConversion())
+                   .add(new RTrimOperatorConversion())
+                   .add(new ParseLongOperatorConversion())
+                   .add(new StringFormatOperatorConversion())
+                   .add(new StrposOperatorConversion())
+                   .add(new SubstringOperatorConversion())
+                   .add(new RightOperatorConversion())
+                   .add(new LeftOperatorConversion())
+                   .add(new ReverseOperatorConversion())
+                   .add(new RepeatOperatorConversion())
+                   .add(new AliasedOperatorConversion(new SubstringOperatorConversion(), "SUBSTR"))
+                   .add(new ConcatOperatorConversion())
+                   .add(new TextcatOperatorConversion())
+                   .add(new TrimOperatorConversion())
+                   .add(new TruncateOperatorConversion())
+                   .add(new AliasedOperatorConversion(new TruncateOperatorConversion(), "TRUNC"))
+                   .add(new LPadOperatorConversion())
+                   .add(new RPadOperatorConversion())
+                   .add(ContainsOperatorConversion.caseSensitive())
+                   .add(ContainsOperatorConversion.caseInsensitive())
+                   .build();
+
+  private static final List<SqlOperatorConversion> VALUE_COERCION_OPERATOR_CONVERSIONS =
+      ImmutableList.<SqlOperatorConversion>builder()
+                   .add(new CastOperatorConversion())
+                   .add(new ReinterpretOperatorConversion())
+                   .build();
+
+  private static final List<SqlOperatorConversion> ARRAY_OPERATOR_CONVERSIONS =
+      ImmutableList.<SqlOperatorConversion>builder()
+                   .add(new ArrayConstructorOperatorConversion())
+                   .add(new ArrayContainsOperatorConversion())
+                   .add(new ArrayConcatOperatorConversion())
+                   .add(new ArrayOverlapOperatorConversion())
+                   .add(new ArrayAppendOperatorConversion())
+                   .add(new ArrayPrependOperatorConversion())
+                   .add(new ArrayLengthOperatorConversion())
+                   .add(new ArrayOffsetOperatorConversion())
+                   .add(new ArrayOrdinalOperatorConversion())
+                   .add(new ArrayOffsetOfOperatorConversion())
+                   .add(new ArrayOrdinalOfOperatorConversion())
+                   .add(new ArraySliceOperatorConversion())
+                   .add(new ArrayToStringOperatorConversion())
+                   .add(new StringToArrayOperatorConversion())
+                   .build();
+
+  private static final List<SqlOperatorConversion> MULTIVALUE_STRING_OPERATOR_CONVERSIONS =
+      ImmutableList.<SqlOperatorConversion>builder()
+                   .add(new MultiValueStringOperatorConversions.Append())
+                   .add(new MultiValueStringOperatorConversions.Prepend())
+                   .add(new MultiValueStringOperatorConversions.Concat())
+                   .add(new MultiValueStringOperatorConversions.Contains())
+                   .add(new MultiValueStringOperatorConversions.Overlap())
+                   .add(new MultiValueStringOperatorConversions.Length())
+                   .add(new MultiValueStringOperatorConversions.Offset())
+                   .add(new MultiValueStringOperatorConversions.Ordinal())
+                   .add(new MultiValueStringOperatorConversions.OffsetOf())
+                   .add(new MultiValueStringOperatorConversions.OrdinalOf())
+                   .add(new MultiValueStringOperatorConversions.Slice())
+                   .add(new MultiValueStringOperatorConversions.MultiStringToString())
+                   .add(new MultiValueStringOperatorConversions.StringToMultiString())
+                   .build();
+
+  private static final List<SqlOperatorConversion> REDUCTION_OPERATOR_CONVERSIONS =
+      ImmutableList.<SqlOperatorConversion>builder()
+                   .add(new GreatestOperatorConversion())
+                   .add(new LeastOperatorConversion())
+                   .build();
+
+  private static final List<SqlOperatorConversion> IPV4ADDRESS_OPERATOR_CONVERSIONS =
+      ImmutableList.<SqlOperatorConversion>builder()
+                   .add(new IPv4AddressMatchOperatorConversion())
+                   .add(new IPv4AddressParseOperatorConversion())
+                   .add(new IPv4AddressStringifyOperatorConversion())
+                   .build();
+
+  private static final List<SqlOperatorConversion> BITWISE_OPERATOR_CONVERSIONS =
+      ImmutableList.<SqlOperatorConversion>builder()
+                   .add(OperatorConversions.druidBinaryLongFn("BITWISE_AND", "bitwiseAnd"))
+                   .add(OperatorConversions.druidUnaryLongFn("BITWISE_COMPLEMENT", "bitwiseComplement"))
+                   .add(OperatorConversions.druidBinaryLongFn("BITWISE_OR", "bitwiseOr"))
+                   .add(OperatorConversions.druidBinaryLongFn("BITWISE_SHIFT_LEFT", "bitwiseShiftLeft"))
+                   .add(OperatorConversions.druidBinaryLongFn("BITWISE_SHIFT_RIGHT", "bitwiseShiftRight"))
+                   .add(OperatorConversions.druidBinaryLongFn("BITWISE_XOR", "bitwiseXor"))
+                   .add(
+                       OperatorConversions.druidUnaryLongFn(
+                           "BITWISE_CONVERT_DOUBLE_TO_LONG_BITS",
+                           "bitwiseConvertDoubleToLongBits"
+                       )
+                   )
+                   .add(
+                       OperatorConversions.druidUnaryDoubleFn(
+                           "BITWISE_CONVERT_LONG_BITS_TO_DOUBLE",
+                           "bitwiseConvertLongBitsToDouble"
+                       )
+                   )
+                   .build();
+
   private static final List<SqlOperatorConversion> STANDARD_OPERATOR_CONVERSIONS =
       ImmutableList.<SqlOperatorConversion>builder()
-          .add(new DirectOperatorConversion(SqlStdOperatorTable.ABS, "abs"))
-          .add(new DirectOperatorConversion(SqlStdOperatorTable.CASE, "case_searched"))
-          .add(new DirectOperatorConversion(SqlStdOperatorTable.CHAR_LENGTH, "strlen"))
-          .add(CHARACTER_LENGTH_CONVERSION)
-          .add(new AliasedOperatorConversion(CHARACTER_LENGTH_CONVERSION, "LENGTH"))
-          .add(new AliasedOperatorConversion(CHARACTER_LENGTH_CONVERSION, "STRLEN"))
-          .add(new DirectOperatorConversion(SqlStdOperatorTable.CONCAT, "concat"))
-          .add(new DirectOperatorConversion(SqlStdOperatorTable.EXP, "exp"))
-          .add(new DirectOperatorConversion(SqlStdOperatorTable.DIVIDE_INTEGER, "div"))
-          .add(new DirectOperatorConversion(SqlStdOperatorTable.LN, "log"))
-          .add(new DirectOperatorConversion(SqlStdOperatorTable.LOWER, "lower"))
-          .add(new DirectOperatorConversion(SqlStdOperatorTable.LOG10, "log10"))
-          .add(new DirectOperatorConversion(SqlStdOperatorTable.POWER, "pow"))
-          .add(new DirectOperatorConversion(SqlStdOperatorTable.REPLACE, "replace"))
-          .add(new DirectOperatorConversion(SqlStdOperatorTable.SQRT, "sqrt"))
-          .add(new DirectOperatorConversion(SqlStdOperatorTable.UPPER, "upper"))
-          .add(new DirectOperatorConversion(SqlStdOperatorTable.PI, "pi"))
-          .add(new DirectOperatorConversion(SqlStdOperatorTable.SIN, "sin"))
-          .add(new DirectOperatorConversion(SqlStdOperatorTable.COS, "cos"))
-          .add(new DirectOperatorConversion(SqlStdOperatorTable.TAN, "tan"))
-          .add(new DirectOperatorConversion(SqlStdOperatorTable.COT, "cot"))
-          .add(new DirectOperatorConversion(SqlStdOperatorTable.ASIN, "asin"))
-          .add(new DirectOperatorConversion(SqlStdOperatorTable.ACOS, "acos"))
-          .add(new DirectOperatorConversion(SqlStdOperatorTable.ATAN, "atan"))
-          .add(new DirectOperatorConversion(SqlStdOperatorTable.ATAN2, "atan2"))
-          .add(new DirectOperatorConversion(SqlStdOperatorTable.RADIANS, "toRadians"))
-          .add(new DirectOperatorConversion(SqlStdOperatorTable.DEGREES, "toDegrees"))
-          .add(new UnaryPrefixOperatorConversion(SqlStdOperatorTable.NOT, "!"))
-          .add(new UnaryPrefixOperatorConversion(SqlStdOperatorTable.UNARY_MINUS, "-"))
-          .add(new UnaryFunctionOperatorConversion(SqlStdOperatorTable.IS_NULL, "isnull"))
-          .add(new UnaryFunctionOperatorConversion(SqlStdOperatorTable.IS_NOT_NULL, "notnull"))
-          .add(new UnarySuffixOperatorConversion(SqlStdOperatorTable.IS_FALSE, "<= 0")) // Matches Evals.asBoolean
-          .add(new UnarySuffixOperatorConversion(SqlStdOperatorTable.IS_NOT_TRUE, "<= 0")) // Matches Evals.asBoolean
-          .add(new UnarySuffixOperatorConversion(SqlStdOperatorTable.IS_TRUE, "> 0")) // Matches Evals.asBoolean
-          .add(new UnarySuffixOperatorConversion(SqlStdOperatorTable.IS_NOT_FALSE, "> 0")) // Matches Evals.asBoolean
-          .add(new BinaryOperatorConversion(SqlStdOperatorTable.MULTIPLY, "*"))
-          .add(new BinaryOperatorConversion(SqlStdOperatorTable.MOD, "%"))
-          .add(new BinaryOperatorConversion(SqlStdOperatorTable.DIVIDE, "/"))
-          .add(new BinaryOperatorConversion(SqlStdOperatorTable.PLUS, "+"))
-          .add(new BinaryOperatorConversion(SqlStdOperatorTable.MINUS, "-"))
-          .add(new BinaryOperatorConversion(SqlStdOperatorTable.EQUALS, "=="))
-          .add(new BinaryOperatorConversion(SqlStdOperatorTable.NOT_EQUALS, "!="))
-          .add(new BinaryOperatorConversion(SqlStdOperatorTable.GREATER_THAN, ">"))
-          .add(new BinaryOperatorConversion(SqlStdOperatorTable.GREATER_THAN_OR_EQUAL, ">="))
-          .add(new BinaryOperatorConversion(SqlStdOperatorTable.LESS_THAN, "<"))
-          .add(new BinaryOperatorConversion(SqlStdOperatorTable.LESS_THAN_OR_EQUAL, "<="))
-          .add(new BinaryOperatorConversion(SqlStdOperatorTable.AND, "&&"))
-          .add(new BinaryOperatorConversion(SqlStdOperatorTable.OR, "||"))
-          .add(new RoundOperatorConversion())
-          // time operators
-          .add(new CeilOperatorConversion())
-          .add(new DateTruncOperatorConversion())
-          .add(new ExtractOperatorConversion())
-          .add(new FloorOperatorConversion())
-          .add(new MillisToTimestampOperatorConversion())
-          .add(new TimeArithmeticOperatorConversion.TimeMinusIntervalOperatorConversion())
-          .add(new TimeArithmeticOperatorConversion.TimePlusIntervalOperatorConversion())
-          .add(new TimeExtractOperatorConversion())
-          .add(new TimeFloorOperatorConversion())
-          .add(new TimeFormatOperatorConversion())
-          .add(new TimeParseOperatorConversion())
-          .add(new TimeShiftOperatorConversion())
-          .add(new TimestampToMillisOperatorConversion())
-          // string operators
-          .add(new BTrimOperatorConversion())
-          .add(new LikeOperatorConversion())
-          .add(new LTrimOperatorConversion())
-          .add(new PositionOperatorConversion())
-          .add(new RegexpExtractOperatorConversion())
-          .add(new RTrimOperatorConversion())
-          .add(new ParseLongOperatorConversion())
-          .add(new StringFormatOperatorConversion())
-          .add(new StrposOperatorConversion())
-          .add(new SubstringOperatorConversion())
-          .add(new RightOperatorConversion())
-          .add(new LeftOperatorConversion())
-          .add(new ReverseOperatorConversion())
-          .add(new RepeatOperatorConversion())
-          .add(new AliasedOperatorConversion(new SubstringOperatorConversion(), "SUBSTR"))
-          .add(new ConcatOperatorConversion())
-          .add(new TextcatOperatorConversion())
-          .add(new TrimOperatorConversion())
-          .add(new TruncateOperatorConversion())
-          .add(new AliasedOperatorConversion(new TruncateOperatorConversion(), "TRUNC"))
-          .add(new LPadOperatorConversion())
-          .add(new RPadOperatorConversion())
-          // value coercion operators
-          .add(new CastOperatorConversion())
-          .add(new ReinterpretOperatorConversion())
-          // array and multi-value string operators
-          .add(new ArrayConstructorOperatorConversion())
-          .add(new ArrayContainsOperatorConversion())
-          .add(new ArrayOverlapOperatorConversion())
-          .add(new AliasedOperatorConversion(new ArrayContainsOperatorConversion(), "MV_CONTAINS"))
-          .add(new AliasedOperatorConversion(new ArrayOverlapOperatorConversion(), "MV_OVERLAP"))
-          .build();
+                   .add(new DirectOperatorConversion(SqlStdOperatorTable.ABS, "abs"))
+                   .add(new DirectOperatorConversion(SqlStdOperatorTable.CASE, "case_searched"))
+                   .add(new DirectOperatorConversion(SqlStdOperatorTable.CHAR_LENGTH, "strlen"))
+                   .add(CHARACTER_LENGTH_CONVERSION)
+                   .add(new AliasedOperatorConversion(CHARACTER_LENGTH_CONVERSION, "LENGTH"))
+                   .add(new AliasedOperatorConversion(CHARACTER_LENGTH_CONVERSION, "STRLEN"))
+                   .add(new DirectOperatorConversion(SqlStdOperatorTable.CONCAT, "concat"))
+                   .add(new DirectOperatorConversion(SqlStdOperatorTable.EXP, "exp"))
+                   .add(new DirectOperatorConversion(SqlStdOperatorTable.DIVIDE_INTEGER, "div"))
+                   .add(new DirectOperatorConversion(SqlStdOperatorTable.LN, "log"))
+                   .add(new DirectOperatorConversion(SqlStdOperatorTable.LOWER, "lower"))
+                   .add(new DirectOperatorConversion(SqlStdOperatorTable.LOG10, "log10"))
+                   .add(new DirectOperatorConversion(SqlStdOperatorTable.POWER, "pow"))
+                   .add(new DirectOperatorConversion(SqlStdOperatorTable.REPLACE, "replace"))
+                   .add(new DirectOperatorConversion(SqlStdOperatorTable.SQRT, "sqrt"))
+                   .add(new DirectOperatorConversion(SqlStdOperatorTable.UPPER, "upper"))
+                   .add(new DirectOperatorConversion(SqlStdOperatorTable.PI, "pi"))
+                   .add(new DirectOperatorConversion(SqlStdOperatorTable.SIN, "sin"))
+                   .add(new DirectOperatorConversion(SqlStdOperatorTable.COS, "cos"))
+                   .add(new DirectOperatorConversion(SqlStdOperatorTable.TAN, "tan"))
+                   .add(new DirectOperatorConversion(SqlStdOperatorTable.COT, "cot"))
+                   .add(new DirectOperatorConversion(SqlStdOperatorTable.ASIN, "asin"))
+                   .add(new DirectOperatorConversion(SqlStdOperatorTable.ACOS, "acos"))
+                   .add(new DirectOperatorConversion(SqlStdOperatorTable.ATAN, "atan"))
+                   .add(new DirectOperatorConversion(SqlStdOperatorTable.ATAN2, "atan2"))
+                   .add(new DirectOperatorConversion(SqlStdOperatorTable.RADIANS, "toRadians"))
+                   .add(new DirectOperatorConversion(SqlStdOperatorTable.DEGREES, "toDegrees"))
+                   .add(new UnaryPrefixOperatorConversion(SqlStdOperatorTable.NOT, "!"))
+                   .add(new UnaryPrefixOperatorConversion(SqlStdOperatorTable.UNARY_MINUS, "-"))
+                   .add(new UnaryFunctionOperatorConversion(SqlStdOperatorTable.IS_NULL, "isnull"))
+                   .add(new UnaryFunctionOperatorConversion(SqlStdOperatorTable.IS_NOT_NULL, "notnull"))
+                   .add(new UnarySuffixOperatorConversion(
+                       SqlStdOperatorTable.IS_FALSE,
+                       "<= 0"
+                   )) // Matches Evals.asBoolean
+                   .add(new UnarySuffixOperatorConversion(
+                       SqlStdOperatorTable.IS_NOT_TRUE,
+                       "<= 0"
+                   )) // Matches Evals.asBoolean
+                   .add(new UnarySuffixOperatorConversion(
+                       SqlStdOperatorTable.IS_TRUE,
+                       "> 0"
+                   )) // Matches Evals.asBoolean
+                   .add(new UnarySuffixOperatorConversion(
+                       SqlStdOperatorTable.IS_NOT_FALSE,
+                       "> 0"
+                   )) // Matches Evals.asBoolean
+                   .add(new BinaryOperatorConversion(SqlStdOperatorTable.MULTIPLY, "*"))
+                   .add(new BinaryOperatorConversion(SqlStdOperatorTable.MOD, "%"))
+                   .add(new BinaryOperatorConversion(SqlStdOperatorTable.DIVIDE, "/"))
+                   .add(new BinaryOperatorConversion(SqlStdOperatorTable.PLUS, "+"))
+                   .add(new BinaryOperatorConversion(SqlStdOperatorTable.MINUS, "-"))
+                   .add(new BinaryOperatorConversion(SqlStdOperatorTable.EQUALS, "=="))
+                   .add(new BinaryOperatorConversion(SqlStdOperatorTable.NOT_EQUALS, "!="))
+                   .add(new BinaryOperatorConversion(SqlStdOperatorTable.GREATER_THAN, ">"))
+                   .add(new BinaryOperatorConversion(SqlStdOperatorTable.GREATER_THAN_OR_EQUAL, ">="))
+                   .add(new BinaryOperatorConversion(SqlStdOperatorTable.LESS_THAN, "<"))
+                   .add(new BinaryOperatorConversion(SqlStdOperatorTable.LESS_THAN_OR_EQUAL, "<="))
+                   .add(new BinaryOperatorConversion(SqlStdOperatorTable.AND, "&&"))
+                   .add(new BinaryOperatorConversion(SqlStdOperatorTable.OR, "||"))
+                   .add(new RoundOperatorConversion())
+                   .addAll(TIME_OPERATOR_CONVERSIONS)
+                   .addAll(STRING_OPERATOR_CONVERSIONS)
+                   .addAll(VALUE_COERCION_OPERATOR_CONVERSIONS)
+                   .addAll(ARRAY_OPERATOR_CONVERSIONS)
+                   .addAll(MULTIVALUE_STRING_OPERATOR_CONVERSIONS)
+                   .addAll(REDUCTION_OPERATOR_CONVERSIONS)
+                   .addAll(IPV4ADDRESS_OPERATOR_CONVERSIONS)
+                   .addAll(BITWISE_OPERATOR_CONVERSIONS)
+                   .build();
 
   // Operators that have no conversion, but are handled in the convertlet table, so they still need to exist.
   private static final Map<OperatorKey, SqlOperator> CONVERTLET_OPERATORS =
@@ -293,7 +424,8 @@ public class DruidOperatorTable implements SqlOperatorTable
       final SqlIdentifier opName,
       final SqlFunctionCategory category,
       final SqlSyntax syntax,
-      final List<SqlOperator> operatorList
+      final List<SqlOperator> operatorList,
+      final SqlNameMatcher nameMatcher
   )
   {
     if (opName == null) {

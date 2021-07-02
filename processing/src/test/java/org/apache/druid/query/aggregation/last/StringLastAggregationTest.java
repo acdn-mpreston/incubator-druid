@@ -19,6 +19,7 @@
 
 package org.apache.druid.query.aggregation.last;
 
+import org.apache.druid.common.config.NullHandling;
 import org.apache.druid.java.util.common.Pair;
 import org.apache.druid.query.aggregation.AggregateCombiner;
 import org.apache.druid.query.aggregation.Aggregator;
@@ -28,7 +29,9 @@ import org.apache.druid.query.aggregation.SerializablePairLongString;
 import org.apache.druid.query.aggregation.TestLongColumnSelector;
 import org.apache.druid.query.aggregation.TestObjectColumnSelector;
 import org.apache.druid.segment.ColumnSelectorFactory;
+import org.apache.druid.segment.column.ColumnCapabilitiesImpl;
 import org.apache.druid.segment.column.ColumnHolder;
+import org.apache.druid.segment.column.ValueType;
 import org.easymock.EasyMock;
 import org.junit.Assert;
 import org.junit.Before;
@@ -59,6 +62,7 @@ public class StringLastAggregationTest
   @Before
   public void setup()
   {
+    NullHandling.initializeForTests();
     stringLastAggFactory = new StringLastAggregatorFactory("billy", "nilly", MAX_STRING_SIZE);
     combiningAggFactory = stringLastAggFactory.getCombiningFactory();
     timeSelector = new TestLongColumnSelector(times);
@@ -68,6 +72,9 @@ public class StringLastAggregationTest
     EasyMock.expect(colSelectorFactory.makeColumnValueSelector(ColumnHolder.TIME_COLUMN_NAME)).andReturn(timeSelector);
     EasyMock.expect(colSelectorFactory.makeColumnValueSelector("nilly")).andReturn(valueSelector);
     EasyMock.expect(colSelectorFactory.makeColumnValueSelector("billy")).andReturn(objectSelector);
+    EasyMock.expect(colSelectorFactory.getColumnCapabilities("nilly"))
+            .andReturn(new ColumnCapabilitiesImpl().setType(ValueType.STRING));
+    EasyMock.expect(colSelectorFactory.getColumnCapabilities("billy")).andReturn(null);
     EasyMock.replay(colSelectorFactory);
   }
 
@@ -154,23 +161,22 @@ public class StringLastAggregationTest
   @Test
   public void testStringLastAggregateCombiner()
   {
-    final String[] strings = {"AAAA", "BBBB", "CCCC", "DDDD", "EEEE"};
-    TestObjectColumnSelector columnSelector = new TestObjectColumnSelector<>(strings);
+    TestObjectColumnSelector columnSelector = new TestObjectColumnSelector<>(pairs);
 
     AggregateCombiner stringFirstAggregateCombiner = combiningAggFactory.makeAggregateCombiner();
 
     stringFirstAggregateCombiner.reset(columnSelector);
 
-    Assert.assertEquals(strings[0], stringFirstAggregateCombiner.getObject());
+    Assert.assertEquals(pairs[0], stringFirstAggregateCombiner.getObject());
 
     columnSelector.increment();
     stringFirstAggregateCombiner.fold(columnSelector);
 
-    Assert.assertEquals(strings[1], stringFirstAggregateCombiner.getObject());
+    Assert.assertEquals(pairs[1], stringFirstAggregateCombiner.getObject());
 
     stringFirstAggregateCombiner.reset(columnSelector);
 
-    Assert.assertEquals(strings[1], stringFirstAggregateCombiner.getObject());
+    Assert.assertEquals(pairs[1], stringFirstAggregateCombiner.getObject());
   }
 
   private void aggregate(

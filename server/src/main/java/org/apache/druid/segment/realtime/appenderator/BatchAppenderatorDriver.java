@@ -22,10 +22,11 @@ package org.apache.druid.segment.realtime.appenderator;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.util.concurrent.AsyncFunction;
+import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import org.apache.druid.data.input.InputRow;
 import org.apache.druid.java.util.common.ISE;
-import org.apache.druid.java.util.common.concurrent.ListenableFutures;
 import org.apache.druid.segment.loading.DataSegmentKiller;
 import org.apache.druid.segment.realtime.appenderator.SegmentWithState.SegmentState;
 import org.apache.druid.timeline.DataSegment;
@@ -34,6 +35,7 @@ import javax.annotation.Nullable;
 import java.io.IOException;
 import java.util.Collection;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -72,6 +74,12 @@ public class BatchAppenderatorDriver extends BaseAppenderatorDriver
     super(appenderator, segmentAllocator, usedSegmentChecker, dataSegmentKiller);
   }
 
+  @Nullable
+  public Object startJob()
+  {
+    return startJob(AppenderatorDriverSegmentLockHelper.NOOP);
+  }
+
   /**
    * This method always returns null because batch ingestion doesn't support restoring tasks on failures.
    *
@@ -79,7 +87,7 @@ public class BatchAppenderatorDriver extends BaseAppenderatorDriver
    */
   @Override
   @Nullable
-  public Object startJob()
+  public Object startJob(AppenderatorDriverSegmentLockHelper lockHelper)
   {
     final Object metadata = appenderator.startJob();
     if (metadata != null) {
@@ -111,9 +119,9 @@ public class BatchAppenderatorDriver extends BaseAppenderatorDriver
    *
    * @param pushAndClearTimeoutMs timeout for pushing and dropping segments
    *
-   * @return {@link SegmentsAndMetadata} for pushed and dropped segments
+   * @return {@link SegmentsAndCommitMetadata} for pushed and dropped segments
    */
-  public SegmentsAndMetadata pushAllAndClear(long pushAndClearTimeoutMs)
+  public SegmentsAndCommitMetadata pushAllAndClear(long pushAndClearTimeoutMs)
       throws InterruptedException, ExecutionException, TimeoutException
   {
     final Collection<String> sequences;
@@ -124,34 +132,32 @@ public class BatchAppenderatorDriver extends BaseAppenderatorDriver
     return pushAndClear(sequences, pushAndClearTimeoutMs);
   }
 
-  private SegmentsAndMetadata pushAndClear(
+  private SegmentsAndCommitMetadata pushAndClear(
       Collection<String> sequenceNames,
       long pushAndClearTimeoutMs
   ) throws InterruptedException, ExecutionException, TimeoutException
   {
-    final Map<SegmentIdWithShardSpec, SegmentWithState> requestedSegmentIdsForSequences = getAppendingSegments(sequenceNames)
-        .collect(Collectors.toMap(SegmentWithState::getSegmentIdentifier, Function.identity()));
+    final Set<SegmentIdWithShardSpec> requestedSegmentIdsForSequences = getAppendingSegments(sequenceNames);
 
-    final ListenableFuture<SegmentsAndMetadata> future = ListenableFutures.transformAsync(
-        pushInBackground(null, requestedSegmentIdsForSequences.keySet(), false),
-        this::dropInBackground
+    final ListenableFuture<SegmentsAndCommitMetadata> future = Futures.transform(
+        pushInBackground(null, requestedSegmentIdsForSequences, false),
+        (AsyncFunction<SegmentsAndCommitMetadata, SegmentsAndCommitMetadata>) this::dropInBackground
     );
 
-    final SegmentsAndMetadata segmentsAndMetadata = pushAndClearTimeoutMs == 0L ?
-                                                    future.get() :
-                                                    future.get(pushAndClearTimeoutMs, TimeUnit.MILLISECONDS);
+    final SegmentsAndCommitMetadata segmentsAndCommitMetadata =
+        pushAndClearTimeoutMs == 0L ? future.get() : future.get(pushAndClearTimeoutMs, TimeUnit.MILLISECONDS);
 
     // Sanity check
-    final Map<SegmentIdWithShardSpec, DataSegment> pushedSegmentIdToSegmentMap = segmentsAndMetadata
+    final Map<SegmentIdWithShardSpec, DataSegment> pushedSegmentIdToSegmentMap = segmentsAndCommitMetadata
         .getSegments()
         .stream()
         .collect(Collectors.toMap(SegmentIdWithShardSpec::fromDataSegment, Function.identity()));
 
-    if (!pushedSegmentIdToSegmentMap.keySet().equals(requestedSegmentIdsForSequences.keySet())) {
+    if (!pushedSegmentIdToSegmentMap.keySet().equals(requestedSegmentIdsForSequences)) {
       throw new ISE(
           "Pushed segments[%s] are different from the requested ones[%s]",
           pushedSegmentIdToSegmentMap.keySet(),
-          requestedSegmentIdsForSequences.keySet()
+          requestedSegmentIdsForSequences
       );
     }
 
@@ -178,17 +184,24 @@ public class BatchAppenderatorDriver extends BaseAppenderatorDriver
       }
     }
 
-    return segmentsAndMetadata;
+    return segmentsAndCommitMetadata;
   }
 
   /**
    * Publish all segments.
    *
-   * @param publisher segment publisher
+   * @param segmentsToBeOverwritten segments which can be overwritten by new segments published by the given publisher
+   * @param segmentsToBeDropped     segments which will be dropped and marked unused
+   * @param publisher               segment publisher
    *
    * @return a {@link ListenableFuture} for the publish task
    */
-  public ListenableFuture<SegmentsAndMetadata> publishAll(final TransactionalSegmentPublisher publisher)
+  public ListenableFuture<SegmentsAndCommitMetadata> publishAll(
+      @Nullable final Set<DataSegment> segmentsToBeOverwritten,
+      @Nullable final Set<DataSegment> segmentsToBeDropped,
+      final TransactionalSegmentPublisher publisher,
+      final Function<Set<DataSegment>, Set<DataSegment>> outputSegmentsAnnotateFunction
+  )
   {
     final Map<String, SegmentsForSequence> snapshot;
     synchronized (segments) {
@@ -196,7 +209,9 @@ public class BatchAppenderatorDriver extends BaseAppenderatorDriver
     }
 
     return publishInBackground(
-        new SegmentsAndMetadata(
+        segmentsToBeOverwritten,
+        segmentsToBeDropped,
+        new SegmentsAndCommitMetadata(
             snapshot
                 .values()
                 .stream()
@@ -211,7 +226,8 @@ public class BatchAppenderatorDriver extends BaseAppenderatorDriver
                 .collect(Collectors.toList()),
             null
         ),
-        publisher
+        publisher,
+        outputSegmentsAnnotateFunction
     );
   }
 }

@@ -22,9 +22,10 @@ package org.apache.druid.segment.indexing;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.base.Preconditions;
-import com.google.common.io.Files;
-import org.apache.druid.java.util.common.ISE;
+import org.apache.druid.indexer.partitions.PartitionsSpec;
+import org.apache.druid.java.util.common.FileUtils;
 import org.apache.druid.segment.IndexSpec;
+import org.apache.druid.segment.incremental.AppendableIndexSpec;
 import org.apache.druid.segment.realtime.appenderator.AppenderatorConfig;
 import org.apache.druid.segment.realtime.plumber.IntervalStartVersioningPolicy;
 import org.apache.druid.segment.realtime.plumber.RejectionPolicyFactory;
@@ -39,62 +40,58 @@ import javax.annotation.Nullable;
 import java.io.File;
 
 /**
+ *
  */
-public class RealtimeTuningConfig implements TuningConfig, AppenderatorConfig
+public class RealtimeTuningConfig implements AppenderatorConfig
 {
-  private static final int defaultMaxRowsInMemory = TuningConfig.DEFAULT_MAX_ROWS_IN_MEMORY;
-  private static final Period defaultIntermediatePersistPeriod = new Period("PT10M");
-  private static final Period defaultWindowPeriod = new Period("PT10M");
-  private static final VersioningPolicy defaultVersioningPolicy = new IntervalStartVersioningPolicy();
-  private static final RejectionPolicyFactory defaultRejectionPolicyFactory = new ServerTimeRejectionPolicyFactory();
-  private static final int defaultMaxPendingPersists = 0;
-  private static final ShardSpec defaultShardSpec = new NumberedShardSpec(0, 1);
-  private static final IndexSpec defaultIndexSpec = new IndexSpec();
-  private static final Boolean defaultReportParseExceptions = Boolean.FALSE;
-  private static final long defaultHandoffConditionTimeout = 0;
-  private static final long defaultAlertTimeout = 0;
-  private static final String defaultDedupColumn = null;
+  private static final Period DEFAULT_INTERMEDIATE_PERSIST_PERIOD = new Period("PT10M");
+  private static final Period DEFAULT_WINDOW_PERIOD = new Period("PT10M");
+  private static final VersioningPolicy DEFAULT_VERSIONING_POLICY = new IntervalStartVersioningPolicy();
+  private static final RejectionPolicyFactory DEFAULT_REJECTION_POLICY_FACTORY = new ServerTimeRejectionPolicyFactory();
+  private static final int DEFAULT_MAX_PENDING_PERSISTS = 0;
+  private static final ShardSpec DEFAULT_SHARD_SPEC = new NumberedShardSpec(0, 1);
+  private static final IndexSpec DEFAULT_INDEX_SPEC = new IndexSpec();
+  private static final Boolean DEFAULT_REPORT_PARSE_EXCEPTIONS = Boolean.FALSE;
+  private static final long DEFAULT_HANDOFF_CONDITION_TIMEOUT = 0;
+  private static final long DEFAULT_ALERT_TIMEOUT = 0;
+  private static final String DEFAULT_DEDUP_COLUMN = null;
 
   private static File createNewBasePersistDirectory()
   {
-    try {
-      return Files.createTempDir();
-    }
-    catch (IllegalStateException e) {
-      String messageTemplate = "Failed to create temporary directory in [%s]! " +
-              "Make sure the `java.io.tmpdir` property is set to an existing and writable directory " +
-              "with enough free space.";
-      throw new ISE(e, messageTemplate, System.getProperty("java.io.tmpdir"));
-    }
+    return FileUtils.createTempDir("druid-realtime-persist");
   }
 
   // Might make sense for this to be a builder
   public static RealtimeTuningConfig makeDefaultTuningConfig(final @Nullable File basePersistDirectory)
   {
     return new RealtimeTuningConfig(
-        defaultMaxRowsInMemory,
+        DEFAULT_APPENDABLE_INDEX,
+        DEFAULT_MAX_ROWS_IN_MEMORY,
         0L,
-        defaultIntermediatePersistPeriod,
-        defaultWindowPeriod,
+        DEFAULT_SKIP_BYTES_IN_MEMORY_OVERHEAD_CHECK,
+        DEFAULT_INTERMEDIATE_PERSIST_PERIOD,
+        DEFAULT_WINDOW_PERIOD,
         basePersistDirectory == null ? createNewBasePersistDirectory() : basePersistDirectory,
-        defaultVersioningPolicy,
-        defaultRejectionPolicyFactory,
-        defaultMaxPendingPersists,
-        defaultShardSpec,
-        defaultIndexSpec,
-        true,
+        DEFAULT_VERSIONING_POLICY,
+        DEFAULT_REJECTION_POLICY_FACTORY,
+        DEFAULT_MAX_PENDING_PERSISTS,
+        DEFAULT_SHARD_SPEC,
+        DEFAULT_INDEX_SPEC,
+        DEFAULT_INDEX_SPEC,
         0,
         0,
-        defaultReportParseExceptions,
-        defaultHandoffConditionTimeout,
-        defaultAlertTimeout,
+        DEFAULT_REPORT_PARSE_EXCEPTIONS,
+        DEFAULT_HANDOFF_CONDITION_TIMEOUT,
+        DEFAULT_ALERT_TIMEOUT,
         null,
-        defaultDedupColumn
+        DEFAULT_DEDUP_COLUMN
     );
   }
 
+  private final AppendableIndexSpec appendableIndexSpec;
   private final int maxRowsInMemory;
   private final long maxBytesInMemory;
+  private final boolean skipBytesInMemoryOverheadCheck;
   private final Period intermediatePersistPeriod;
   private final Period windowPeriod;
   private final File basePersistDirectory;
@@ -103,6 +100,7 @@ public class RealtimeTuningConfig implements TuningConfig, AppenderatorConfig
   private final int maxPendingPersists;
   private final ShardSpec shardSpec;
   private final IndexSpec indexSpec;
+  private final IndexSpec indexSpecForIntermediatePersists;
   private final int persistThreadPriority;
   private final int mergeThreadPriority;
   private final boolean reportParseExceptions;
@@ -115,8 +113,10 @@ public class RealtimeTuningConfig implements TuningConfig, AppenderatorConfig
 
   @JsonCreator
   public RealtimeTuningConfig(
+      @JsonProperty("appendableIndexSpec") @Nullable AppendableIndexSpec appendableIndexSpec,
       @JsonProperty("maxRowsInMemory") Integer maxRowsInMemory,
       @JsonProperty("maxBytesInMemory") Long maxBytesInMemory,
+      @JsonProperty("skipBytesInMemoryOverheadCheck") @Nullable Boolean skipBytesInMemoryOverheadCheck,
       @JsonProperty("intermediatePersistPeriod") Period intermediatePersistPeriod,
       @JsonProperty("windowPeriod") Period windowPeriod,
       @JsonProperty("basePersistDirectory") File basePersistDirectory,
@@ -125,8 +125,7 @@ public class RealtimeTuningConfig implements TuningConfig, AppenderatorConfig
       @JsonProperty("maxPendingPersists") Integer maxPendingPersists,
       @JsonProperty("shardSpec") ShardSpec shardSpec,
       @JsonProperty("indexSpec") IndexSpec indexSpec,
-      // This parameter is left for compatibility when reading existing configs, to be removed in Druid 0.12.
-      @JsonProperty("buildV9Directly") Boolean buildV9Directly,
+      @JsonProperty("indexSpecForIntermediatePersists") @Nullable IndexSpec indexSpecForIntermediatePersists,
       @JsonProperty("persistThreadPriority") int persistThreadPriority,
       @JsonProperty("mergeThreadPriority") int mergeThreadPriority,
       @JsonProperty("reportParseExceptions") Boolean reportParseExceptions,
@@ -136,36 +135,48 @@ public class RealtimeTuningConfig implements TuningConfig, AppenderatorConfig
       @JsonProperty("dedupColumn") @Nullable String dedupColumn
   )
   {
-    this.maxRowsInMemory = maxRowsInMemory == null ? defaultMaxRowsInMemory : maxRowsInMemory;
+    this.appendableIndexSpec = appendableIndexSpec == null ? DEFAULT_APPENDABLE_INDEX : appendableIndexSpec;
+    this.maxRowsInMemory = maxRowsInMemory == null ? DEFAULT_MAX_ROWS_IN_MEMORY : maxRowsInMemory;
     // initializing this to 0, it will be lazily initialized to a value
-    // @see server.src.main.java.org.apache.druid.segment.indexing.TuningConfigs#getMaxBytesInMemoryOrDefault(long)
+    // @see #getMaxBytesInMemoryOrDefault()
     this.maxBytesInMemory = maxBytesInMemory == null ? 0 : maxBytesInMemory;
+    this.skipBytesInMemoryOverheadCheck = skipBytesInMemoryOverheadCheck == null ?
+                                          DEFAULT_SKIP_BYTES_IN_MEMORY_OVERHEAD_CHECK : skipBytesInMemoryOverheadCheck;
     this.intermediatePersistPeriod = intermediatePersistPeriod == null
-                                     ? defaultIntermediatePersistPeriod
+                                     ? DEFAULT_INTERMEDIATE_PERSIST_PERIOD
                                      : intermediatePersistPeriod;
-    this.windowPeriod = windowPeriod == null ? defaultWindowPeriod : windowPeriod;
+    this.windowPeriod = windowPeriod == null ? DEFAULT_WINDOW_PERIOD : windowPeriod;
     this.basePersistDirectory = basePersistDirectory == null ? createNewBasePersistDirectory() : basePersistDirectory;
-    this.versioningPolicy = versioningPolicy == null ? defaultVersioningPolicy : versioningPolicy;
+    this.versioningPolicy = versioningPolicy == null ? DEFAULT_VERSIONING_POLICY : versioningPolicy;
     this.rejectionPolicyFactory = rejectionPolicyFactory == null
-                                  ? defaultRejectionPolicyFactory
+                                  ? DEFAULT_REJECTION_POLICY_FACTORY
                                   : rejectionPolicyFactory;
-    this.maxPendingPersists = maxPendingPersists == null ? defaultMaxPendingPersists : maxPendingPersists;
-    this.shardSpec = shardSpec == null ? defaultShardSpec : shardSpec;
-    this.indexSpec = indexSpec == null ? defaultIndexSpec : indexSpec;
+    this.maxPendingPersists = maxPendingPersists == null ? DEFAULT_MAX_PENDING_PERSISTS : maxPendingPersists;
+    this.shardSpec = shardSpec == null ? DEFAULT_SHARD_SPEC : shardSpec;
+    this.indexSpec = indexSpec == null ? DEFAULT_INDEX_SPEC : indexSpec;
+    this.indexSpecForIntermediatePersists = indexSpecForIntermediatePersists == null ?
+                                            this.indexSpec : indexSpecForIntermediatePersists;
     this.mergeThreadPriority = mergeThreadPriority;
     this.persistThreadPriority = persistThreadPriority;
     this.reportParseExceptions = reportParseExceptions == null
-                                 ? defaultReportParseExceptions
+                                 ? DEFAULT_REPORT_PARSE_EXCEPTIONS
                                  : reportParseExceptions;
     this.handoffConditionTimeout = handoffConditionTimeout == null
-                                   ? defaultHandoffConditionTimeout
+                                   ? DEFAULT_HANDOFF_CONDITION_TIMEOUT
                                    : handoffConditionTimeout;
     Preconditions.checkArgument(this.handoffConditionTimeout >= 0, "handoffConditionTimeout must be >= 0");
 
-    this.alertTimeout = alertTimeout == null ? defaultAlertTimeout : alertTimeout;
+    this.alertTimeout = alertTimeout == null ? DEFAULT_ALERT_TIMEOUT : alertTimeout;
     Preconditions.checkArgument(this.alertTimeout >= 0, "alertTimeout must be >= 0");
     this.segmentWriteOutMediumFactory = segmentWriteOutMediumFactory;
-    this.dedupColumn = dedupColumn == null ? defaultDedupColumn : dedupColumn;
+    this.dedupColumn = dedupColumn == null ? DEFAULT_DEDUP_COLUMN : dedupColumn;
+  }
+
+  @Override
+  @JsonProperty
+  public AppendableIndexSpec getAppendableIndexSpec()
+  {
+    return appendableIndexSpec;
   }
 
   @Override
@@ -176,9 +187,17 @@ public class RealtimeTuningConfig implements TuningConfig, AppenderatorConfig
   }
 
   @Override
+  @JsonProperty
   public long getMaxBytesInMemory()
   {
     return maxBytesInMemory;
+  }
+
+  @JsonProperty
+  @Override
+  public boolean isSkipBytesInMemoryOverheadCheck()
+  {
+    return skipBytesInMemoryOverheadCheck;
   }
 
   @Override
@@ -220,6 +239,12 @@ public class RealtimeTuningConfig implements TuningConfig, AppenderatorConfig
     return maxPendingPersists;
   }
 
+  @Override
+  public PartitionsSpec getPartitionsSpec()
+  {
+    throw new UnsupportedOperationException();
+  }
+
   @JsonProperty
   public ShardSpec getShardSpec()
   {
@@ -233,14 +258,11 @@ public class RealtimeTuningConfig implements TuningConfig, AppenderatorConfig
     return indexSpec;
   }
 
-  /**
-   * Always returns true, doesn't affect the version being built.
-   */
-  @Deprecated
   @JsonProperty
-  public Boolean getBuildV9Directly()
+  @Override
+  public IndexSpec getIndexSpecForIntermediatePersists()
   {
-    return true;
+    return indexSpecForIntermediatePersists;
   }
 
   @JsonProperty
@@ -292,8 +314,10 @@ public class RealtimeTuningConfig implements TuningConfig, AppenderatorConfig
   public RealtimeTuningConfig withVersioningPolicy(VersioningPolicy policy)
   {
     return new RealtimeTuningConfig(
+        appendableIndexSpec,
         maxRowsInMemory,
         maxBytesInMemory,
+        skipBytesInMemoryOverheadCheck,
         intermediatePersistPeriod,
         windowPeriod,
         basePersistDirectory,
@@ -302,7 +326,7 @@ public class RealtimeTuningConfig implements TuningConfig, AppenderatorConfig
         maxPendingPersists,
         shardSpec,
         indexSpec,
-        true,
+        indexSpecForIntermediatePersists,
         persistThreadPriority,
         mergeThreadPriority,
         reportParseExceptions,
@@ -313,11 +337,14 @@ public class RealtimeTuningConfig implements TuningConfig, AppenderatorConfig
     );
   }
 
+  @Override
   public RealtimeTuningConfig withBasePersistDirectory(File dir)
   {
     return new RealtimeTuningConfig(
+        appendableIndexSpec,
         maxRowsInMemory,
         maxBytesInMemory,
+        skipBytesInMemoryOverheadCheck,
         intermediatePersistPeriod,
         windowPeriod,
         dir,
@@ -326,7 +353,7 @@ public class RealtimeTuningConfig implements TuningConfig, AppenderatorConfig
         maxPendingPersists,
         shardSpec,
         indexSpec,
-        true,
+        indexSpecForIntermediatePersists,
         persistThreadPriority,
         mergeThreadPriority,
         reportParseExceptions,

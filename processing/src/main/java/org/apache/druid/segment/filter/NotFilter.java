@@ -19,13 +19,24 @@
 
 package org.apache.druid.segment.filter;
 
+import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.query.BitmapResultFactory;
 import org.apache.druid.query.filter.BitmapIndexSelector;
 import org.apache.druid.query.filter.Filter;
 import org.apache.druid.query.filter.ValueMatcher;
+import org.apache.druid.query.filter.vector.BaseVectorValueMatcher;
+import org.apache.druid.query.filter.vector.ReadableVectorMatch;
+import org.apache.druid.query.filter.vector.VectorMatch;
+import org.apache.druid.query.filter.vector.VectorValueMatcher;
 import org.apache.druid.query.monomorphicprocessing.RuntimeShapeInspector;
+import org.apache.druid.segment.ColumnInspector;
 import org.apache.druid.segment.ColumnSelector;
 import org.apache.druid.segment.ColumnSelectorFactory;
+import org.apache.druid.segment.vector.VectorColumnSelectorFactory;
+
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 
 /**
  */
@@ -33,9 +44,7 @@ public class NotFilter implements Filter
 {
   private final Filter baseFilter;
 
-  public NotFilter(
-      Filter baseFilter
-  )
+  public NotFilter(Filter baseFilter)
   {
     this.baseFilter = baseFilter;
   }
@@ -71,9 +80,61 @@ public class NotFilter implements Filter
   }
 
   @Override
+  public VectorValueMatcher makeVectorMatcher(final VectorColumnSelectorFactory factory)
+  {
+    final VectorValueMatcher baseMatcher = baseFilter.makeVectorMatcher(factory);
+
+    return new BaseVectorValueMatcher(baseMatcher)
+    {
+      final VectorMatch scratch = VectorMatch.wrap(new int[factory.getMaxVectorSize()]);
+
+      @Override
+      public ReadableVectorMatch match(final ReadableVectorMatch mask)
+      {
+        final ReadableVectorMatch baseMatch = baseMatcher.match(mask);
+
+        scratch.copyFrom(mask);
+        scratch.removeAll(baseMatch);
+        assert scratch.isValid(mask);
+        return scratch;
+      }
+    };
+  }
+
+  @Override
+  public boolean canVectorizeMatcher(ColumnInspector inspector)
+  {
+    return baseFilter.canVectorizeMatcher(inspector);
+  }
+
+  @Override
+  public Set<String> getRequiredColumns()
+  {
+    return baseFilter.getRequiredColumns();
+  }
+
+  @Override
+  public boolean supportsRequiredColumnRewrite()
+  {
+    return baseFilter.supportsRequiredColumnRewrite();
+  }
+
+  @Override
+  public Filter rewriteRequiredColumns(Map<String, String> columnRewrites)
+  {
+    return new NotFilter(baseFilter.rewriteRequiredColumns(columnRewrites));
+  }
+
+  @Override
   public boolean supportsBitmapIndex(BitmapIndexSelector selector)
   {
     return baseFilter.supportsBitmapIndex(selector);
+  }
+
+  @Override
+  public boolean shouldUseBitmapIndex(BitmapIndexSelector selector)
+  {
+    return baseFilter.shouldUseBitmapIndex(selector);
   }
 
   @Override
@@ -86,6 +147,32 @@ public class NotFilter implements Filter
   public double estimateSelectivity(BitmapIndexSelector indexSelector)
   {
     return 1. - baseFilter.estimateSelectivity(indexSelector);
+  }
+
+  @Override
+  public String toString()
+  {
+    return StringUtils.format("~(%s)", baseFilter);
+  }
+
+  @Override
+  public boolean equals(Object o)
+  {
+    if (this == o) {
+      return true;
+    }
+    if (o == null || getClass() != o.getClass()) {
+      return false;
+    }
+    NotFilter notFilter = (NotFilter) o;
+    return Objects.equals(baseFilter, notFilter.baseFilter);
+  }
+
+  @Override
+  public int hashCode()
+  {
+    // to return a different hash from baseFilter
+    return Objects.hash(1, baseFilter);
   }
 
   public Filter getBaseFilter()

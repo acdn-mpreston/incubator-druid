@@ -23,6 +23,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.druid.segment.DimensionSelector;
 import org.apache.druid.segment.TestHelper;
 import org.apache.druid.segment.data.IndexedInts;
+import org.apache.druid.testing.InitializedNullHandlingTest;
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -30,7 +31,7 @@ import java.util.Arrays;
 
 /**
  */
-public class RegexFilteredDimensionSpecTest
+public class RegexFilteredDimensionSpecTest extends InitializedNullHandlingTest
 {
 
   @Test
@@ -84,7 +85,7 @@ public class RegexFilteredDimensionSpecTest
         "[c,g]"
     );
 
-    DimensionSelector selector = spec.decorate(TestDimensionSelector.instance);
+    DimensionSelector selector = spec.decorate(TestDimensionSelector.INSTANCE);
 
     Assert.assertEquals(2, selector.getValueCardinality());
 

@@ -22,6 +22,7 @@ package org.apache.druid.query.scan;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.druid.jackson.DefaultObjectMapper;
 import org.apache.druid.java.util.common.Intervals;
+import org.apache.druid.query.Query;
 import org.apache.druid.query.QueryRunnerTestHelper;
 import org.apache.druid.query.TableDataSource;
 import org.apache.druid.query.spec.LegacySegmentSpec;
@@ -33,10 +34,10 @@ import java.util.Arrays;
 
 public class ScanQuerySpecTest
 {
-  private static final ObjectMapper jsonMapper = new DefaultObjectMapper();
+  private static final ObjectMapper JSON_MAPPER = new DefaultObjectMapper();
 
   @Test
-  public void testSerializationLegacyString() throws Exception
+  public void testSerialization() throws Exception
   {
     String legacy =
         "{\"queryType\":\"scan\",\"dataSource\":{\"type\":\"table\",\"name\":\"testing\"},"
@@ -62,10 +63,11 @@ public class ScanQuerySpecTest
         + "\"granularity\":{\"type\":\"all\"}}";
 
     ScanQuery query = new ScanQuery(
-        new TableDataSource(QueryRunnerTestHelper.dataSource),
+        new TableDataSource(QueryRunnerTestHelper.DATA_SOURCE),
         new LegacySegmentSpec(Intervals.of("2011-01-12/2011-01-14")),
         VirtualColumns.EMPTY,
         ScanQuery.ResultFormat.RESULT_FORMAT_LIST,
+        0,
         0,
         3,
         ScanQuery.Order.NONE,
@@ -75,9 +77,32 @@ public class ScanQuerySpecTest
         null
     );
 
-    String actual = jsonMapper.writeValueAsString(query);
+    String actual = JSON_MAPPER.writeValueAsString(query);
     Assert.assertEquals(current, actual);
-    Assert.assertEquals(query, jsonMapper.readValue(actual, ScanQuery.class));
-    Assert.assertEquals(query, jsonMapper.readValue(legacy, ScanQuery.class));
+    Assert.assertEquals(query, JSON_MAPPER.readValue(actual, ScanQuery.class));
+    Assert.assertEquals(query, JSON_MAPPER.readValue(legacy, ScanQuery.class));
+  }
+
+  @Test
+  public void testSerializationLegacyString() throws Exception
+  {
+    ScanQuery query = new ScanQuery(
+        new TableDataSource(QueryRunnerTestHelper.DATA_SOURCE),
+        new LegacySegmentSpec(Intervals.of("2011-01-12/2011-01-14")),
+        VirtualColumns.EMPTY,
+        ScanQuery.ResultFormat.RESULT_FORMAT_LIST,
+        0,
+        1,
+        3,
+        ScanQuery.Order.NONE,
+        null,
+        Arrays.asList("market", "quality", "index"),
+        null,
+        null
+    );
+
+    final String serialized = JSON_MAPPER.writeValueAsString(query);
+    final ScanQuery deserialized = (ScanQuery) JSON_MAPPER.readValue(serialized, Query.class);
+    Assert.assertEquals(query, deserialized);
   }
 }

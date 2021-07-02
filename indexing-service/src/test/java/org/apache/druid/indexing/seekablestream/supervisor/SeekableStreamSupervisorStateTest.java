@@ -24,14 +24,13 @@ import com.google.common.base.Optional;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import org.apache.druid.data.input.impl.ByteEntity;
 import org.apache.druid.data.input.impl.DimensionSchema;
 import org.apache.druid.data.input.impl.DimensionsSpec;
-import org.apache.druid.data.input.impl.JSONParseSpec;
+import org.apache.druid.data.input.impl.JsonInputFormat;
 import org.apache.druid.data.input.impl.StringDimensionSchema;
-import org.apache.druid.data.input.impl.StringInputRowParser;
 import org.apache.druid.data.input.impl.TimestampSpec;
 import org.apache.druid.indexing.common.TestUtils;
-import org.apache.druid.indexing.common.stats.RowIngestionMetersFactory;
 import org.apache.druid.indexing.common.task.Task;
 import org.apache.druid.indexing.common.task.TaskResource;
 import org.apache.druid.indexing.overlord.DataSourceMetadata;
@@ -44,6 +43,7 @@ import org.apache.druid.indexing.overlord.TaskStorage;
 import org.apache.druid.indexing.overlord.supervisor.SupervisorStateManager;
 import org.apache.druid.indexing.overlord.supervisor.SupervisorStateManager.BasicState;
 import org.apache.druid.indexing.overlord.supervisor.SupervisorStateManagerConfig;
+import org.apache.druid.indexing.overlord.supervisor.autoscaler.LagStats;
 import org.apache.druid.indexing.seekablestream.SeekableStreamDataSourceMetadata;
 import org.apache.druid.indexing.seekablestream.SeekableStreamEndSequenceNumbers;
 import org.apache.druid.indexing.seekablestream.SeekableStreamIndexTask;
@@ -59,16 +59,22 @@ import org.apache.druid.indexing.seekablestream.common.StreamException;
 import org.apache.druid.indexing.seekablestream.common.StreamPartition;
 import org.apache.druid.indexing.seekablestream.supervisor.SeekableStreamSupervisorStateManager.SeekableStreamExceptionEvent;
 import org.apache.druid.indexing.seekablestream.supervisor.SeekableStreamSupervisorStateManager.SeekableStreamState;
+import org.apache.druid.indexing.seekablestream.supervisor.autoscaler.AutoScalerConfig;
+import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.java.util.common.granularity.Granularities;
 import org.apache.druid.java.util.common.parsers.JSONPathSpec;
+import org.apache.druid.java.util.emitter.core.Event;
+import org.apache.druid.metadata.EntryExistsException;
 import org.apache.druid.query.aggregation.AggregatorFactory;
 import org.apache.druid.query.aggregation.CountAggregatorFactory;
 import org.apache.druid.segment.TestHelper;
+import org.apache.druid.segment.incremental.RowIngestionMetersFactory;
 import org.apache.druid.segment.indexing.DataSchema;
 import org.apache.druid.segment.indexing.granularity.UniformGranularitySpec;
-import org.apache.druid.segment.realtime.firehose.ChatHandlerProvider;
-import org.apache.druid.server.security.AuthorizerMapper;
+import org.apache.druid.server.metrics.DruidMonitorSchedulerConfig;
+import org.apache.druid.server.metrics.NoopServiceEmitter;
+import org.easymock.EasyMock;
 import org.easymock.EasyMockSupport;
 import org.joda.time.DateTime;
 import org.joda.time.Duration;
@@ -78,30 +84,27 @@ import org.junit.Before;
 import org.junit.Test;
 
 import javax.annotation.Nullable;
+
 import java.io.File;
 import java.math.BigInteger;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ScheduledExecutorService;
-
-import static org.easymock.EasyMock.anyInt;
-import static org.easymock.EasyMock.anyLong;
-import static org.easymock.EasyMock.anyObject;
-import static org.easymock.EasyMock.anyString;
-import static org.easymock.EasyMock.expect;
+import java.util.concurrent.TimeUnit;
 
 public class SeekableStreamSupervisorStateTest extends EasyMockSupport
 {
-  private static final ObjectMapper objectMapper = TestHelper.makeJsonMapper();
+  private static final ObjectMapper OBJECT_MAPPER = TestHelper.makeJsonMapper();
   private static final String DATASOURCE = "testDS";
   private static final String STREAM = "stream";
   private static final String SHARD_ID = "0";
-  private static final StreamPartition<String> shard0Partition = StreamPartition.of(STREAM, SHARD_ID);
+  private static final StreamPartition<String> SHARD0_PARTITION = StreamPartition.of(STREAM, SHARD_ID);
   private static final String EXCEPTION_MSG = "I had an exception";
 
   private TaskStorage taskStorage;
@@ -112,10 +115,12 @@ public class SeekableStreamSupervisorStateTest extends EasyMockSupport
   private SeekableStreamIndexTaskClientFactory taskClientFactory;
   private SeekableStreamSupervisorSpec spec;
   private SeekableStreamIndexTaskClient indexTaskClient;
-  private RecordSupplier<String, String> recordSupplier;
+  private RecordSupplier<String, String, ByteEntity> recordSupplier;
 
   private RowIngestionMetersFactory rowIngestionMetersFactory;
   private SupervisorStateManagerConfig supervisorConfig;
+
+  private TestEmitter emitter;
 
   @Before
   public void setupTest()
@@ -128,37 +133,47 @@ public class SeekableStreamSupervisorStateTest extends EasyMockSupport
     taskClientFactory = createMock(SeekableStreamIndexTaskClientFactory.class);
     spec = createMock(SeekableStreamSupervisorSpec.class);
     indexTaskClient = createMock(SeekableStreamIndexTaskClient.class);
-    recordSupplier = (RecordSupplier<String, String>) createMock(RecordSupplier.class);
+    recordSupplier = (RecordSupplier<String, String, ByteEntity>) createMock(RecordSupplier.class);
 
     rowIngestionMetersFactory = new TestUtils().getRowIngestionMetersFactory();
 
     supervisorConfig = new SupervisorStateManagerConfig();
 
-    expect(spec.getSupervisorStateManagerConfig()).andReturn(supervisorConfig).anyTimes();
+    emitter = new TestEmitter();
 
-    expect(spec.getDataSchema()).andReturn(getDataSchema()).anyTimes();
-    expect(spec.getIoConfig()).andReturn(getIOConfig()).anyTimes();
-    expect(spec.getTuningConfig()).andReturn(getTuningConfig()).anyTimes();
+    EasyMock.expect(spec.getSupervisorStateManagerConfig()).andReturn(supervisorConfig).anyTimes();
 
-    expect(taskClientFactory.build(anyObject(), anyString(), anyInt(), anyObject(), anyLong())).andReturn(
+    EasyMock.expect(spec.getDataSchema()).andReturn(getDataSchema()).anyTimes();
+    EasyMock.expect(spec.getIoConfig()).andReturn(getIOConfig()).anyTimes();
+    EasyMock.expect(spec.getTuningConfig()).andReturn(getTuningConfig()).anyTimes();
+    EasyMock.expect(spec.getEmitter()).andReturn(emitter).anyTimes();
+
+    EasyMock.expect(taskClientFactory.build(
+        EasyMock.anyObject(),
+        EasyMock.anyString(),
+        EasyMock.anyInt(),
+        EasyMock.anyObject(),
+        EasyMock.anyLong()
+    )).andReturn(
         indexTaskClient).anyTimes();
-    expect(taskMaster.getTaskRunner()).andReturn(Optional.of(taskRunner)).anyTimes();
-    expect(taskMaster.getTaskQueue()).andReturn(Optional.of(taskQueue)).anyTimes();
+    EasyMock.expect(taskMaster.getTaskRunner()).andReturn(Optional.of(taskRunner)).anyTimes();
+    EasyMock.expect(taskMaster.getTaskQueue()).andReturn(Optional.of(taskQueue)).anyTimes();
 
-    taskRunner.registerListener(anyObject(TaskRunnerListener.class), anyObject(Executor.class));
+    taskRunner.registerListener(EasyMock.anyObject(TaskRunnerListener.class), EasyMock.anyObject(Executor.class));
 
-    expect(indexerMetadataStorageCoordinator.getDataSourceMetadata(DATASOURCE)).andReturn(null).anyTimes();
-    expect(recordSupplier.getAssignment()).andReturn(ImmutableSet.of(shard0Partition)).anyTimes();
-    expect(recordSupplier.getLatestSequenceNumber(anyObject())).andReturn("10").anyTimes();
+    EasyMock
+        .expect(indexerMetadataStorageCoordinator.retrieveDataSourceMetadata(DATASOURCE)).andReturn(null).anyTimes();
+    EasyMock.expect(recordSupplier.getAssignment()).andReturn(ImmutableSet.of(SHARD0_PARTITION)).anyTimes();
+    EasyMock.expect(recordSupplier.getLatestSequenceNumber(EasyMock.anyObject())).andReturn("10").anyTimes();
   }
 
   @Test
   public void testRunning() throws Exception
   {
-    expect(spec.isSuspended()).andReturn(false).anyTimes();
-    expect(recordSupplier.getPartitionIds(STREAM)).andReturn(ImmutableSet.of(SHARD_ID)).anyTimes();
-    expect(taskStorage.getActiveTasks()).andReturn(ImmutableList.of()).anyTimes();
-    expect(taskQueue.add(anyObject())).andReturn(true).anyTimes();
+    EasyMock.expect(spec.isSuspended()).andReturn(false).anyTimes();
+    EasyMock.expect(recordSupplier.getPartitionIds(STREAM)).andReturn(ImmutableSet.of(SHARD_ID)).anyTimes();
+    EasyMock.expect(taskStorage.getActiveTasksByDatasource(DATASOURCE)).andReturn(ImmutableList.of()).anyTimes();
+    EasyMock.expect(taskQueue.add(EasyMock.anyObject())).andReturn(true).anyTimes();
 
     replayAll();
 
@@ -192,13 +207,66 @@ public class SeekableStreamSupervisorStateTest extends EasyMockSupport
   }
 
   @Test
+  public void testRunningStreamGetSequenceNumberReturnsNull() throws Exception
+  {
+    EasyMock.reset(recordSupplier);
+    EasyMock.expect(recordSupplier.getAssignment()).andReturn(ImmutableSet.of(SHARD0_PARTITION)).anyTimes();
+    EasyMock.expect(recordSupplier.getLatestSequenceNumber(EasyMock.anyObject())).andReturn(null).anyTimes();
+    EasyMock.expect(spec.isSuspended()).andReturn(false).anyTimes();
+    EasyMock.expect(recordSupplier.getPartitionIds(STREAM)).andReturn(ImmutableSet.of(SHARD_ID)).anyTimes();
+    EasyMock.expect(taskStorage.getActiveTasksByDatasource(DATASOURCE)).andReturn(ImmutableList.of()).anyTimes();
+    EasyMock.expect(taskQueue.add(EasyMock.anyObject())).andReturn(true).anyTimes();
+
+    replayAll();
+
+    SeekableStreamSupervisor supervisor = new TestSeekableStreamSupervisor();
+
+    supervisor.start();
+
+    Assert.assertTrue(supervisor.stateManager.isHealthy());
+    Assert.assertEquals(BasicState.PENDING, supervisor.stateManager.getSupervisorState());
+    Assert.assertEquals(BasicState.PENDING, supervisor.stateManager.getSupervisorState().getBasicState());
+    Assert.assertTrue(supervisor.stateManager.getExceptionEvents().isEmpty());
+    Assert.assertFalse(supervisor.stateManager.isAtLeastOneSuccessfulRun());
+
+    supervisor.runInternal();
+
+    Assert.assertTrue(supervisor.stateManager.isHealthy());
+    Assert.assertEquals(SeekableStreamState.CREATING_TASKS, supervisor.stateManager.getSupervisorState());
+    Assert.assertEquals(BasicState.RUNNING, supervisor.stateManager.getSupervisorState().getBasicState());
+    List<SupervisorStateManager.ExceptionEvent> exceptionEvents = supervisor.stateManager.getExceptionEvents();
+    Assert.assertEquals(1, exceptionEvents.size());
+    Assert.assertFalse(((SeekableStreamExceptionEvent) exceptionEvents.get(0)).isStreamException());
+    Assert.assertEquals(ISE.class.getName(), exceptionEvents.get(0).getExceptionClass());
+    Assert.assertEquals(StringUtils.format("unable to fetch sequence number for partition[%s] from stream", SHARD_ID), exceptionEvents.get(0).getMessage());
+    Assert.assertFalse(supervisor.stateManager.isAtLeastOneSuccessfulRun());
+
+    supervisor.runInternal();
+    Assert.assertTrue(supervisor.stateManager.isHealthy());
+    Assert.assertEquals(SeekableStreamState.CREATING_TASKS, supervisor.stateManager.getSupervisorState());
+    Assert.assertEquals(BasicState.RUNNING, supervisor.stateManager.getSupervisorState().getBasicState());
+    Assert.assertEquals(2, supervisor.stateManager.getExceptionEvents().size());
+    Assert.assertFalse(supervisor.stateManager.isAtLeastOneSuccessfulRun());
+
+    supervisor.runInternal();
+    Assert.assertFalse(supervisor.stateManager.isHealthy());
+    Assert.assertEquals(BasicState.UNHEALTHY_SUPERVISOR, supervisor.stateManager.getSupervisorState());
+    Assert.assertEquals(BasicState.UNHEALTHY_SUPERVISOR, supervisor.stateManager.getSupervisorState().getBasicState());
+    Assert.assertEquals(3, supervisor.stateManager.getExceptionEvents().size());
+    Assert.assertFalse(supervisor.stateManager.isAtLeastOneSuccessfulRun());
+
+    verifyAll();
+  }
+
+  @Test
   public void testConnectingToStreamFail() throws Exception
   {
-    expect(spec.isSuspended()).andReturn(false).anyTimes();
-    expect(recordSupplier.getPartitionIds(STREAM)).andThrow(new StreamException(new IllegalStateException(EXCEPTION_MSG)))
-                                                  .anyTimes();
-    expect(taskStorage.getActiveTasks()).andReturn(ImmutableList.of()).anyTimes();
-    expect(taskQueue.add(anyObject())).andReturn(true).anyTimes();
+    EasyMock.expect(spec.isSuspended()).andReturn(false).anyTimes();
+    EasyMock.expect(recordSupplier.getPartitionIds(STREAM))
+            .andThrow(new StreamException(new IllegalStateException(EXCEPTION_MSG)))
+            .anyTimes();
+    EasyMock.expect(taskStorage.getActiveTasksByDatasource(DATASOURCE)).andReturn(ImmutableList.of()).anyTimes();
+    EasyMock.expect(taskQueue.add(EasyMock.anyObject())).andReturn(true).anyTimes();
 
     replayAll();
 
@@ -248,13 +316,17 @@ public class SeekableStreamSupervisorStateTest extends EasyMockSupport
   @Test
   public void testConnectingToStreamFailRecoveryFailRecovery() throws Exception
   {
-    expect(spec.isSuspended()).andReturn(false).anyTimes();
-    expect(recordSupplier.getPartitionIds(STREAM)).andThrow(new StreamException(new IllegalStateException())).times(3);
-    expect(recordSupplier.getPartitionIds(STREAM)).andReturn(ImmutableSet.of(SHARD_ID)).times(3);
-    expect(recordSupplier.getPartitionIds(STREAM)).andThrow(new StreamException(new IllegalStateException())).times(3);
-    expect(recordSupplier.getPartitionIds(STREAM)).andReturn(ImmutableSet.of(SHARD_ID)).times(3);
-    expect(taskStorage.getActiveTasks()).andReturn(ImmutableList.of()).anyTimes();
-    expect(taskQueue.add(anyObject())).andReturn(true).anyTimes();
+    EasyMock.expect(spec.isSuspended()).andReturn(false).anyTimes();
+    EasyMock.expect(recordSupplier.getPartitionIds(STREAM))
+            .andThrow(new StreamException(new IllegalStateException()))
+            .times(3);
+    EasyMock.expect(recordSupplier.getPartitionIds(STREAM)).andReturn(ImmutableSet.of(SHARD_ID)).times(3);
+    EasyMock.expect(recordSupplier.getPartitionIds(STREAM))
+            .andThrow(new StreamException(new IllegalStateException()))
+            .times(3);
+    EasyMock.expect(recordSupplier.getPartitionIds(STREAM)).andReturn(ImmutableSet.of(SHARD_ID)).times(3);
+    EasyMock.expect(taskStorage.getActiveTasksByDatasource(DATASOURCE)).andReturn(ImmutableList.of()).anyTimes();
+    EasyMock.expect(taskQueue.add(EasyMock.anyObject())).andReturn(true).anyTimes();
 
     replayAll();
 
@@ -317,12 +389,12 @@ public class SeekableStreamSupervisorStateTest extends EasyMockSupport
   @Test
   public void testDiscoveringInitialTasksFailRecoveryFail() throws Exception
   {
-    expect(spec.isSuspended()).andReturn(false).anyTimes();
-    expect(recordSupplier.getPartitionIds(STREAM)).andReturn(ImmutableSet.of(SHARD_ID)).anyTimes();
-    expect(taskStorage.getActiveTasks()).andThrow(new IllegalStateException(EXCEPTION_MSG)).times(3);
-    expect(taskStorage.getActiveTasks()).andReturn(ImmutableList.of()).times(3);
-    expect(taskStorage.getActiveTasks()).andThrow(new IllegalStateException(EXCEPTION_MSG)).times(3);
-    expect(taskQueue.add(anyObject())).andReturn(true).anyTimes();
+    EasyMock.expect(spec.isSuspended()).andReturn(false).anyTimes();
+    EasyMock.expect(recordSupplier.getPartitionIds(STREAM)).andReturn(ImmutableSet.of(SHARD_ID)).anyTimes();
+    EasyMock.expect(taskStorage.getActiveTasksByDatasource(DATASOURCE)).andThrow(new IllegalStateException(EXCEPTION_MSG)).times(3);
+    EasyMock.expect(taskStorage.getActiveTasksByDatasource(DATASOURCE)).andReturn(ImmutableList.of()).times(3);
+    EasyMock.expect(taskStorage.getActiveTasksByDatasource(DATASOURCE)).andThrow(new IllegalStateException(EXCEPTION_MSG)).times(3);
+    EasyMock.expect(taskQueue.add(EasyMock.anyObject())).andReturn(true).anyTimes();
 
     replayAll();
 
@@ -393,12 +465,12 @@ public class SeekableStreamSupervisorStateTest extends EasyMockSupport
   @Test
   public void testCreatingTasksFailRecoveryFail() throws Exception
   {
-    expect(spec.isSuspended()).andReturn(false).anyTimes();
-    expect(recordSupplier.getPartitionIds(STREAM)).andReturn(ImmutableSet.of(SHARD_ID)).anyTimes();
-    expect(taskStorage.getActiveTasks()).andReturn(ImmutableList.of()).anyTimes();
-    expect(taskQueue.add(anyObject())).andThrow(new IllegalStateException(EXCEPTION_MSG)).times(3);
-    expect(taskQueue.add(anyObject())).andReturn(true).times(3);
-    expect(taskQueue.add(anyObject())).andThrow(new IllegalStateException(EXCEPTION_MSG)).times(3);
+    EasyMock.expect(spec.isSuspended()).andReturn(false).anyTimes();
+    EasyMock.expect(recordSupplier.getPartitionIds(STREAM)).andReturn(ImmutableSet.of(SHARD_ID)).anyTimes();
+    EasyMock.expect(taskStorage.getActiveTasksByDatasource(DATASOURCE)).andReturn(ImmutableList.of()).anyTimes();
+    EasyMock.expect(taskQueue.add(EasyMock.anyObject())).andThrow(new IllegalStateException(EXCEPTION_MSG)).times(3);
+    EasyMock.expect(taskQueue.add(EasyMock.anyObject())).andReturn(true).times(3);
+    EasyMock.expect(taskQueue.add(EasyMock.anyObject())).andThrow(new IllegalStateException(EXCEPTION_MSG)).times(3);
 
     replayAll();
 
@@ -470,10 +542,10 @@ public class SeekableStreamSupervisorStateTest extends EasyMockSupport
   @Test
   public void testSuspended() throws Exception
   {
-    expect(spec.isSuspended()).andReturn(true).anyTimes();
-    expect(recordSupplier.getPartitionIds(STREAM)).andReturn(ImmutableSet.of(SHARD_ID)).anyTimes();
-    expect(taskStorage.getActiveTasks()).andReturn(ImmutableList.of()).anyTimes();
-    expect(taskQueue.add(anyObject())).andReturn(true).anyTimes();
+    EasyMock.expect(spec.isSuspended()).andReturn(true).anyTimes();
+    EasyMock.expect(recordSupplier.getPartitionIds(STREAM)).andReturn(ImmutableSet.of(SHARD_ID)).anyTimes();
+    EasyMock.expect(taskStorage.getActiveTasksByDatasource(DATASOURCE)).andReturn(ImmutableList.of()).anyTimes();
+    EasyMock.expect(taskQueue.add(EasyMock.anyObject())).andReturn(true).anyTimes();
 
     replayAll();
 
@@ -509,10 +581,10 @@ public class SeekableStreamSupervisorStateTest extends EasyMockSupport
   @Test
   public void testStopping() throws Exception
   {
-    expect(spec.isSuspended()).andReturn(false).anyTimes();
-    expect(recordSupplier.getPartitionIds(STREAM)).andReturn(ImmutableSet.of(SHARD_ID)).anyTimes();
-    expect(taskStorage.getActiveTasks()).andReturn(ImmutableList.of()).anyTimes();
-    expect(taskQueue.add(anyObject())).andReturn(true).anyTimes();
+    EasyMock.expect(spec.isSuspended()).andReturn(false).anyTimes();
+    EasyMock.expect(recordSupplier.getPartitionIds(STREAM)).andReturn(ImmutableSet.of(SHARD_ID)).anyTimes();
+    EasyMock.expect(taskStorage.getActiveTasksByDatasource(DATASOURCE)).andReturn(ImmutableList.of()).anyTimes();
+    EasyMock.expect(taskQueue.add(EasyMock.anyObject())).andReturn(true).anyTimes();
 
     taskRunner.unregisterListener("testSupervisorId");
     indexTaskClient.close();
@@ -547,6 +619,180 @@ public class SeekableStreamSupervisorStateTest extends EasyMockSupport
     verifyAll();
   }
 
+
+  @Test
+  public void testEmitBothLag() throws Exception
+  {
+    expectEmitterSupervisor(false);
+
+    CountDownLatch latch = new CountDownLatch(1);
+    TestEmittingTestSeekableStreamSupervisor supervisor = new TestEmittingTestSeekableStreamSupervisor(
+        latch,
+        ImmutableMap.of("1", 100L, "2", 250L, "3", 500L),
+        ImmutableMap.of("1", 10000L, "2", 15000L, "3", 20000L)
+    );
+
+
+    supervisor.start();
+
+    Assert.assertTrue(supervisor.stateManager.isHealthy());
+    Assert.assertEquals(BasicState.PENDING, supervisor.stateManager.getSupervisorState());
+    Assert.assertEquals(BasicState.PENDING, supervisor.stateManager.getSupervisorState().getBasicState());
+    Assert.assertTrue(supervisor.stateManager.getExceptionEvents().isEmpty());
+    Assert.assertFalse(supervisor.stateManager.isAtLeastOneSuccessfulRun());
+
+
+    latch.await();
+    Assert.assertEquals(6, emitter.getEvents().size());
+    Assert.assertEquals("ingest/test/lag", emitter.getEvents().get(0).toMap().get("metric"));
+    Assert.assertEquals(850L, emitter.getEvents().get(0).toMap().get("value"));
+    Assert.assertEquals("ingest/test/maxLag", emitter.getEvents().get(1).toMap().get("metric"));
+    Assert.assertEquals(500L, emitter.getEvents().get(1).toMap().get("value"));
+    Assert.assertEquals("ingest/test/avgLag", emitter.getEvents().get(2).toMap().get("metric"));
+    Assert.assertEquals(283L, emitter.getEvents().get(2).toMap().get("value"));
+    Assert.assertEquals("ingest/test/lag/time", emitter.getEvents().get(3).toMap().get("metric"));
+    Assert.assertEquals(45000L, emitter.getEvents().get(3).toMap().get("value"));
+    Assert.assertEquals("ingest/test/maxLag/time", emitter.getEvents().get(4).toMap().get("metric"));
+    Assert.assertEquals(20000L, emitter.getEvents().get(4).toMap().get("value"));
+    Assert.assertEquals("ingest/test/avgLag/time", emitter.getEvents().get(5).toMap().get("metric"));
+    Assert.assertEquals(15000L, emitter.getEvents().get(5).toMap().get("value"));
+    verifyAll();
+  }
+
+  @Test
+  public void testEmitRecordLag() throws Exception
+  {
+    expectEmitterSupervisor(false);
+
+    CountDownLatch latch = new CountDownLatch(1);
+    TestEmittingTestSeekableStreamSupervisor supervisor = new TestEmittingTestSeekableStreamSupervisor(
+        latch,
+        ImmutableMap.of("1", 100L, "2", 250L, "3", 500L),
+        null
+    );
+
+
+    supervisor.start();
+
+    Assert.assertTrue(supervisor.stateManager.isHealthy());
+    Assert.assertEquals(BasicState.PENDING, supervisor.stateManager.getSupervisorState());
+    Assert.assertEquals(BasicState.PENDING, supervisor.stateManager.getSupervisorState().getBasicState());
+    Assert.assertTrue(supervisor.stateManager.getExceptionEvents().isEmpty());
+    Assert.assertFalse(supervisor.stateManager.isAtLeastOneSuccessfulRun());
+
+
+    latch.await();
+    Assert.assertEquals(3, emitter.getEvents().size());
+    Assert.assertEquals("ingest/test/lag", emitter.getEvents().get(0).toMap().get("metric"));
+    Assert.assertEquals(850L, emitter.getEvents().get(0).toMap().get("value"));
+    Assert.assertEquals("ingest/test/maxLag", emitter.getEvents().get(1).toMap().get("metric"));
+    Assert.assertEquals(500L, emitter.getEvents().get(1).toMap().get("value"));
+    Assert.assertEquals("ingest/test/avgLag", emitter.getEvents().get(2).toMap().get("metric"));
+    Assert.assertEquals(283L, emitter.getEvents().get(2).toMap().get("value"));
+    verifyAll();
+  }
+
+  @Test
+  public void testEmitTimeLag() throws Exception
+  {
+    expectEmitterSupervisor(false);
+
+    CountDownLatch latch = new CountDownLatch(1);
+    TestEmittingTestSeekableStreamSupervisor supervisor = new TestEmittingTestSeekableStreamSupervisor(
+        latch,
+        null,
+        ImmutableMap.of("1", 10000L, "2", 15000L, "3", 20000L)
+    );
+
+
+    supervisor.start();
+
+    Assert.assertTrue(supervisor.stateManager.isHealthy());
+    Assert.assertEquals(BasicState.PENDING, supervisor.stateManager.getSupervisorState());
+    Assert.assertEquals(BasicState.PENDING, supervisor.stateManager.getSupervisorState().getBasicState());
+    Assert.assertTrue(supervisor.stateManager.getExceptionEvents().isEmpty());
+    Assert.assertFalse(supervisor.stateManager.isAtLeastOneSuccessfulRun());
+
+
+    latch.await();
+    Assert.assertEquals(3, emitter.getEvents().size());
+    Assert.assertEquals("ingest/test/lag/time", emitter.getEvents().get(0).toMap().get("metric"));
+    Assert.assertEquals(45000L, emitter.getEvents().get(0).toMap().get("value"));
+    Assert.assertEquals("ingest/test/maxLag/time", emitter.getEvents().get(1).toMap().get("metric"));
+    Assert.assertEquals(20000L, emitter.getEvents().get(1).toMap().get("value"));
+    Assert.assertEquals("ingest/test/avgLag/time", emitter.getEvents().get(2).toMap().get("metric"));
+    Assert.assertEquals(15000L, emitter.getEvents().get(2).toMap().get("value"));
+    verifyAll();
+  }
+
+  @Test
+  public void testEmitNoLagWhenSuspended() throws Exception
+  {
+    expectEmitterSupervisor(true);
+
+    CountDownLatch latch = new CountDownLatch(1);
+    TestEmittingTestSeekableStreamSupervisor supervisor = new TestEmittingTestSeekableStreamSupervisor(
+        latch,
+        ImmutableMap.of("1", 100L, "2", 250L, "3", 500L),
+        ImmutableMap.of("1", 10000L, "2", 15000L, "3", 20000L)
+    );
+
+
+    supervisor.start();
+    supervisor.runInternal();
+
+    Assert.assertTrue(supervisor.stateManager.isHealthy());
+    Assert.assertEquals(BasicState.SUSPENDED, supervisor.stateManager.getSupervisorState());
+    Assert.assertEquals(BasicState.SUSPENDED, supervisor.stateManager.getSupervisorState().getBasicState());
+    Assert.assertTrue(supervisor.stateManager.getExceptionEvents().isEmpty());
+
+
+    latch.await();
+    Assert.assertEquals(0, emitter.getEvents().size());
+    verifyAll();
+  }
+
+  private void expectEmitterSupervisor(boolean suspended) throws EntryExistsException
+  {
+    spec = createMock(SeekableStreamSupervisorSpec.class);
+    EasyMock.expect(spec.getSupervisorStateManagerConfig()).andReturn(supervisorConfig).anyTimes();
+    EasyMock.expect(spec.getDataSchema()).andReturn(getDataSchema()).anyTimes();
+    EasyMock.expect(spec.getIoConfig()).andReturn(new SeekableStreamSupervisorIOConfig(
+        "stream",
+        new JsonInputFormat(new JSONPathSpec(true, ImmutableList.of()), ImmutableMap.of(), false),
+        1,
+        1,
+        new Period("PT1H"),
+        new Period("PT1S"),
+        new Period("PT30S"),
+        false,
+        new Period("PT30M"),
+        null,
+        null,
+        null,
+        null
+    )
+    {
+    }).anyTimes();
+    EasyMock.expect(spec.getTuningConfig()).andReturn(getTuningConfig()).anyTimes();
+    EasyMock.expect(spec.getEmitter()).andReturn(emitter).anyTimes();
+    EasyMock.expect(spec.getMonitorSchedulerConfig()).andReturn(new DruidMonitorSchedulerConfig() {
+      @Override
+      public Duration getEmitterPeriod()
+      {
+        return new Period("PT1S").toStandardDuration();
+      }
+    }).anyTimes();
+    EasyMock.expect(spec.isSuspended()).andReturn(suspended).anyTimes();
+    EasyMock.expect(spec.getType()).andReturn("test").anyTimes();
+
+    EasyMock.expect(recordSupplier.getPartitionIds(STREAM)).andReturn(ImmutableSet.of(SHARD_ID)).anyTimes();
+    EasyMock.expect(taskStorage.getActiveTasksByDatasource(DATASOURCE)).andReturn(ImmutableList.of()).anyTimes();
+    EasyMock.expect(taskQueue.add(EasyMock.anyObject())).andReturn(true).anyTimes();
+
+    replayAll();
+  }
+
   private static DataSchema getDataSchema()
   {
     List<DimensionSchema> dimensions = new ArrayList<>();
@@ -555,21 +801,11 @@ public class SeekableStreamSupervisorStateTest extends EasyMockSupport
 
     return new DataSchema(
         DATASOURCE,
-        objectMapper.convertValue(
-            new StringInputRowParser(
-                new JSONParseSpec(
-                    new TimestampSpec("timestamp", "iso", null),
-                    new DimensionsSpec(
-                        dimensions,
-                        null,
-                        null
-                    ),
-                    new JSONPathSpec(true, ImmutableList.of()),
-                    ImmutableMap.of()
-                ),
-                StandardCharsets.UTF_8.name()
-            ),
-            Map.class
+        new TimestampSpec("timestamp", "iso", null),
+        new DimensionsSpec(
+            dimensions,
+            null,
+            null
         ),
         new AggregatorFactory[]{new CountAggregatorFactory("rows")},
         new UniformGranularitySpec(
@@ -577,8 +813,7 @@ public class SeekableStreamSupervisorStateTest extends EasyMockSupport
             Granularities.NONE,
             ImmutableList.of()
         ),
-        null,
-        objectMapper
+        null
     );
   }
 
@@ -586,6 +821,7 @@ public class SeekableStreamSupervisorStateTest extends EasyMockSupport
   {
     return new SeekableStreamSupervisorIOConfig(
         "stream",
+        new JsonInputFormat(new JSONPathSpec(true, ImmutableList.of()), ImmutableMap.of(), false),
         1,
         1,
         new Period("PT1H"),
@@ -594,10 +830,30 @@ public class SeekableStreamSupervisorStateTest extends EasyMockSupport
         false,
         new Period("PT30M"),
         null,
-        null
+        null, OBJECT_MAPPER.convertValue(getProperties(), AutoScalerConfig.class), null
     )
     {
     };
+  }
+
+  private static Map<String, Object> getProperties()
+  {
+    HashMap<String, Object> autoScalerConfig = new HashMap<>();
+    autoScalerConfig.put("enableTaskAutoScaler", true);
+    autoScalerConfig.put("lagCollectionIntervalMillis", 500);
+    autoScalerConfig.put("lagCollectionRangeMillis", 500);
+    autoScalerConfig.put("scaleOutThreshold", 5000000);
+    autoScalerConfig.put("triggerScaleOutFractionThreshold", 0.3);
+    autoScalerConfig.put("scaleInThreshold", 1000000);
+    autoScalerConfig.put("triggerScaleInFractionThreshold", 0.8);
+    autoScalerConfig.put("scaleActionStartDelayMillis", 0);
+    autoScalerConfig.put("scaleActionPeriodMillis", 100);
+    autoScalerConfig.put("taskCountMax", 8);
+    autoScalerConfig.put("taskCountMin", 1);
+    autoScalerConfig.put("scaleInStep", 1);
+    autoScalerConfig.put("scaleOutStep", 2);
+    autoScalerConfig.put("minTriggerScaleActionFrequencyMillis", 1200000);
+    return autoScalerConfig;
   }
 
   private static SeekableStreamSupervisorTuningConfig getTuningConfig()
@@ -635,9 +891,23 @@ public class SeekableStreamSupervisorStateTest extends EasyMockSupport
       }
 
       @Override
+      public Duration getRepartitionTransitionDuration()
+      {
+        return new Period("PT2M").toStandardDuration();
+      }
+
+      @Override
+      public Duration getOffsetFetchPeriod()
+      {
+        return new Period("PT5M").toStandardDuration();
+      }
+
+      @Override
       public SeekableStreamIndexTaskTuningConfig convertToTaskTuningConfig()
       {
         return new SeekableStreamIndexTaskTuningConfig(
+            null,
+            null,
             null,
             null,
             null,
@@ -674,7 +944,7 @@ public class SeekableStreamSupervisorStateTest extends EasyMockSupport
     };
   }
 
-  private class TestSeekableStreamIndexTask extends SeekableStreamIndexTask<String, String>
+  private class TestSeekableStreamIndexTask extends SeekableStreamIndexTask<String, String, ByteEntity>
   {
     public TestSeekableStreamIndexTask(
         String id,
@@ -683,9 +953,6 @@ public class SeekableStreamSupervisorStateTest extends EasyMockSupport
         SeekableStreamIndexTaskTuningConfig tuningConfig,
         SeekableStreamIndexTaskIOConfig<String, String> ioConfig,
         @Nullable Map<String, Object> context,
-        @Nullable ChatHandlerProvider chatHandlerProvider,
-        AuthorizerMapper authorizerMapper,
-        RowIngestionMetersFactory rowIngestionMetersFactory,
         @Nullable String groupId
     )
     {
@@ -696,21 +963,18 @@ public class SeekableStreamSupervisorStateTest extends EasyMockSupport
           tuningConfig,
           ioConfig,
           context,
-          chatHandlerProvider,
-          authorizerMapper,
-          rowIngestionMetersFactory,
           groupId
       );
     }
 
     @Override
-    protected SeekableStreamIndexTaskRunner<String, String> createTaskRunner()
+    protected SeekableStreamIndexTaskRunner<String, String, ByteEntity> createTaskRunner()
     {
       return null;
     }
 
     @Override
-    protected RecordSupplier<String, String> newTaskRecordSupplier()
+    protected RecordSupplier<String, String, ByteEntity> newTaskRecordSupplier()
     {
       return recordSupplier;
     }
@@ -722,9 +986,9 @@ public class SeekableStreamSupervisorStateTest extends EasyMockSupport
     }
   }
 
-  private class TestSeekableStreamSupervisor extends SeekableStreamSupervisor<String, String>
+  private abstract class BaseTestSeekableStreamSupervisor extends SeekableStreamSupervisor<String, String, ByteEntity>
   {
-    private TestSeekableStreamSupervisor()
+    private BaseTestSeekableStreamSupervisor()
     {
       super(
           "testSupervisorId",
@@ -732,7 +996,7 @@ public class SeekableStreamSupervisorStateTest extends EasyMockSupport
           taskMaster,
           indexerMetadataStorageCoordinator,
           taskClientFactory,
-          objectMapper,
+          OBJECT_MAPPER,
           spec,
           rowIngestionMetersFactory,
           false
@@ -746,11 +1010,23 @@ public class SeekableStreamSupervisorStateTest extends EasyMockSupport
     }
 
     @Override
-    protected void updateLatestSequenceFromStream(
-        RecordSupplier<String, String> recordSupplier, Set<StreamPartition<String>> streamPartitions
-    )
+    protected void updatePartitionLagFromStream()
     {
       // do nothing
+    }
+
+    @Nullable
+    @Override
+    protected Map<String, Long> getPartitionRecordLag()
+    {
+      return null;
+    }
+
+    @Nullable
+    @Override
+    protected Map<String, Long> getPartitionTimeLag()
+    {
+      return null;
     }
 
     @Override
@@ -772,14 +1048,15 @@ public class SeekableStreamSupervisorStateTest extends EasyMockSupport
           new SeekableStreamEndSequenceNumbers<>(STREAM, endPartitions),
           true,
           minimumMessageTime,
-          maximumMessageTime
+          maximumMessageTime,
+          ioConfig.getInputFormat()
       )
       {
       };
     }
 
     @Override
-    protected List<SeekableStreamIndexTask<String, String>> createIndexTasks(
+    protected List<SeekableStreamIndexTask<String, String, ByteEntity>> createIndexTasks(
         int replicas,
         String baseSequenceName,
         ObjectMapper sortingMapper,
@@ -796,9 +1073,6 @@ public class SeekableStreamSupervisorStateTest extends EasyMockSupport
           taskTuningConfig,
           taskIoConfig,
           null,
-          null,
-          null,
-          rowIngestionMetersFactory,
           null
       ));
     }
@@ -844,21 +1118,21 @@ public class SeekableStreamSupervisorStateTest extends EasyMockSupport
     }
 
     @Override
-    protected void scheduleReporting(ScheduledExecutorService reportingExec)
-    {
-      // do nothing
-    }
-
-    @Override
-    protected Map<String, String> getLagPerPartition(Map<String, String> currentOffsets)
+    protected Map<String, Long> getRecordLagPerPartition(Map<String, String> currentOffsets)
     {
       return null;
     }
 
     @Override
-    protected RecordSupplier<String, String> setupRecordSupplier()
+    protected Map<String, Long> getTimeLagPerPartition(Map<String, String> currentOffsets)
     {
-      return recordSupplier;
+      return null;
+    }
+
+    @Override
+    protected RecordSupplier<String, String, ByteEntity> setupRecordSupplier()
+    {
+      return SeekableStreamSupervisorStateTest.this.recordSupplier;
     }
 
     @Override
@@ -873,6 +1147,8 @@ public class SeekableStreamSupervisorStateTest extends EasyMockSupport
           1,
           1,
           1L,
+          null,
+          null,
           null,
           null,
           null,
@@ -906,9 +1182,105 @@ public class SeekableStreamSupervisorStateTest extends EasyMockSupport
     }
 
     @Override
+    protected boolean isShardExpirationMarker(String seqNum)
+    {
+      return false;
+    }
+
+    @Override
     protected boolean useExclusiveStartSequenceNumberForNonFirstSequence()
     {
       return false;
+    }
+  }
+
+  private class TestSeekableStreamSupervisor extends BaseTestSeekableStreamSupervisor
+  {
+    @Override
+    protected void scheduleReporting(ScheduledExecutorService reportingExec)
+    {
+      // do nothing
+    }
+
+    @Override
+    public LagStats computeLagStats()
+    {
+      return null;
+    }
+  }
+
+  private class TestEmittingTestSeekableStreamSupervisor extends BaseTestSeekableStreamSupervisor
+  {
+    private final CountDownLatch latch;
+    private final Map<String, Long> partitionsRecordLag;
+    private final Map<String, Long> partitionsTimeLag;
+
+    TestEmittingTestSeekableStreamSupervisor(
+        CountDownLatch latch,
+        Map<String, Long> partitionsRecordLag,
+        Map<String, Long> partitionsTimeLag
+    )
+    {
+      this.latch = latch;
+      this.partitionsRecordLag = partitionsRecordLag;
+      this.partitionsTimeLag = partitionsTimeLag;
+    }
+
+    @Nullable
+    @Override
+    protected Map<String, Long> getPartitionRecordLag()
+    {
+      return partitionsRecordLag;
+    }
+
+    @Nullable
+    @Override
+    protected Map<String, Long> getPartitionTimeLag()
+    {
+      return partitionsTimeLag;
+    }
+
+    @Override
+    protected void emitLag()
+    {
+      super.emitLag();
+      if (stateManager.isSteadyState()) {
+        latch.countDown();
+      }
+    }
+
+    @Override
+    public LagStats computeLagStats()
+    {
+      return null;
+    }
+
+    @Override
+    protected void scheduleReporting(ScheduledExecutorService reportingExec)
+    {
+      SeekableStreamSupervisorIOConfig ioConfig = spec.getIoConfig();
+      reportingExec.scheduleAtFixedRate(
+          this::emitLag,
+          ioConfig.getStartDelay().getMillis(),
+          spec.getMonitorSchedulerConfig().getEmitterPeriod().getMillis(),
+          TimeUnit.MILLISECONDS
+      );
+    }
+  }
+
+  private static class TestEmitter extends NoopServiceEmitter
+  {
+    private final List<Event> events = new ArrayList<>();
+
+    @Override
+    public void emit(Event event)
+    {
+      events.add(event);
+    }
+
+    public List<Event> getEvents()
+    {
+      return events;
     }
   }
 }

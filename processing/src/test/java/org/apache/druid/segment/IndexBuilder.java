@@ -19,7 +19,7 @@
 
 package org.apache.druid.segment;
 
-import com.google.common.base.Function;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
@@ -27,11 +27,16 @@ import org.apache.druid.data.input.InputRow;
 import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.query.aggregation.AggregatorFactory;
 import org.apache.druid.query.aggregation.CountAggregatorFactory;
+import org.apache.druid.segment.column.ColumnCapabilities;
+import org.apache.druid.segment.column.ColumnConfig;
+import org.apache.druid.segment.column.RowSignature;
 import org.apache.druid.segment.incremental.IncrementalIndex;
 import org.apache.druid.segment.incremental.IncrementalIndexSchema;
 import org.apache.druid.segment.incremental.IndexSizeExceededException;
+import org.apache.druid.segment.incremental.OnheapIncrementalIndex;
 import org.apache.druid.segment.writeout.OffHeapMemorySegmentWriteOutMediumFactory;
 import org.apache.druid.segment.writeout.SegmentWriteOutMediumFactory;
+import org.apache.druid.timeline.SegmentId;
 
 import java.io.File;
 import java.io.IOException;
@@ -53,21 +58,40 @@ public class IndexBuilder
       .withMetrics(new CountAggregatorFactory("count"))
       .build();
   private SegmentWriteOutMediumFactory segmentWriteOutMediumFactory = OffHeapMemorySegmentWriteOutMediumFactory.instance();
-  private IndexMerger indexMerger = TestHelper.getTestIndexMergerV9(segmentWriteOutMediumFactory);
+  private IndexMerger indexMerger;
   private File tmpDir;
   private IndexSpec indexSpec = new IndexSpec();
   private int maxRows = DEFAULT_MAX_ROWS;
 
+  private final ObjectMapper jsonMapper;
+  private final IndexIO indexIO;
   private final List<InputRow> rows = new ArrayList<>();
 
-  private IndexBuilder()
+  private IndexBuilder(ObjectMapper jsonMapper, ColumnConfig columnConfig)
   {
-
+    this.jsonMapper = jsonMapper;
+    this.indexIO = new IndexIO(jsonMapper, columnConfig);
+    this.indexMerger = new IndexMergerV9(jsonMapper, indexIO, segmentWriteOutMediumFactory);
   }
 
   public static IndexBuilder create()
   {
-    return new IndexBuilder();
+    return new IndexBuilder(TestHelper.JSON_MAPPER, TestHelper.NO_CACHE_COLUMN_CONFIG);
+  }
+
+  public static IndexBuilder create(ColumnConfig columnConfig)
+  {
+    return new IndexBuilder(TestHelper.JSON_MAPPER, columnConfig);
+  }
+
+  public static IndexBuilder create(ObjectMapper jsonMapper)
+  {
+    return new IndexBuilder(jsonMapper, TestHelper.NO_CACHE_COLUMN_CONFIG);
+  }
+
+  public static IndexBuilder create(ObjectMapper jsonMapper, ColumnConfig columnConfig)
+  {
+    return new IndexBuilder(jsonMapper, columnConfig);
   }
 
   public IndexBuilder schema(IncrementalIndexSchema schema)
@@ -79,7 +103,7 @@ public class IndexBuilder
   public IndexBuilder segmentWriteOutMediumFactory(SegmentWriteOutMediumFactory segmentWriteOutMediumFactory)
   {
     this.segmentWriteOutMediumFactory = segmentWriteOutMediumFactory;
-    this.indexMerger = TestHelper.getTestIndexMergerV9(segmentWriteOutMediumFactory);
+    this.indexMerger = new IndexMergerV9(jsonMapper, indexIO, segmentWriteOutMediumFactory);
     return this;
   }
 
@@ -112,10 +136,13 @@ public class IndexBuilder
     Preconditions.checkNotNull(indexMerger, "indexMerger");
     Preconditions.checkNotNull(tmpDir, "tmpDir");
     try (final IncrementalIndex incrementalIndex = buildIncrementalIndex()) {
-      return TestHelper.getTestIndexIO().loadIndex(
+      return indexIO.loadIndex(
           indexMerger.persist(
               incrementalIndex,
-              new File(tmpDir, StringUtils.format("testIndex-%s", ThreadLocalRandom.current().nextInt(Integer.MAX_VALUE))),
+              new File(
+                  tmpDir,
+                  StringUtils.format("testIndex-%s", ThreadLocalRandom.current().nextInt(Integer.MAX_VALUE))
+              ),
               indexSpec,
               null
           )
@@ -153,32 +180,19 @@ public class IndexBuilder
           indexMerger.merge(
               Lists.transform(
                   persisted,
-                  new Function<QueryableIndex, IndexableAdapter>()
-                  {
-                    @Override
-                    public IndexableAdapter apply(QueryableIndex input)
-                    {
-                      return new QueryableIndexIndexableAdapter(input);
-                    }
-                  }
+                  QueryableIndexIndexableAdapter::new
               ),
               true,
               Iterables.toArray(
                   Iterables.transform(
                       Arrays.asList(schema.getMetrics()),
-                      new Function<AggregatorFactory, AggregatorFactory>()
-                      {
-                        @Override
-                        public AggregatorFactory apply(AggregatorFactory input)
-                        {
-                          return input.getCombiningFactory();
-                        }
-                      }
+                      AggregatorFactory::getCombiningFactory
                   ),
                   AggregatorFactory.class
               ),
               new File(tmpDir, StringUtils.format("testIndex-%s", UUID.randomUUID())),
-              indexSpec
+              indexSpec,
+              -1
           )
       );
       for (QueryableIndex index : persisted) {
@@ -191,6 +205,35 @@ public class IndexBuilder
     }
   }
 
+  public RowBasedSegment<InputRow> buildRowBasedSegmentWithoutTypeSignature()
+  {
+    return new RowBasedSegment<>(
+        SegmentId.dummy("IndexBuilder"),
+        rows,
+        RowAdapters.standardRow(),
+        RowSignature.empty()
+    );
+  }
+
+  public RowBasedSegment<InputRow> buildRowBasedSegmentWithTypeSignature()
+  {
+    // Determine row signature by building an mmapped index first.
+    try (final QueryableIndex index = buildMMappedIndex()) {
+      final RowSignature.Builder rowSignatureBuilder = RowSignature.builder();
+      for (final String columnName : index.getColumnNames()) {
+        final ColumnCapabilities capabilities = index.getColumnHolder(columnName).getCapabilities();
+        rowSignatureBuilder.add(columnName, capabilities.getType());
+      }
+
+      return new RowBasedSegment<>(
+          SegmentId.dummy("IndexBuilder"),
+          rows,
+          RowAdapters.standardRow(),
+          rowSignatureBuilder.build()
+      );
+    }
+  }
+
   private static IncrementalIndex buildIncrementalIndexWithRows(
       IncrementalIndexSchema schema,
       int maxRows,
@@ -198,10 +241,10 @@ public class IndexBuilder
   )
   {
     Preconditions.checkNotNull(schema, "schema");
-    final IncrementalIndex incrementalIndex = new IncrementalIndex.Builder()
+    final IncrementalIndex incrementalIndex = new OnheapIncrementalIndex.Builder()
         .setIndexSchema(schema)
         .setMaxRowCount(maxRows)
-        .buildOnheap();
+        .build();
 
     for (InputRow row : rows) {
       try {

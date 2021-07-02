@@ -21,16 +21,19 @@ package org.apache.druid.query.aggregation.datasketches.hll;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
-import com.yahoo.sketches.hll.HllSketch;
-import com.yahoo.sketches.hll.TgtHllType;
-import com.yahoo.sketches.hll.Union;
+import org.apache.datasketches.hll.HllSketch;
+import org.apache.datasketches.hll.TgtHllType;
+import org.apache.datasketches.hll.Union;
 import org.apache.druid.query.aggregation.Aggregator;
 import org.apache.druid.query.aggregation.AggregatorFactory;
 import org.apache.druid.query.aggregation.AggregatorFactoryNotMergeableException;
 import org.apache.druid.query.aggregation.AggregatorUtil;
 import org.apache.druid.query.aggregation.BufferAggregator;
+import org.apache.druid.query.aggregation.VectorAggregator;
+import org.apache.druid.segment.ColumnInspector;
 import org.apache.druid.segment.ColumnSelectorFactory;
 import org.apache.druid.segment.ColumnValueSelector;
+import org.apache.druid.segment.vector.VectorColumnSelectorFactory;
 
 import javax.annotation.Nullable;
 
@@ -46,10 +49,11 @@ public class HllSketchMergeAggregatorFactory extends HllSketchAggregatorFactory
       @JsonProperty("name") final String name,
       @JsonProperty("fieldName") final String fieldName,
       @JsonProperty("lgK") @Nullable final Integer lgK,
-      @JsonProperty("tgtHllType") @Nullable final String tgtHllType
+      @JsonProperty("tgtHllType") @Nullable final String tgtHllType,
+      @JsonProperty("round") final boolean round
   )
   {
-    super(name, fieldName, lgK, tgtHllType);
+    super(name, fieldName, lgK, tgtHllType, round);
   }
 
   @Override
@@ -59,10 +63,11 @@ public class HllSketchMergeAggregatorFactory extends HllSketchAggregatorFactory
       HllSketchMergeAggregatorFactory castedOther = (HllSketchMergeAggregatorFactory) other;
 
       return new HllSketchMergeAggregatorFactory(
-              getName(),
-              getName(),
-              Math.max(getLgK(), castedOther.getLgK()),
-              getTgtHllType().compareTo(castedOther.getTgtHllType()) < 0 ? castedOther.getTgtHllType() : getTgtHllType()
+          getName(),
+          getName(),
+          Math.max(getLgK(), castedOther.getLgK()),
+          getTgtHllType().compareTo(castedOther.getTgtHllType()) < 0 ? castedOther.getTgtHllType() : getTgtHllType(),
+          isRound() || castedOther.isRound()
       );
     } else {
       throw new AggregatorFactoryNotMergeableException(this, other);
@@ -70,7 +75,7 @@ public class HllSketchMergeAggregatorFactory extends HllSketchAggregatorFactory
   }
 
   @Override
-  public String getTypeName()
+  public String getComplexTypeName()
   {
     return HllSketchModule.MERGE_TYPE_NAME;
   }
@@ -94,6 +99,24 @@ public class HllSketchMergeAggregatorFactory extends HllSketchAggregatorFactory
     final ColumnValueSelector<HllSketch> selector = columnSelectorFactory.makeColumnValueSelector(getFieldName());
     return new HllSketchMergeBufferAggregator(
         selector,
+        getLgK(),
+        TgtHllType.valueOf(getTgtHllType()),
+        getMaxIntermediateSize()
+    );
+  }
+
+  @Override
+  public boolean canVectorize(ColumnInspector columnInspector)
+  {
+    return true;
+  }
+
+  @Override
+  public VectorAggregator factorizeVector(VectorColumnSelectorFactory selectorFactory)
+  {
+    return new HllSketchMergeVectorAggregator(
+        selectorFactory,
+        getFieldName(),
         getLgK(),
         TgtHllType.valueOf(getTgtHllType()),
         getMaxIntermediateSize()

@@ -23,6 +23,7 @@ import com.google.common.base.Function;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Sets;
+import nl.jqno.equalsverifier.EqualsVerifier;
 import org.apache.druid.common.config.NullHandling;
 import org.apache.druid.data.input.InputRow;
 import org.apache.druid.data.input.impl.DimensionsSpec;
@@ -37,12 +38,15 @@ import org.apache.druid.java.util.common.DateTimes;
 import org.apache.druid.java.util.common.Pair;
 import org.apache.druid.query.expression.TestExprMacroTable;
 import org.apache.druid.query.filter.ExpressionDimFilter;
+import org.apache.druid.query.filter.Filter;
 import org.apache.druid.segment.IndexBuilder;
 import org.apache.druid.segment.StorageAdapter;
 import org.apache.druid.segment.incremental.IncrementalIndexSchema;
 import org.junit.AfterClass;
 import org.junit.Assert;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.ExpectedException;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 
@@ -84,7 +88,10 @@ public class ExpressionFilterTest extends BaseFilterTest
       ImmutableMap.of("dim0", "6", "dim1", 6L, "dim2", 6.0f, "dim3", "1"),
       ImmutableMap.of("dim0", "7", "dim1", 7L, "dim2", 7.0f, "dim3", "a"),
       ImmutableMap.of("dim0", "8", "dim1", 8L, "dim2", 8.0f, "dim3", 8L),
-      ImmutableMap.of("dim0", "9", "dim1", 9L, "dim2", 9.0f, "dim3", 1.234f, "dim4", 1.234f)
+
+      // Note: the "dim3 == 1.234" check in "testOneSingleValuedStringColumn" fails if dim3 is 1.234f instead of 1.234d,
+      // because the literal 1.234 is interpreted as a double, and 1.234f cast to double is not equivalent to 1.234d.
+      ImmutableMap.of("dim0", "9", "dim1", 9L, "dim2", 9.0f, "dim3", 1.234d, "dim4", 1.234d)
   ).stream().map(e -> PARSER.parseBatch(e).get(0)).collect(Collectors.toList());
 
   public ExpressionFilterTest(
@@ -107,6 +114,9 @@ public class ExpressionFilterTest extends BaseFilterTest
         optimize
     );
   }
+
+  @Rule
+  public ExpectedException expectedException = ExpectedException.none();
 
   @AfterClass
   public static void tearDown() throws Exception
@@ -132,21 +142,33 @@ public class ExpressionFilterTest extends BaseFilterTest
       assertFilterMatches(edf("dim3 < 2"), ImmutableList.of("3", "4", "6", "9"));
       assertFilterMatches(edf("dim3 < 2.0"), ImmutableList.of("3", "4", "6", "9"));
     }
-    assertFilterMatches(edf("like(dim3, '1%')"), ImmutableList.of("1", "3", "4", "6", "9"));
+    assertFilterMatchesSkipVectorize(edf("like(dim3, '1%')"), ImmutableList.of("1", "3", "4", "6", "9"));
+    assertFilterMatchesSkipVectorize(edf("array_contains(dim3, '1')"), ImmutableList.of("3", "4", "6"));
   }
 
   @Test
   public void testOneMultiValuedStringColumn()
   {
     if (NullHandling.replaceWithDefault()) {
-      assertFilterMatches(edf("dim4 == ''"), ImmutableList.of("1", "2", "6", "7", "8"));
+      assertFilterMatchesSkipVectorize(edf("dim4 == ''"), ImmutableList.of("1", "2", "6", "7", "8"));
     } else {
-      assertFilterMatches(edf("dim4 == ''"), ImmutableList.of("2"));
+      assertFilterMatchesSkipVectorize(edf("dim4 == ''"), ImmutableList.of("2"));
       // AS per SQL standard null == null returns false.
-      assertFilterMatches(edf("dim4 == null"), ImmutableList.of());
+      assertFilterMatchesSkipVectorize(edf("dim4 == null"), ImmutableList.of());
     }
-    assertFilterMatches(edf("dim4 == '1'"), ImmutableList.of("0"));
-    assertFilterMatches(edf("dim4 == '3'"), ImmutableList.of("3"));
+    assertFilterMatchesSkipVectorize(edf("dim4 == '1'"), ImmutableList.of("0"));
+    assertFilterMatchesSkipVectorize(edf("dim4 == '3'"), ImmutableList.of("3"));
+    assertFilterMatchesSkipVectorize(edf("dim4 == '4'"), ImmutableList.of("4", "5"));
+    assertFilterMatchesSkipVectorize(edf("concat(dim4, dim4) == '33'"), ImmutableList.of("3"));
+    assertFilterMatchesSkipVectorize(edf("like(dim4, '4%')"), ImmutableList.of("4", "5"));
+    assertFilterMatchesSkipVectorize(edf("array_contains(dim4, '5')"), ImmutableList.of("4", "5"));
+    assertFilterMatchesSkipVectorize(edf("array_to_string(dim4, ':') == '4:5'"), ImmutableList.of("4", "5"));
+  }
+
+  @Test
+  public void testSingleAndMultiValuedStringColumn()
+  {
+    assertFilterMatchesSkipVectorize(edf("array_contains(dim4, dim3)"), ImmutableList.of("5", "9"));
   }
 
   @Test
@@ -163,7 +185,7 @@ public class ExpressionFilterTest extends BaseFilterTest
     assertFilterMatches(edf("dim1 < '2'"), ImmutableList.of("0", "1"));
     assertFilterMatches(edf("dim1 < 2"), ImmutableList.of("0", "1"));
     assertFilterMatches(edf("dim1 < 2.0"), ImmutableList.of("0", "1"));
-    assertFilterMatches(edf("like(dim1, '1%')"), ImmutableList.of("1"));
+    assertFilterMatchesSkipVectorize(edf("like(dim1, '1%')"), ImmutableList.of("1"));
   }
 
   @Test
@@ -180,14 +202,17 @@ public class ExpressionFilterTest extends BaseFilterTest
     assertFilterMatches(edf("dim2 < '2'"), ImmutableList.of("0", "1"));
     assertFilterMatches(edf("dim2 < 2"), ImmutableList.of("0", "1"));
     assertFilterMatches(edf("dim2 < 2.0"), ImmutableList.of("0", "1"));
-    assertFilterMatches(edf("like(dim2, '1%')"), ImmutableList.of("1"));
+    assertFilterMatchesSkipVectorize(edf("like(dim2, '1%')"), ImmutableList.of("1"));
   }
 
   @Test
   public void testConstantExpression()
   {
     assertFilterMatches(edf("1 + 1"), ImmutableList.of("0", "1", "2", "3", "4", "5", "6", "7", "8", "9"));
+    assertFilterMatches(edf("'true'"), ImmutableList.of("0", "1", "2", "3", "4", "5", "6", "7", "8", "9"));
+
     assertFilterMatches(edf("0 + 0"), ImmutableList.of());
+    assertFilterMatches(edf("'false'"), ImmutableList.of());
   }
 
   @Test
@@ -210,25 +235,47 @@ public class ExpressionFilterTest extends BaseFilterTest
       assertFilterMatches(edf("dim2 == dim3"), ImmutableList.of("2", "5", "8"));
     }
 
-    assertFilterMatches(edf("dim0 == dim4"), ImmutableList.of("3", "4", "5"));
+    // String vs. multi-value string
+    assertFilterMatchesSkipVectorize(edf("dim0 == dim4"), ImmutableList.of("3", "4", "5"));
   }
 
   @Test
   public void testMissingColumn()
   {
     if (NullHandling.replaceWithDefault()) {
-      assertFilterMatches(edf("missing == ''"), ImmutableList.of("0", "1", "2", "3", "4", "5", "6", "7", "8", "9"));
+      assertFilterMatches(
+          edf("missing == ''"),
+          ImmutableList.of("0", "1", "2", "3", "4", "5", "6", "7", "8", "9")
+      );
+      assertFilterMatches(
+          edf("missing == otherMissing"),
+          ImmutableList.of("0", "1", "2", "3", "4", "5", "6", "7", "8", "9")
+      );
     } else {
       // AS per SQL standard null == null returns false.
       assertFilterMatches(edf("missing == null"), ImmutableList.of());
+      // also this madness doesn't do madness
+      assertFilterMatches(
+          edf("missing == otherMissing"),
+          ImmutableList.of()
+      );
     }
     assertFilterMatches(edf("missing == '1'"), ImmutableList.of());
     assertFilterMatches(edf("missing == 2"), ImmutableList.of());
     if (NullHandling.replaceWithDefault()) {
       // missing equivaluent to 0
-      assertFilterMatches(edf("missing < '2'"), ImmutableList.of("0", "1", "2", "3", "4", "5", "6", "7", "8", "9"));
-      assertFilterMatches(edf("missing < 2"), ImmutableList.of("0", "1", "2", "3", "4", "5", "6", "7", "8", "9"));
-      assertFilterMatches(edf("missing < 2.0"), ImmutableList.of("0", "1", "2", "3", "4", "5", "6", "7", "8", "9"));
+      assertFilterMatches(
+          edf("missing < '2'"),
+          ImmutableList.of("0", "1", "2", "3", "4", "5", "6", "7", "8", "9")
+      );
+      assertFilterMatches(
+          edf("missing < 2"),
+          ImmutableList.of("0", "1", "2", "3", "4", "5", "6", "7", "8", "9")
+      );
+      assertFilterMatches(
+          edf("missing < 2.0"),
+          ImmutableList.of("0", "1", "2", "3", "4", "5", "6", "7", "8", "9")
+      );
     } else {
       // missing equivalent to null
       assertFilterMatches(edf("missing < '2'"), ImmutableList.of());
@@ -238,7 +285,7 @@ public class ExpressionFilterTest extends BaseFilterTest
     assertFilterMatches(edf("missing > '2'"), ImmutableList.of());
     assertFilterMatches(edf("missing > 2"), ImmutableList.of());
     assertFilterMatches(edf("missing > 2.0"), ImmutableList.of());
-    assertFilterMatches(edf("like(missing, '1%')"), ImmutableList.of());
+    assertFilterMatchesSkipVectorize(edf("like(missing, '1%')"), ImmutableList.of());
   }
 
   @Test
@@ -253,8 +300,28 @@ public class ExpressionFilterTest extends BaseFilterTest
     Assert.assertEquals(edf("missing == ''").getRequiredColumns(), Sets.newHashSet("missing"));
   }
 
+  @Test
+  public void testEqualsContract()
+  {
+    EqualsVerifier.forClass(ExpressionFilter.class)
+                  .withIgnoredFields("bindingDetails")
+                  .usingGetClass()
+                  .verify();
+  }
+
+  @Test
+  public void testRequiredColumnRewrite()
+  {
+    Filter filter = edf("dim1 == '1'").toFilter();
+    Assert.assertFalse(filter.supportsRequiredColumnRewrite());
+
+    expectedException.expect(UnsupportedOperationException.class);
+    expectedException.expectMessage("Required column rewrite is not supported by this filter.");
+    filter.rewriteRequiredColumns(ImmutableMap.of("invalidName", "dim1"));
+  }
+
   private static ExpressionDimFilter edf(final String expression)
   {
-    return new ExpressionDimFilter(expression, TestExprMacroTable.INSTANCE);
+    return new ExpressionDimFilter(expression, null, TestExprMacroTable.INSTANCE);
   }
 }

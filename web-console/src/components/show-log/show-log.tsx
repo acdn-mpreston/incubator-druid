@@ -16,14 +16,14 @@
  * limitations under the License.
  */
 
-import { Button, ButtonGroup, Checkbox, Intent } from '@blueprintjs/core';
-import axios from 'axios';
+import { AnchorButton, Button, ButtonGroup, Intent, Switch } from '@blueprintjs/core';
 import copy from 'copy-to-clipboard';
+import * as JSONBig from 'json-bigint-native';
 import React from 'react';
 
-import { AppToaster } from '../../singletons/toaster';
-import { UrlBaser } from '../../singletons/url-baser';
-import { downloadFile } from '../../utils';
+import { Loader } from '../../components';
+import { Api, AppToaster, UrlBaser } from '../../singletons';
+import { QueryManager, QueryState } from '../../utils';
 
 import './show-log.scss';
 
@@ -39,78 +39,114 @@ export interface ShowLogProps {
   endpoint: string;
   downloadFilename?: string;
   tailOffset?: number;
-  status: string | null;
+  status?: string;
 }
 
 export interface ShowLogState {
-  logValue: string;
+  logState: QueryState<string>;
   tail: boolean;
 }
 
 export class ShowLog extends React.PureComponent<ShowLogProps, ShowLogState> {
-  public log = React.createRef<HTMLTextAreaElement>();
+  static CHECK_INTERVAL = 2500;
+
+  private readonly showLogQueryManager: QueryManager<null, string>;
+  private readonly log = React.createRef<HTMLTextAreaElement>();
+  private interval: number | undefined;
 
   constructor(props: ShowLogProps, context: any) {
     super(props, context);
     this.state = {
-      logValue: '',
+      logState: QueryState.INIT,
       tail: true,
     };
-    this.getLogInfo();
+
+    this.showLogQueryManager = new QueryManager({
+      processQuery: async () => {
+        const { endpoint, tailOffset } = this.props;
+        const resp = await Api.instance.get(
+          endpoint + (tailOffset ? `?offset=-${tailOffset}` : ''),
+        );
+        const data = resp.data;
+
+        let logValue = typeof data === 'string' ? data : JSONBig.stringify(data, undefined, 2);
+        if (tailOffset) logValue = removeFirstPartialLine(logValue);
+        return logValue;
+      },
+      onStateChange: logState => {
+        if (logState.data) {
+          this.scrollToBottomIfNeeded();
+        }
+        this.setState({
+          logState,
+        });
+      },
+    });
   }
 
   componentDidMount(): void {
-    if (this.props.status === 'RUNNING') {
-      this.tail();
+    const { status } = this.props;
+
+    if (status === 'RUNNING') {
+      this.addTailer();
+    }
+
+    this.showLogQueryManager.runQuery(null);
+  }
+
+  componentWillUnmount(): void {
+    this.showLogQueryManager.terminate();
+    this.removeTailer();
+  }
+
+  private scrollToBottomIfNeeded(): void {
+    const { tail } = this.state;
+    if (!tail) return;
+
+    const { current } = this.log;
+    if (current) {
+      current.scrollTop = current.scrollHeight;
     }
   }
 
-  private getLogInfo = async (): Promise<void> => {
-    const { endpoint, tailOffset } = this.props;
-    try {
-      const resp = await axios.get(endpoint + (tailOffset ? `?offset=-${tailOffset}` : ''));
-      const data = resp.data;
-
-      let logValue = typeof data === 'string' ? data : JSON.stringify(data, undefined, 2);
-      if (tailOffset) logValue = removeFirstPartialLine(logValue);
-      this.setState({ logValue });
-    } catch (e) {
-      this.setState({
-        logValue: `Error: ` + e.response.data,
-      });
-    }
-  };
-
-  async tail() {
-    await this.getLogInfo();
-    if (this.state.tail) {
-      if (this.log.current) {
-        this.log.current.scrollTo(0, this.log.current.scrollHeight);
-      }
-      setTimeout(() => {
-        this.tail();
-      }, 2000);
-    }
+  addTailer() {
+    if (this.interval) return;
+    this.interval = setInterval(
+      () => this.showLogQueryManager.rerunLastQuery(true),
+      ShowLog.CHECK_INTERVAL,
+    ) as any;
   }
 
-  private handleCheckboxChange = () => {
+  removeTailer() {
+    if (!this.interval) return;
+    clearInterval(this.interval);
+    delete this.interval;
+  }
+
+  private readonly handleCheckboxChange = () => {
+    const { tail } = this.state;
+
+    const nextTail = !tail;
     this.setState({
-      tail: !this.state.tail,
+      tail: nextTail,
     });
-    if (!this.state.tail) {
-      this.tail();
+    if (nextTail) {
+      this.addTailer();
+    } else {
+      this.removeTailer();
     }
   };
 
-  render() {
+  render(): JSX.Element {
     const { endpoint, downloadFilename, status } = this.props;
-    const { logValue } = this.state;
+    const { logState } = this.state;
 
     return (
       <div className="show-log">
         <div className="top-actions">
           {status === 'RUNNING' && (
-            <Checkbox
+            <Switch
+              className="tail-log"
               label="Tail log"
               checked={this.state.tail}
               onChange={this.handleCheckboxChange}
@@ -118,17 +154,18 @@ export class ShowLog extends React.PureComponent<ShowLogProps, ShowLogState> {
           )}
           <ButtonGroup className="right-buttons">
             {downloadFilename && (
-              <Button
+              <AnchorButton
                 text="Save"
                 minimal
-                onClick={() => downloadFile(logValue, 'plain', downloadFilename)}
+                download={downloadFilename}
+                href={UrlBaser.base(endpoint)}
               />
             )}
             <Button
               text="Copy"
               minimal
               onClick={() => {
-                copy(logValue, { format: 'text/plain' });
+                copy(logState.data || '', { format: 'text/plain' });
                 AppToaster.show({
                   message: 'Log copied to clipboard',
                   intent: Intent.SUCCESS,
@@ -143,7 +180,16 @@ export class ShowLog extends React.PureComponent<ShowLogProps, ShowLogState> {
           </ButtonGroup>
         </div>
         <div className="main-area">
-          <textarea className="bp3-input" readOnly value={logValue} ref={this.log} />
+          {logState.loading ? (
+            <Loader />
+          ) : (
+            <textarea
+              className="bp3-input"
+              readOnly
+              value={logState.data || logState.getErrorMessage()}
+              ref={this.log}
+            />
+          )}
         </div>
       </div>
     );

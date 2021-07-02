@@ -25,42 +25,73 @@ import org.apache.druid.segment.Segment;
 import java.util.concurrent.ExecutorService;
 
 /**
- * An interface that defines the nitty gritty implementation detauls of a Query on a Segment
+ * An interface that defines the nitty gritty implementation details of a Query on a Segment
  */
 @ExtensionPoint
 public interface QueryRunnerFactory<T, QueryType extends Query<T>>
 {
   /**
-   * Given a specific segment, this method will create a QueryRunner.
+   * Given a specific segment, this method will create a {@link QueryRunner}.
    *
-   * The QueryRunner, when asked, will generate a Sequence of results based on the given segment.  This
-   * is the meat of the query processing and is where the results are actually generated.  Everything else
-   * is just merging and reduction logic.
+   * The {@link QueryRunner}, when asked, will generate a {@link org.apache.druid.java.util.common.guava.Sequence} of
+   * results based on the given segment.  This is the meat of the {@link Query} processing and is where the results are
+   * actually generated.  Everything else is just merging and reduction logic.
    *
-   * @param segment The segment to process
-   * @return A QueryRunner that, when asked, will generate a Sequence of results based on the given segment
+   * @param   segment The segment to process
+   * @return  A {@link QueryRunner} that, when asked, will generate a
+   *          {@link org.apache.druid.java.util.common.guava.Sequence} of results based on the given segment
    */
   QueryRunner<T> createRunner(Segment segment);
 
   /**
+   * @deprecated Use {@link #mergeRunners(QueryProcessingPool, Iterable)} instead.
    * Runners generated with createRunner() and combined into an Iterable in (time,shardId) order are passed
-   * along to this method with an ExecutorService.  The method should then return a QueryRunner that, when
-   * asked, will use the ExecutorService to run the base QueryRunners in some fashion.
+   * along to this method with an {@link ExecutorService}.  The method should then return a {@link QueryRunner} that,
+   * when asked, will use the {@link ExecutorService} to run the base QueryRunners in some fashion.
    *
-   * The vast majority of the time, this should be implemented with
+   * The vast majority of the time, this should be implemented with {@link ChainedExecutionQueryRunner}:
    *
    *     return new ChainedExecutionQueryRunner<>(queryExecutor, toolChest.getOrdering(), queryWatcher, queryRunners);
    *
    * Which will allow for parallel execution up to the maximum number of processing threads allowed.
    *
-   * @param queryExecutor ExecutorService to be used for parallel processing
-   * @param queryRunners Individual QueryRunner objects that produce some results
-   * @return a QueryRunner that, when asked, will use the ExecutorService to run the base QueryRunners
+   * @param queryExecutor   {@link ExecutorService} to be used for parallel processing
+   * @param queryRunners    Individual {@link QueryRunner} objects that produce some results
+   * @return a {@link QueryRunner} that, when asked, will use the {@link ExecutorService} to run the base
+   *                        {@link QueryRunner} collection.
    */
-  QueryRunner<T> mergeRunners(ExecutorService queryExecutor, Iterable<QueryRunner<T>> queryRunners);
+  @Deprecated
+  default QueryRunner<T> mergeRunners(ExecutorService queryExecutor, Iterable<QueryRunner<T>> queryRunners)
+  {
+    return mergeRunners(new ForwardingQueryProcessingPool(queryExecutor), queryRunners);
+  }
 
   /**
-   * Provides access to the toolchest for this specific query type.
+   * Runners generated with createRunner() and combined into an Iterable in (time,shardId) order are passed
+   * along to this method with an {@link QueryProcessingPool}.  The method should then return a {@link QueryRunner} that,
+   * when asked, will use the {@link QueryProcessingPool} to run the base QueryRunners in some fashion.
+   *
+   * The vast majority of the time, this should be implemented with {@link ChainedExecutionQueryRunner}:
+   *
+   *     return new ChainedExecutionQueryRunner<>(queryProcessingPool, toolChest.getOrdering(), queryWatcher, queryRunners);
+   *
+   * Which will allow for parallel execution up to the maximum number of processing threads allowed.
+   *
+   * Unlike {@link #mergeRunners(ExecutorService, Iterable)}, this method takes a {@link QueryProcessingPool} instead
+   * which allows custom implementations for prioritize query execution on segments.
+   *
+   * @param queryProcessingPool   {@link QueryProcessingPool} to be used for parallel processing
+   * @param queryRunners    Individual {@link QueryRunner} objects that produce some results
+   * @return a {@link QueryRunner} that, when asked, will use the {@link ExecutorService} to run the base
+   *                        {@link QueryRunner} collection.
+   */
+  QueryRunner<T> mergeRunners(
+      QueryProcessingPool queryProcessingPool,
+      Iterable<QueryRunner<T>> queryRunners
+  );
+
+  /**
+   * Provides access to the {@link QueryToolChest} for this specific {@link Query} type.
    *
    * @return an instance of the toolchest for this specific query type.
    */

@@ -32,6 +32,7 @@ import org.apache.druid.java.util.common.StringUtils;
 import org.joda.time.Chronology;
 import org.joda.time.DateTime;
 import org.joda.time.DateTimeZone;
+import org.joda.time.Interval;
 import org.joda.time.Period;
 import org.joda.time.chrono.ISOChronology;
 import org.joda.time.format.DateTimeFormat;
@@ -59,7 +60,7 @@ public class PeriodGranularity extends Granularity implements JsonSerializable
   )
   {
     this.period = Preconditions.checkNotNull(period, "period can't be null!");
-    Preconditions.checkArgument(!Period.ZERO.equals(period), "zero period is not acceptable in QueryGranularity!");
+    Preconditions.checkArgument(!Period.ZERO.equals(period), "zero period is not acceptable in PeriodGranularity!");
     this.chronology = tz == null ? ISOChronology.getInstanceUTC() : ISOChronology.getInstance(tz);
     if (origin == null) {
       // default to origin in given time zone when aligning multi-period granularities
@@ -109,6 +110,18 @@ public class PeriodGranularity extends Granularity implements JsonSerializable
   }
 
   @Override
+  public long bucketStart(long time)
+  {
+    return truncate(time);
+  }
+
+  @Override
+  public long increment(long t)
+  {
+    return chronology.add(period, t, 1);
+  }
+
+  @Override
   public DateTime increment(DateTime time)
   {
     return new DateTime(increment(time.getMillis()), getTimeZone());
@@ -134,6 +147,12 @@ public class PeriodGranularity extends Granularity implements JsonSerializable
     }
 
     return null;
+  }
+
+  @Override
+  public boolean isAligned(Interval interval)
+  {
+    return bucket(interval.getStart()).equals(interval);
   }
 
   @Override
@@ -210,11 +229,6 @@ public class PeriodGranularity extends Granularity implements JsonSerializable
       }
     }
     return false;
-  }
-
-  private long increment(long t)
-  {
-    return chronology.add(period, t, 1);
   }
 
   private long truncate(long t)
@@ -300,8 +314,7 @@ public class PeriodGranularity extends Granularity implements JsonSerializable
         }
         return t;
       } else {
-        t = chronology.hourOfDay().roundFloor(t);
-        return chronology.hourOfDay().set(t, 0);
+        return chronology.dayOfMonth().roundFloor(t);
       }
     }
 
@@ -323,8 +336,7 @@ public class PeriodGranularity extends Granularity implements JsonSerializable
         }
         return t;
       } else {
-        t = chronology.minuteOfHour().roundFloor(t);
-        return chronology.minuteOfHour().set(t, 0);
+        return chronology.hourOfDay().roundFloor(t);
       }
     }
 
@@ -343,8 +355,7 @@ public class PeriodGranularity extends Granularity implements JsonSerializable
         }
         return t;
       } else {
-        t = chronology.secondOfMinute().roundFloor(t);
-        return chronology.secondOfMinute().set(t, 0);
+        return chronology.minuteOfHour().roundFloor(t);
       }
     }
 

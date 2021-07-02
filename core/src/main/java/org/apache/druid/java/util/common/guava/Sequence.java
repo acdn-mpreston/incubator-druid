@@ -19,6 +19,8 @@
 
 package org.apache.druid.java.util.common.guava;
 
+import com.google.common.base.Preconditions;
+import com.google.common.base.Predicate;
 import com.google.common.collect.Ordering;
 
 import java.io.Closeable;
@@ -53,7 +55,7 @@ public interface Sequence<T>
    */
   <OutType> OutType accumulate(OutType initValue, Accumulator<OutType, T> accumulator);
 
- /**
+  /**
    * Return a Yielder for accumulated sequence.
    *
    * @param initValue   the initial value to pass along to start the accumulation.
@@ -71,19 +73,34 @@ public interface Sequence<T>
     return new MappedSequence<>(this, mapper);
   }
 
+  default Sequence<T> filter(Predicate<? super T> predicate)
+  {
+    return Sequences.filter(this, predicate);
+  }
+
   /**
    * This will materialize the entire sequence.  Use at your own risk.
-   *
-   * Several benchmarks rely on this method to eagerly accumulate Sequences to ArrayLists.  e.g.
-   * GroupByBenchmark.
    */
   default List<T> toList()
   {
     return accumulate(new ArrayList<>(), Accumulators.list());
   }
 
+  default Sequence<T> skip(long skip)
+  {
+    Preconditions.checkArgument(skip >= 0, "skip >= 0");
+
+    if (skip >= 1) {
+      return new SkippingSequence<>(this, skip);
+    } else {
+      return this;
+    }
+  }
+
   default Sequence<T> limit(long limit)
   {
+    Preconditions.checkArgument(limit >= 0, "limit >= 0");
+
     return new LimitedSequence<>(this, limit);
   }
 

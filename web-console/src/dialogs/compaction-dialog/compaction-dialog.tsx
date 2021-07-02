@@ -17,121 +17,77 @@
  */
 
 import { Button, Classes, Dialog, Intent } from '@blueprintjs/core';
-import React from 'react';
+import React, { useState } from 'react';
 
-import { AutoForm } from '../../components';
+import { AutoForm, FormJsonSelector, FormJsonTabs, JsonInput } from '../../components';
+import { COMPACTION_CONFIG_FIELDS, CompactionConfig } from '../../druid-models';
 
 import './compaction-dialog.scss';
 
 export interface CompactionDialogProps {
   onClose: () => void;
-  onSave: (config: any) => void;
+  onSave: (compactionConfig: CompactionConfig) => void;
   onDelete: () => void;
   datasource: string;
-  configData: any;
+  compactionConfig: CompactionConfig | undefined;
 }
 
-export interface CompactionDialogState {
-  currentConfig: Record<string, any> | null;
-  allJSONValid: boolean;
-}
+export const CompactionDialog = React.memo(function CompactionDialog(props: CompactionDialogProps) {
+  const { datasource, compactionConfig, onSave, onClose, onDelete } = props;
 
-export class CompactionDialog extends React.PureComponent<
-  CompactionDialogProps,
-  CompactionDialogState
-> {
-  constructor(props: CompactionDialogProps) {
-    super(props);
-    this.state = {
-      currentConfig: null,
-      allJSONValid: true,
-    };
-  }
-
-  componentDidMount(): void {
-    const { datasource, configData } = this.props;
-    let config: Record<string, any> = {
+  const [currentTab, setCurrentTab] = useState<FormJsonTabs>('form');
+  const [currentConfig, setCurrentConfig] = useState<CompactionConfig>(
+    compactionConfig || {
       dataSource: datasource,
-      inputSegmentSizeBytes: 419430400,
-      maxNumSegmentsToCompact: 150,
-      skipOffsetFromLatest: 'P1D',
-      targetCompactionSizeBytes: 419430400,
-      taskContext: null,
-      taskPriority: 25,
-      tuningConfig: null,
-    };
-    if (configData !== undefined) {
-      config = configData;
-    }
-    this.setState({
-      currentConfig: config,
-    });
-  }
+      tuningConfig: { partitionsSpec: { type: 'dynamic' } },
+    },
+  );
+  const [jsonError, setJsonError] = useState<Error | undefined>();
 
-  render() {
-    const { onClose, onSave, onDelete, datasource, configData } = this.props;
-    const { currentConfig, allJSONValid } = this.state;
-    return (
-      <Dialog
-        className="compaction-dialog"
-        isOpen
-        onClose={onClose}
-        canOutsideClickClose={false}
-        title={`Compaction config: ${datasource}`}
-      >
-        <AutoForm
-          fields={[
-            {
-              name: 'inputSegmentSizeBytes',
-              type: 'number',
-            },
-            {
-              name: 'maxNumSegmentsToCompact',
-              type: 'number',
-            },
-            {
-              name: 'skipOffsetFromLatest',
-              type: 'string',
-            },
-            {
-              name: 'targetCompactionSizeBytes',
-              type: 'number',
-            },
-            {
-              name: 'taskContext',
-              type: 'json',
-            },
-            {
-              name: 'taskPriority',
-              type: 'number',
-            },
-            {
-              name: 'tuningConfig',
-              type: 'json',
-            },
-          ]}
-          model={currentConfig}
-          onChange={m => this.setState({ currentConfig: m })}
-          updateJSONValidity={e => this.setState({ allJSONValid: e })}
-        />
-        <div className={Classes.DIALOG_FOOTER}>
-          <div className={Classes.DIALOG_FOOTER_ACTIONS}>
-            <Button
-              text="Delete"
-              intent={Intent.DANGER}
-              onClick={onDelete}
-              disabled={configData === undefined}
-            />
-            <Button text="Close" onClick={onClose} />
-            <Button
-              text="Submit"
-              intent={Intent.PRIMARY}
-              onClick={() => onSave(currentConfig)}
-              disabled={currentConfig === null || !allJSONValid}
-            />
-          </div>
+  const issueWithCurrentConfig = AutoForm.issueWithModel(currentConfig, COMPACTION_CONFIG_FIELDS);
+  const disableSubmit = Boolean(jsonError || issueWithCurrentConfig);
+
+  return (
+    <Dialog
+      className="compaction-dialog"
+      isOpen
+      onClose={onClose}
+      canOutsideClickClose={false}
+      title={`Compaction config: ${datasource}`}
+    >
+      <FormJsonSelector tab={currentTab} onChange={setCurrentTab} />
+      <div className="content">
+        {currentTab === 'form' ? (
+          <AutoForm
+            fields={COMPACTION_CONFIG_FIELDS}
+            model={currentConfig}
+            onChange={m => setCurrentConfig(m)}
+          />
+        ) : (
+          <JsonInput
+            value={currentConfig}
+            onChange={v => {
+              setCurrentConfig(v);
+              setJsonError(undefined);
+            }}
+            onError={setJsonError}
+            issueWithValue={value => AutoForm.issueWithModel(value, COMPACTION_CONFIG_FIELDS)}
+            height="100%"
+          />
+        )}
+      </div>
+      <div className={Classes.DIALOG_FOOTER}>
+        <div className={Classes.DIALOG_FOOTER_ACTIONS}>
+          {compactionConfig && <Button text="Delete" intent={Intent.DANGER} onClick={onDelete} />}
+          <Button text="Close" onClick={onClose} />
+          <Button
+            text="Submit"
+            intent={Intent.PRIMARY}
+            disabled={disableSubmit}
+            onClick={() => onSave(currentConfig)}
+          />
         </div>
-      </Dialog>
-    );
-  }
-}
+      </div>
+    </Dialog>
+  );
+});

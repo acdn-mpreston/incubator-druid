@@ -53,7 +53,9 @@ import org.apache.druid.segment.realtime.firehose.IngestSegmentFirehose;
 import org.apache.druid.segment.realtime.firehose.WindowedStorageAdapter;
 import org.apache.druid.segment.transform.TransformSpec;
 import org.apache.druid.timeline.DataSegment;
+import org.apache.druid.timeline.DataSegment.PruneSpecsHolder;
 import org.apache.druid.timeline.partition.HashBasedNumberedShardSpec;
+import org.apache.druid.timeline.partition.HashPartitionFunction;
 import org.joda.time.Interval;
 import org.junit.Assert;
 import org.junit.Rule;
@@ -82,7 +84,7 @@ public class BatchDeltaIngestionTest
     MAPPER.registerSubtypes(new NamedType(HashBasedNumberedShardSpec.class, "hashed"));
     InjectableValues inject = new InjectableValues.Std()
         .addValue(ObjectMapper.class, MAPPER)
-        .addValue(DataSegment.PruneLoadSpecHolder.class, DataSegment.PruneLoadSpecHolder.DEFAULT);
+        .addValue(PruneSpecsHolder.class, PruneSpecsHolder.DEFAULT);
     MAPPER.setInjectableValues(inject);
     INDEX_IO = HadoopDruidIndexerConfig.INDEX_IO;
 
@@ -161,7 +163,7 @@ public class BatchDeltaIngestionTest
   /**
    * By default re-indexing expects same aggregators as used by original indexing job. But, with additional flag
    * "useNewAggs" in DatasourcePathSpec, user can optionally have any set of aggregators.
-   * See https://github.com/apache/incubator-druid/issues/5277 .
+   * See https://github.com/apache/druid/issues/5277 .
    */
   @Test
   public void testReindexingWithNewAggregators() throws Exception
@@ -370,7 +372,15 @@ public class BatchDeltaIngestionTest
   ) throws Exception
   {
     IndexGeneratorJob job = new IndexGeneratorJob(config);
-    Assert.assertTrue(JobHelper.runJobs(ImmutableList.of(job), config));
+    Assert.assertTrue(JobHelper.runJobs(ImmutableList.of(job)));
+
+    List<DataSegmentAndIndexZipFilePath> dataSegmentAndIndexZipFilePaths =
+        IndexGeneratorJob.getPublishedSegmentAndIndexZipFilePaths(config);
+    JobHelper.renameIndexFilesForSegments(config.getSchema(), dataSegmentAndIndexZipFilePaths);
+
+    JobHelper.maybeDeleteIntermediatePath(true, config.getSchema());
+    File workingPath = new File(config.makeIntermediatePath().toUri().getPath());
+    Assert.assertFalse(workingPath.exists());
 
     File segmentFolder = new File(
         StringUtils.format(
@@ -462,6 +472,8 @@ public class BatchDeltaIngestionTest
                 null,
                 null,
                 null,
+                null,
+                null,
                 false,
                 false,
                 false,
@@ -471,9 +483,9 @@ public class BatchDeltaIngestionTest
                 false,
                 null,
                 null,
+                false,
+                false,
                 null,
-                false,
-                false,
                 null,
                 null,
                 null,
@@ -487,7 +499,15 @@ public class BatchDeltaIngestionTest
             INTERVAL_FULL.getStartMillis(),
             ImmutableList.of(
                 new HadoopyShardSpec(
-                    new HashBasedNumberedShardSpec(0, 1, null, HadoopDruidIndexerConfig.JSON_MAPPER),
+                    new HashBasedNumberedShardSpec(
+                        0,
+                        1,
+                        0,
+                        1,
+                        null,
+                        HashPartitionFunction.MURMUR3_32_ABS,
+                        HadoopDruidIndexerConfig.JSON_MAPPER
+                    ),
                     0
                 )
             )

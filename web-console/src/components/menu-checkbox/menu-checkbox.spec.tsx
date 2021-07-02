@@ -16,14 +16,20 @@
  * limitations under the License.
  */
 
+import { render } from '@testing-library/react';
 import React from 'react';
-import { render } from 'react-testing-library';
 
 import { MenuCheckbox } from './menu-checkbox';
 
-describe('menu checkbox', () => {
-  it('matches snapshot', () => {
-    const menuCheckbox = <MenuCheckbox />;
+describe('MenuCheckbox', () => {
+  it('matches snapshot checked', () => {
+    const menuCheckbox = <MenuCheckbox text="hello" checked onChange={() => {}} />;
+    const { container } = render(menuCheckbox);
+    expect(container.firstChild).toMatchSnapshot();
+  });
+
+  it('matches snapshot unchecked', () => {
+    const menuCheckbox = <MenuCheckbox text="hello" checked={false} onChange={() => {}} />;
     const { container } = render(menuCheckbox);
     expect(container.firstChild).toMatchSnapshot();
   });

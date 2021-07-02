@@ -26,13 +26,16 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableMap;
 import com.google.inject.Inject;
 import com.google.inject.Provider;
+import org.apache.calcite.avatica.remote.ProtobufTranslation;
+import org.apache.calcite.avatica.remote.ProtobufTranslationImpl;
+import org.apache.calcite.avatica.remote.Service;
+import org.apache.commons.io.IOUtils;
 import org.apache.druid.client.selector.Server;
 import org.apache.druid.guice.annotations.Json;
 import org.apache.druid.guice.annotations.Smile;
 import org.apache.druid.guice.http.DruidHttpClientConfig;
 import org.apache.druid.java.util.common.DateTimes;
 import org.apache.druid.java.util.common.IAE;
-import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.java.util.common.jackson.JacksonUtils;
 import org.apache.druid.java.util.emitter.EmittingLogger;
 import org.apache.druid.java.util.emitter.service.ServiceEmitter;
@@ -78,6 +81,9 @@ public class AsyncQueryForwardingServlet extends AsyncProxyServlet implements Qu
   @Deprecated // use SmileMediaTypes.APPLICATION_JACKSON_SMILE
   private static final String APPLICATION_SMILE = "application/smile";
 
+  private static final String AVATICA_CONNECTION_ID = "connectionId";
+  private static final String AVATICA_STATEMENT_HANDLE = "statementHandle";
+
   private static final String HOST_ATTRIBUTE = "org.apache.druid.proxy.to.host";
   private static final String SCHEME_ATTRIBUTE = "org.apache.druid.proxy.to.host.scheme";
   private static final String QUERY_ATTRIBUTE = "org.apache.druid.proxy.query";
@@ -116,6 +122,7 @@ public class AsyncQueryForwardingServlet extends AsyncProxyServlet implements Qu
   private final RequestLogger requestLogger;
   private final GenericQueryMetricsFactory queryMetricsFactory;
   private final AuthenticatorMapper authenticatorMapper;
+  private final ProtobufTranslation protobufTranslation;
 
   private HttpClient broadcastClient;
 
@@ -143,6 +150,7 @@ public class AsyncQueryForwardingServlet extends AsyncProxyServlet implements Qu
     this.requestLogger = requestLogger;
     this.queryMetricsFactory = queryMetricsFactory;
     this.authenticatorMapper = authenticatorMapper;
+    this.protobufTranslation = new ProtobufTranslationImpl();
   }
 
   @Override
@@ -189,9 +197,16 @@ public class AsyncQueryForwardingServlet extends AsyncProxyServlet implements Qu
     // them as a generic request.
     final boolean isQueryEndpoint = requestURI.startsWith("/druid/v2") && !requestURI.startsWith("/druid/v2/sql");
 
-    final boolean isAvatica = requestURI.startsWith("/druid/v2/sql/avatica");
+    final boolean isAvaticaJson = requestURI.startsWith("/druid/v2/sql/avatica");
+    final boolean isAvaticaPb = requestURI.startsWith("/druid/v2/sql/avatica-protobuf");
 
-    if (isAvatica) {
+    if (isAvaticaPb) {
+      byte[] requestBytes = IOUtils.toByteArray(request.getInputStream());
+      Service.Request protobufRequest = this.protobufTranslation.parseRequest(requestBytes);
+      String connectionId = getAvaticaProtobufConnectionId(protobufRequest);
+      targetServer = hostFinder.findServerAvatica(connectionId);
+      request.setAttribute(AVATICA_QUERY_ATTRIBUTE, requestBytes);
+    } else if (isAvaticaJson) {
       Map<String, Object> requestMap = objectMapper.readValue(
           request.getInputStream(),
           JacksonUtils.TYPE_REFERENCE_MAP_STRING_OBJECT
@@ -373,7 +388,7 @@ public class AsyncQueryForwardingServlet extends AsyncProxyServlet implements Qu
   static String makeURI(String scheme, String host, String requestURI, String rawQueryString)
   {
     return JettyUtils.concatenateForRewrite(
-        StringUtils.format("%s://%s", scheme, host),
+        scheme + "://" + host,
         requestURI,
         rawQueryString
     );
@@ -422,30 +437,138 @@ public class AsyncQueryForwardingServlet extends AsyncProxyServlet implements Qu
     return interruptedQueryCount.get();
   }
 
-  private static String getAvaticaConnectionId(Map<String, Object> requestMap)
+  @Override
+  public long getTimedOutQueryCount()
   {
-    Object connectionIdObj = requestMap.get("connectionId");
+    // Query timeout metric is not relevant here and this metric is already being tracked in the Broker and the
+    // data nodes using QueryResource
+    return 0L;
+  }
+
+  @VisibleForTesting
+  static String getAvaticaConnectionId(Map<String, Object> requestMap)
+  {
+    // avatica commands always have a 'connectionId'. If commands are not part of a prepared statement, this appears at
+    // the top level of the request, but if it is part of a statement, then it will be nested in the 'statementHandle'.
+    // see https://calcite.apache.org/avatica/docs/json_reference.html#requests for more details
+    Object connectionIdObj = requestMap.get(AVATICA_CONNECTION_ID);
     if (connectionIdObj == null) {
-      throw new IAE("Received an Avatica request without a connectionId.");
+      Object statementHandle = requestMap.get(AVATICA_STATEMENT_HANDLE);
+      if (statementHandle != null && statementHandle instanceof Map) {
+        connectionIdObj = ((Map) statementHandle).get(AVATICA_CONNECTION_ID);
+      }
+    }
+
+    if (connectionIdObj == null) {
+      throw new IAE("Received an Avatica request without a %s.", AVATICA_CONNECTION_ID);
     }
     if (!(connectionIdObj instanceof String)) {
-      throw new IAE("Received an Avatica request with a non-String connectionId.");
+      throw new IAE("Received an Avatica request with a non-String %s.", AVATICA_CONNECTION_ID);
     }
 
     return (String) connectionIdObj;
   }
 
-  private class MetricsEmittingProxyResponseListener extends ProxyResponseListener
+  static String getAvaticaProtobufConnectionId(Service.Request request)
+  {
+    if (request instanceof Service.CatalogsRequest) {
+      return ((Service.CatalogsRequest) request).connectionId;
+    }
+
+    if (request instanceof Service.SchemasRequest) {
+      return ((Service.SchemasRequest) request).connectionId;
+    }
+
+    if (request instanceof Service.TablesRequest) {
+      return ((Service.TablesRequest) request).connectionId;
+    }
+
+    if (request instanceof Service.TypeInfoRequest) {
+      return ((Service.TypeInfoRequest) request).connectionId;
+    }
+
+    if (request instanceof Service.ColumnsRequest) {
+      return ((Service.ColumnsRequest) request).connectionId;
+    }
+
+    if (request instanceof Service.ExecuteRequest) {
+      return ((Service.ExecuteRequest) request).statementHandle.connectionId;
+    }
+
+    if (request instanceof Service.TableTypesRequest) {
+      return ((Service.TableTypesRequest) request).connectionId;
+    }
+
+    if (request instanceof Service.PrepareRequest) {
+      return ((Service.PrepareRequest) request).connectionId;
+    }
+
+    if (request instanceof Service.PrepareAndExecuteRequest) {
+      return ((Service.PrepareAndExecuteRequest) request).connectionId;
+    }
+
+    if (request instanceof Service.FetchRequest) {
+      return ((Service.FetchRequest) request).connectionId;
+    }
+
+    if (request instanceof Service.CreateStatementRequest) {
+      return ((Service.CreateStatementRequest) request).connectionId;
+    }
+
+    if (request instanceof Service.CloseStatementRequest) {
+      return ((Service.CloseStatementRequest) request).connectionId;
+    }
+
+    if (request instanceof Service.OpenConnectionRequest) {
+      return ((Service.OpenConnectionRequest) request).connectionId;
+    }
+
+    if (request instanceof Service.CloseConnectionRequest) {
+      return ((Service.CloseConnectionRequest) request).connectionId;
+    }
+
+    if (request instanceof Service.ConnectionSyncRequest) {
+      return ((Service.ConnectionSyncRequest) request).connectionId;
+    }
+
+    if (request instanceof Service.DatabasePropertyRequest) {
+      return ((Service.DatabasePropertyRequest) request).connectionId;
+    }
+
+    if (request instanceof Service.SyncResultsRequest) {
+      return ((Service.SyncResultsRequest) request).connectionId;
+    }
+
+    if (request instanceof Service.CommitRequest) {
+      return ((Service.CommitRequest) request).connectionId;
+    }
+
+    if (request instanceof Service.RollbackRequest) {
+      return ((Service.RollbackRequest) request).connectionId;
+    }
+
+    if (request instanceof Service.PrepareAndExecuteBatchRequest) {
+      return ((Service.PrepareAndExecuteBatchRequest) request).connectionId;
+    }
+
+    if (request instanceof Service.ExecuteBatchRequest) {
+      return ((Service.ExecuteBatchRequest) request).connectionId;
+    }
+
+    throw new IAE("Received an unknown Avatica protobuf request");
+  }
+
+  private class MetricsEmittingProxyResponseListener<T> extends ProxyResponseListener
   {
     private final HttpServletRequest req;
     private final HttpServletResponse res;
-    private final Query query;
+    private final Query<T> query;
     private final long startNs;
 
     public MetricsEmittingProxyResponseListener(
         HttpServletRequest request,
         HttpServletResponse response,
-        Query query,
+        Query<T> query,
         long startNs
     )
     {

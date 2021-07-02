@@ -45,10 +45,12 @@ import org.apache.druid.server.security.AuthenticatorMapper;
 import org.apache.druid.server.security.ForbiddenException;
 import org.apache.druid.sql.SqlLifecycleFactory;
 import org.apache.druid.sql.calcite.planner.Calcites;
+import org.apache.druid.sql.calcite.planner.PlannerContext;
 import org.joda.time.Interval;
 
 import javax.annotation.Nonnull;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -103,9 +105,13 @@ public class DruidMeta extends MetaImpl
   {
     // Build connection context.
     final ImmutableMap.Builder<String, Object> context = ImmutableMap.builder();
-    for (Map.Entry<String, String> entry : info.entrySet()) {
-      context.put(entry);
+    if (info != null) {
+      for (Map.Entry<String, String> entry : info.entrySet()) {
+        context.put(entry);
+      }
     }
+    // we don't want to stringify arrays for JDBC ever because avatica needs to handle this
+    context.put(PlannerContext.CTX_SQL_STRINGIFY_ARRAYS, false);
     openDruidConnection(ch.id, context.build());
   }
 
@@ -187,13 +193,13 @@ public class DruidMeta extends MetaImpl
     if (authenticationResult == null) {
       throw new ForbiddenException("Authentication failed.");
     }
-    final Signature signature = druidStatement.prepare(sql, maxRowCount, authenticationResult).getSignature();
-    final Frame firstFrame = druidStatement.execute()
+    druidStatement.prepare(sql, maxRowCount, authenticationResult);
+    final Frame firstFrame = druidStatement.execute(Collections.emptyList())
                                            .nextFrame(
                                                DruidStatement.START_OFFSET,
                                                getEffectiveMaxRowsPerFrame(maxRowsInFirstFrame)
                                            );
-
+    final Signature signature = druidStatement.getSignature();
     return new ExecuteResult(
         ImmutableList.of(
             MetaResultSet.create(
@@ -256,16 +262,14 @@ public class DruidMeta extends MetaImpl
       final int maxRowsInFirstFrame
   ) throws NoSuchStatementException
   {
-    Preconditions.checkArgument(parameterValues.isEmpty(), "Expected parameterValues to be empty");
-
     final DruidStatement druidStatement = getDruidStatement(statement);
-    final Signature signature = druidStatement.getSignature();
-    final Frame firstFrame = druidStatement.execute()
+    final Frame firstFrame = druidStatement.execute(parameterValues)
                                            .nextFrame(
                                                DruidStatement.START_OFFSET,
                                                getEffectiveMaxRowsPerFrame(maxRowsInFirstFrame)
                                            );
 
+    final Signature signature = druidStatement.getSignature();
     return new ExecuteResult(
         ImmutableList.of(
             MetaResultSet.create(
@@ -365,7 +369,7 @@ public class DruidMeta extends MetaImpl
     }
 
     if (schemaPattern.s != null) {
-      whereBuilder.add("SCHEMATA.SCHEMA_NAME LIKE " + Calcites.escapeStringLiteral(schemaPattern.s));
+      whereBuilder.add("SCHEMATA.SCHEMA_NAME LIKE " + withEscapeClause(schemaPattern.s));
     }
 
     final String where = whereBuilder.isEmpty() ? "" : "WHERE " + Joiner.on(" AND ").join(whereBuilder);
@@ -396,11 +400,11 @@ public class DruidMeta extends MetaImpl
     }
 
     if (schemaPattern.s != null) {
-      whereBuilder.add("TABLES.TABLE_SCHEMA LIKE " + Calcites.escapeStringLiteral(schemaPattern.s));
+      whereBuilder.add("TABLES.TABLE_SCHEMA LIKE " + withEscapeClause(schemaPattern.s));
     }
 
     if (tableNamePattern.s != null) {
-      whereBuilder.add("TABLES.TABLE_NAME LIKE " + Calcites.escapeStringLiteral(tableNamePattern.s));
+      whereBuilder.add("TABLES.TABLE_NAME LIKE " + withEscapeClause(tableNamePattern.s));
     }
 
     if (typeList != null) {
@@ -447,15 +451,16 @@ public class DruidMeta extends MetaImpl
     }
 
     if (schemaPattern.s != null) {
-      whereBuilder.add("COLUMNS.TABLE_SCHEMA LIKE " + Calcites.escapeStringLiteral(schemaPattern.s));
+      whereBuilder.add("COLUMNS.TABLE_SCHEMA LIKE " + withEscapeClause(schemaPattern.s));
     }
 
     if (tableNamePattern.s != null) {
-      whereBuilder.add("COLUMNS.TABLE_NAME LIKE " + Calcites.escapeStringLiteral(tableNamePattern.s));
+      whereBuilder.add("COLUMNS.TABLE_NAME LIKE " + withEscapeClause(tableNamePattern.s));
     }
 
     if (columnNamePattern.s != null) {
-      whereBuilder.add("COLUMNS.COLUMN_NAME LIKE " + Calcites.escapeStringLiteral(columnNamePattern.s));
+      whereBuilder.add("COLUMNS.COLUMN_NAME LIKE "
+                       + withEscapeClause(columnNamePattern.s));
     }
 
     final String where = whereBuilder.isEmpty() ? "" : "WHERE " + Joiner.on(" AND ").join(whereBuilder);
@@ -627,16 +632,44 @@ public class DruidMeta extends MetaImpl
     }
   }
 
+  /**
+   * Determine JDBC 'frame' size, that is the number of results which will be returned to a single
+   * {@link java.sql.ResultSet}. This value corresponds to {@link java.sql.Statement#setFetchSize(int)} (which is a user
+   * hint, we don't have to honor it), and this method modifies it, ensuring the actual chosen value falls within
+   * {@link AvaticaServerConfig#minRowsPerFrame} and {@link AvaticaServerConfig#maxRowsPerFrame}.
+   *
+   * A value of -1 supplied as input indicates that the client has no preference for fetch size, and can handle
+   * unlimited results (at our discretion). Similarly, a value of -1 for {@link AvaticaServerConfig#maxRowsPerFrame}
+   * also indicates that there is no upper limit on fetch size on the server side.
+   *
+   * {@link AvaticaServerConfig#minRowsPerFrame} must be configured to a value greater than 0, because it will be
+   * checked against if any additional frames are required (which means one of the input or maximum was set to a value
+   * other than -1).
+   */
   private int getEffectiveMaxRowsPerFrame(int clientMaxRowsPerFrame)
   {
     // no configured row limit, use the client provided limit
     if (config.getMaxRowsPerFrame() < 0) {
-      return clientMaxRowsPerFrame;
+      return adjustForMinumumRowsPerFrame(clientMaxRowsPerFrame);
     }
     // client provided no row limit, use the configured row limit
     if (clientMaxRowsPerFrame < 0) {
-      return config.getMaxRowsPerFrame();
+      return adjustForMinumumRowsPerFrame(config.getMaxRowsPerFrame());
     }
-    return Math.min(clientMaxRowsPerFrame, config.getMaxRowsPerFrame());
+    return adjustForMinumumRowsPerFrame(Math.min(clientMaxRowsPerFrame, config.getMaxRowsPerFrame()));
+  }
+
+  /**
+   * coerce fetch size to be, at minimum, {@link AvaticaServerConfig#minRowsPerFrame}
+   */
+  private int adjustForMinumumRowsPerFrame(int rowsPerFrame)
+  {
+    final int adjustedRowsPerFrame = Math.max(config.getMinRowsPerFrame(), rowsPerFrame);
+    return adjustedRowsPerFrame;
+  }
+
+  private static String withEscapeClause(String toEscape)
+  {
+    return Calcites.escapeStringLiteral(toEscape) + " ESCAPE '\\'";
   }
 }

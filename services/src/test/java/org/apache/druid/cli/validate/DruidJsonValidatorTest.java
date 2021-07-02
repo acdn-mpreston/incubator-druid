@@ -152,12 +152,13 @@ public class DruidJsonValidatorTest
             ),
             new RealtimeIOConfig(
                 new LocalFirehoseFactory(new File("lol"), "rofl", null),
-                (schema, config, metrics) -> null,
-                null
+                (schema, config, metrics) -> null
             ),
 
             new RealtimeTuningConfig(
+                null,
                 1,
+                null,
                 null,
                 new Period("PT10M"),
                 null,
@@ -167,7 +168,7 @@ public class DruidJsonValidatorTest
                 1,
                 NoneShardSpec.instance(),
                 new IndexSpec(),
-                null,
+                new IndexSpec(),
                 0,
                 0,
                 true,

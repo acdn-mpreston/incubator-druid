@@ -29,11 +29,11 @@ import org.apache.druid.java.util.common.Intervals;
 import org.apache.druid.java.util.common.jackson.JacksonUtils;
 import org.apache.druid.query.BaseQuery;
 import org.apache.druid.query.DataSource;
-import org.apache.druid.query.LegacyDataSource;
 import org.apache.druid.query.Query;
 import org.apache.druid.query.QueryDataSource;
 import org.apache.druid.query.QueryRunner;
 import org.apache.druid.query.QuerySegmentWalker;
+import org.apache.druid.query.TableDataSource;
 import org.apache.druid.query.UnionDataSource;
 import org.apache.druid.query.filter.DimFilter;
 import org.apache.druid.query.spec.QuerySegmentSpec;
@@ -42,7 +42,9 @@ import org.apache.druid.server.RequestLogLine;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.core.Appender;
 import org.apache.logging.log4j.core.Logger;
+import org.apache.logging.log4j.core.LoggerContext;
 import org.apache.logging.log4j.core.appender.OutputStreamAppender;
+import org.apache.logging.log4j.core.config.Configuration;
 import org.apache.logging.log4j.core.layout.JsonLayout;
 import org.joda.time.DateTime;
 import org.joda.time.Interval;
@@ -63,15 +65,15 @@ import java.util.Map;
 // Mostly just test that it doesn't crash
 public class LoggingRequestLoggerTest
 {
-  private static final ObjectMapper mapper = new DefaultObjectMapper();
-  private static final ByteArrayOutputStream baos = new ByteArrayOutputStream();
+  private static final ObjectMapper MAPPER = new DefaultObjectMapper();
+  private static final ByteArrayOutputStream BAOS = new ByteArrayOutputStream();
   private static Appender appender;
 
   final DateTime timestamp = DateTimes.of("2016-01-01T00:00:00Z");
   final String remoteAddr = "some.host.tld";
   final Map<String, Object> queryContext = ImmutableMap.of("foo", "bar");
   final Query query = new FakeQuery(
-      new LegacyDataSource("datasource"),
+      new TableDataSource("datasource"),
       new QuerySegmentSpec()
       {
         @Override
@@ -125,7 +127,7 @@ public class LoggingRequestLoggerTest
   );
 
   final Query unionQuery = new FakeQuery(
-      new UnionDataSource(ImmutableList.of(new LegacyDataSource("A"), new LegacyDataSource("B"))),
+      new UnionDataSource(ImmutableList.of(new TableDataSource("A"), new TableDataSource("B"))),
       new QuerySegmentSpec()
       {
         @Override
@@ -154,11 +156,25 @@ public class LoggingRequestLoggerTest
   @BeforeClass
   public static void setUpStatic()
   {
+    LoggerContext loggerContext = (LoggerContext) LogManager.getContext(false);
+    Configuration configuration = loggerContext.getConfiguration();
     appender = OutputStreamAppender
         .newBuilder()
         .setName("test stream")
-        .setTarget(baos)
-        .setLayout(JsonLayout.createLayout(false, true, false, true, true, StandardCharsets.UTF_8))
+        .setTarget(BAOS)
+        .setLayout(JsonLayout.createLayout(
+            configuration,
+            false,
+            true,
+            true,
+            false,
+            true,
+            true,
+            "[",
+            "]",
+            StandardCharsets.UTF_8,
+            true
+        ))
         .build();
     final Logger logger = (Logger)
         LogManager.getLogger(LoggingRequestLogger.class);
@@ -169,7 +185,7 @@ public class LoggingRequestLoggerTest
   @After
   public void tearDown()
   {
-    baos.reset();
+    BAOS.reset();
   }
 
   @AfterClass
@@ -193,7 +209,7 @@ public class LoggingRequestLoggerTest
   {
     final LoggingRequestLogger requestLogger = new LoggingRequestLogger(new DefaultObjectMapper(), true, false);
     requestLogger.logNativeQuery(logLine);
-    final Map<String, Object> map = readContextMap(baos.toByteArray());
+    final Map<String, Object> map = readContextMap(BAOS.toByteArray());
     Assert.assertEquals("datasource", map.get("dataSource"));
     Assert.assertEquals("PT86400S", map.get("duration"));
     Assert.assertEquals("false", map.get("hasFilters"));
@@ -209,7 +225,7 @@ public class LoggingRequestLoggerTest
   {
     final LoggingRequestLogger requestLogger = new LoggingRequestLogger(new DefaultObjectMapper(), true, true);
     requestLogger.logNativeQuery(logLine);
-    final Map<String, Object> map = readContextMap(baos.toByteArray());
+    final Map<String, Object> map = readContextMap(BAOS.toByteArray());
     Assert.assertEquals("datasource", map.get("dataSource"));
     Assert.assertEquals("PT86400S", map.get("duration"));
     Assert.assertEquals("false", map.get("hasFilters"));
@@ -230,7 +246,7 @@ public class LoggingRequestLoggerTest
         remoteAddr,
         queryStats
     ));
-    final Map<String, Object> map = readContextMap(baos.toByteArray());
+    final Map<String, Object> map = readContextMap(BAOS.toByteArray());
     Assert.assertEquals("datasource", map.get("dataSource"));
     Assert.assertEquals("PT86400S", map.get("duration"));
     Assert.assertEquals("false", map.get("hasFilters"));
@@ -251,7 +267,7 @@ public class LoggingRequestLoggerTest
         remoteAddr,
         queryStats
     ));
-    final Map<String, Object> map = readContextMap(baos.toByteArray());
+    final Map<String, Object> map = readContextMap(BAOS.toByteArray());
     Assert.assertEquals("datasource", map.get("dataSource"));
     Assert.assertEquals("PT86400S", map.get("duration"));
     Assert.assertEquals("false", map.get("hasFilters"));
@@ -272,7 +288,7 @@ public class LoggingRequestLoggerTest
         remoteAddr,
         queryStats
     ));
-    final Map<String, Object> map = readContextMap(baos.toByteArray());
+    final Map<String, Object> map = readContextMap(BAOS.toByteArray());
     Assert.assertEquals("A,B", map.get("dataSource"));
     Assert.assertEquals("true", map.get("isNested"));
     Assert.assertEquals("PT86400S", map.get("duration"));
@@ -285,7 +301,7 @@ public class LoggingRequestLoggerTest
 
   private static Map<String, Object> readContextMap(byte[] bytes) throws Exception
   {
-    final Map<String, Object> rawMap = mapper.readValue(bytes, JacksonUtils.TYPE_REFERENCE_MAP_STRING_OBJECT);
+    final Map<String, Object> rawMap = MAPPER.readValue(bytes, JacksonUtils.TYPE_REFERENCE_MAP_STRING_OBJECT);
     final Object contextMap = rawMap.get("contextMap");
     if (contextMap == null) {
       return null;

@@ -21,7 +21,6 @@ package org.apache.druid.segment.realtime.appenderator;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableMap;
-import org.apache.commons.io.FileUtils;
 import org.apache.druid.client.cache.CacheConfig;
 import org.apache.druid.client.cache.CachePopulatorStats;
 import org.apache.druid.client.cache.MapCache;
@@ -30,6 +29,7 @@ import org.apache.druid.data.input.impl.JSONParseSpec;
 import org.apache.druid.data.input.impl.MapInputRowParser;
 import org.apache.druid.data.input.impl.TimestampSpec;
 import org.apache.druid.jackson.DefaultObjectMapper;
+import org.apache.druid.java.util.common.FileUtils;
 import org.apache.druid.java.util.common.concurrent.Execs;
 import org.apache.druid.java.util.common.granularity.Granularities;
 import org.apache.druid.java.util.emitter.EmittingLogger;
@@ -37,7 +37,7 @@ import org.apache.druid.java.util.emitter.core.NoopEmitter;
 import org.apache.druid.java.util.emitter.service.ServiceEmitter;
 import org.apache.druid.query.DefaultGenericQueryMetricsFactory;
 import org.apache.druid.query.DefaultQueryRunnerFactoryConglomerate;
-import org.apache.druid.query.IntervalChunkingQueryRunnerDecorator;
+import org.apache.druid.query.ForwardingQueryProcessingPool;
 import org.apache.druid.query.QueryRunnerTestHelper;
 import org.apache.druid.query.aggregation.AggregatorFactory;
 import org.apache.druid.query.aggregation.CountAggregatorFactory;
@@ -54,15 +54,18 @@ import org.apache.druid.query.timeseries.TimeseriesQueryRunnerFactory;
 import org.apache.druid.segment.IndexIO;
 import org.apache.druid.segment.IndexMerger;
 import org.apache.druid.segment.IndexMergerV9;
-import org.apache.druid.segment.TestHelper;
 import org.apache.druid.segment.column.ColumnConfig;
+import org.apache.druid.segment.incremental.ParseExceptionHandler;
+import org.apache.druid.segment.incremental.RowIngestionMeters;
+import org.apache.druid.segment.incremental.SimpleRowIngestionMeters;
 import org.apache.druid.segment.indexing.DataSchema;
 import org.apache.druid.segment.indexing.RealtimeTuningConfig;
 import org.apache.druid.segment.indexing.granularity.UniformGranularitySpec;
+import org.apache.druid.segment.join.NoopJoinableFactory;
 import org.apache.druid.segment.loading.DataSegmentPusher;
 import org.apache.druid.segment.realtime.FireDepartmentMetrics;
 import org.apache.druid.segment.writeout.OffHeapMemorySegmentWriteOutMediumFactory;
-import org.apache.druid.server.coordination.DataSegmentAnnouncer;
+import org.apache.druid.server.coordination.NoopDataSegmentAnnouncer;
 import org.apache.druid.timeline.DataSegment;
 import org.apache.druid.timeline.partition.LinearShardSpec;
 
@@ -117,9 +120,32 @@ public class AppenderatorTester implements AutoCloseable
 
   public AppenderatorTester(
       final int maxRowsInMemory,
-      long maxSizeInBytes,
+      final long maxSizeInBytes,
       final File basePersistDirectory,
       final boolean enablePushFailure
+  )
+  {
+    this(maxRowsInMemory, maxSizeInBytes, basePersistDirectory, enablePushFailure, new SimpleRowIngestionMeters(), false);
+  }
+
+  public AppenderatorTester(
+      final int maxRowsInMemory,
+      final long maxSizeInBytes,
+      final File basePersistDirectory,
+      final boolean enablePushFailure,
+      final RowIngestionMeters rowIngestionMeters
+  )
+  {
+    this(maxRowsInMemory, maxSizeInBytes, basePersistDirectory, enablePushFailure, rowIngestionMeters, false);
+  }
+
+  public AppenderatorTester(
+      final int maxRowsInMemory,
+      final long maxSizeInBytes,
+      final File basePersistDirectory,
+      final boolean enablePushFailure,
+      final RowIngestionMeters rowIngestionMeters,
+      final boolean skipBytesInMemoryOverheadCheck
   )
   {
     objectMapper = new DefaultObjectMapper();
@@ -130,6 +156,7 @@ public class AppenderatorTester implements AutoCloseable
             new JSONParseSpec(
                 new TimestampSpec("ts", "auto", null),
                 new DimensionsSpec(null, null, null),
+                null,
                 null,
                 null
             )
@@ -147,10 +174,11 @@ public class AppenderatorTester implements AutoCloseable
         null,
         objectMapper
     );
-    maxSizeInBytes = maxSizeInBytes == 0L ? getDefaultMaxBytesInMemory() : maxSizeInBytes;
     tuningConfig = new RealtimeTuningConfig(
+        null,
         maxRowsInMemory,
-        maxSizeInBytes,
+        maxSizeInBytes == 0L ? getDefaultMaxBytesInMemory() : maxSizeInBytes,
+        skipBytesInMemoryOverheadCheck,
         null,
         null,
         basePersistDirectory,
@@ -229,6 +257,7 @@ public class AppenderatorTester implements AutoCloseable
       }
     };
     appenderator = Appenderators.createRealtime(
+        schema.getDataSource(),
         schema,
         tuningConfig,
         metrics,
@@ -239,57 +268,29 @@ public class AppenderatorTester implements AutoCloseable
         new DefaultQueryRunnerFactoryConglomerate(
             ImmutableMap.of(
                 TimeseriesQuery.class, new TimeseriesQueryRunnerFactory(
-                    new TimeseriesQueryQueryToolChest(
-                        new IntervalChunkingQueryRunnerDecorator(
-                            queryExecutor,
-                            QueryRunnerTestHelper.NOOP_QUERYWATCHER,
-                            emitter
-                        )
-                    ),
+                    new TimeseriesQueryQueryToolChest(),
                     new TimeseriesQueryEngine(),
                     QueryRunnerTestHelper.NOOP_QUERYWATCHER
                 ),
                 ScanQuery.class, new ScanQueryRunnerFactory(
                     new ScanQueryQueryToolChest(
                         new ScanQueryConfig(),
-                        new DefaultGenericQueryMetricsFactory(TestHelper.makeJsonMapper())
+                        new DefaultGenericQueryMetricsFactory()
                     ),
                     new ScanQueryEngine(),
                     new ScanQueryConfig()
                 )
             )
         ),
-        new DataSegmentAnnouncer()
-        {
-          @Override
-          public void announceSegment(DataSegment segment)
-          {
-
-          }
-
-          @Override
-          public void unannounceSegment(DataSegment segment)
-          {
-
-          }
-
-          @Override
-          public void announceSegments(Iterable<DataSegment> segments)
-          {
-
-          }
-
-          @Override
-          public void unannounceSegments(Iterable<DataSegment> segments)
-          {
-
-          }
-        },
+        new NoopDataSegmentAnnouncer(),
         emitter,
-        queryExecutor,
+        new ForwardingQueryProcessingPool(queryExecutor),
+        NoopJoinableFactory.INSTANCE,
         MapCache.create(2048),
         new CacheConfig(),
-        new CachePopulatorStats()
+        new CachePopulatorStats(),
+        rowIngestionMeters,
+        new ParseExceptionHandler(rowIngestionMeters, false, Integer.MAX_VALUE, 0)
     );
   }
 

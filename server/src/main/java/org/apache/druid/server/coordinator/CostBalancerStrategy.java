@@ -35,6 +35,7 @@ import java.util.Comparator;
 import java.util.Iterator;
 import java.util.List;
 import java.util.NavigableSet;
+import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.stream.Collectors;
 
@@ -52,7 +53,7 @@ public class CostBalancerStrategy implements BalancerStrategy
   /**
    * This defines the unnormalized cost function between two segments.
    *
-   * See https://github.com/apache/incubator-druid/pull/2972 for more details about the cost function.
+   * See https://github.com/apache/druid/pull/2972 for more details about the cost function.
    *
    * intervalCost: segments close together are more likely to be queried together
    *
@@ -117,7 +118,7 @@ public class CostBalancerStrategy implements BalancerStrategy
 
     // since x_0 <= y_0, Y must overlap X if y_0 < x_1
     if (y0 < x1) {
-      /**
+      /*
        * We have two possible cases of overlap:
        *
        * X  = [ A )[ B )[ C )   or  [ A )[ B )
@@ -151,7 +152,7 @@ public class CostBalancerStrategy implements BalancerStrategy
              intervalCost(beta, beta, gamma) + // cost(B, C)
              2 * (beta + FastMath.exp(-beta) - 1); // cost(B, B)
     } else {
-      /**
+      /*
        * In the case where there is no overlap:
        *
        * Given that x_0 <= y_0,
@@ -211,9 +212,17 @@ public class CostBalancerStrategy implements BalancerStrategy
 
 
   @Override
-  public BalancerSegmentHolder pickSegmentToMove(final List<ServerHolder> serverHolders)
+  public BalancerSegmentHolder pickSegmentToMove(
+      final List<ServerHolder> serverHolders,
+      Set<String> broadcastDatasources,
+      double percentOfSegmentsToConsider
+  )
   {
-    return ReservoirSegmentSampler.getRandomBalancerSegmentHolder(serverHolders);
+    return ReservoirSegmentSampler.getRandomBalancerSegmentHolder(
+        serverHolders,
+        broadcastDatasources,
+        percentOfSegmentsToConsider
+    );
   }
 
   @Override
@@ -258,9 +267,14 @@ public class CostBalancerStrategy implements BalancerStrategy
   {
     double cost = 0;
     for (ServerHolder server : serverHolders) {
-      Iterable<DataSegment> segments = server.getServer().getLazyAllSegments();
-      for (DataSegment s : segments) {
-        cost += computeJointSegmentsCost(s, segments);
+      // segments are dumped into an array because it's probably better than iterating the iterateAllSegments() result
+      // quadratically in a loop, which can generate garbage in the form of Stream, Spliterator, Iterator, etc. objects
+      // whose total memory volume exceeds the size of the DataSegment array.
+      DataSegment[] segments = server.getServer().iterateAllSegments().toArray(new DataSegment[0]);
+      for (DataSegment s1 : segments) {
+        for (DataSegment s2 : segments) {
+          cost += computeJointSegmentsCost(s1, s2);
+        }
       }
     }
     return cost;
@@ -280,7 +294,7 @@ public class CostBalancerStrategy implements BalancerStrategy
   {
     double cost = 0;
     for (ServerHolder server : serverHolders) {
-      for (DataSegment segment : server.getServer().getLazyAllSegments()) {
+      for (DataSegment segment : server.getServer().iterateAllSegments()) {
         cost += computeJointSegmentsCost(segment, segment);
       }
     }
@@ -288,10 +302,7 @@ public class CostBalancerStrategy implements BalancerStrategy
   }
 
   @Override
-  public void emitStats(
-      String tier,
-      CoordinatorStats stats, List<ServerHolder> serverHolderList
-  )
+  public void emitStats(String tier, CoordinatorStats stats, List<ServerHolder> serverHolderList)
   {
     final double initialTotalCost = calculateInitialTotalCost(serverHolderList);
     final double normalization = calculateNormalization(serverHolderList);
@@ -334,7 +345,7 @@ public class CostBalancerStrategy implements BalancerStrategy
     // the sum of the costs of other (exclusive of the proposalSegment) segments on the server
     cost += computeJointSegmentsCost(
         proposalSegment,
-        Iterables.filter(server.getServer().getLazyAllSegments(), segment -> !proposalSegment.equals(segment))
+        Iterables.filter(server.getServer().iterateAllSegments(), segment -> !proposalSegment.equals(segment))
     );
 
     // plus the costs of segments that will be loaded
@@ -361,7 +372,8 @@ public class CostBalancerStrategy implements BalancerStrategy
       final boolean includeCurrentServer
   )
   {
-    Pair<Double, ServerHolder> bestServer = Pair.of(Double.POSITIVE_INFINITY, null);
+    final Pair<Double, ServerHolder> noServer = Pair.of(Double.POSITIVE_INFINITY, null);
+    Pair<Double, ServerHolder> bestServer = noServer;
 
     List<ListenableFuture<Pair<Double, ServerHolder>>> futures = new ArrayList<>();
 
@@ -385,7 +397,11 @@ public class CostBalancerStrategy implements BalancerStrategy
           bestServers.add(server);
         }
       }
-
+      // If the best server list contains server whose cost of serving the segment is INFINITE then this means
+      // no usable servers are found so return a null server so that segment assignment does not happen
+      if (bestServers.get(0).lhs.isInfinite()) {
+        return noServer;
+      }
       // Randomly choose a server from the best servers
       bestServer = bestServers.get(ThreadLocalRandom.current().nextInt(bestServers.size()));
     }

@@ -35,13 +35,15 @@ import org.apache.druid.segment.TestHelper;
 import org.apache.druid.segment.incremental.IncrementalIndex;
 import org.apache.druid.segment.incremental.IncrementalIndexSchema;
 import org.apache.druid.segment.incremental.IncrementalIndexStorageAdapter;
+import org.apache.druid.segment.incremental.OnheapIncrementalIndex;
+import org.apache.druid.testing.InitializedNullHandlingTest;
 import org.joda.time.DateTime;
 import org.junit.Test;
 
 import java.util.Collections;
 import java.util.List;
 
-public class DistinctCountTimeseriesQueryTest
+public class DistinctCountTimeseriesQueryTest extends InitializedNullHandlingTest
 {
 
   @Test
@@ -49,7 +51,7 @@ public class DistinctCountTimeseriesQueryTest
   {
     TimeseriesQueryEngine engine = new TimeseriesQueryEngine();
 
-    IncrementalIndex index = new IncrementalIndex.Builder()
+    IncrementalIndex index = new OnheapIncrementalIndex.Builder()
         .setIndexSchema(
             new IncrementalIndexSchema.Builder()
                 .withQueryGranularity(Granularities.SECOND)
@@ -57,7 +59,7 @@ public class DistinctCountTimeseriesQueryTest
                 .build()
         )
         .setMaxRowCount(1000)
-        .buildOnheap();
+        .build();
 
     String visitor_id = "visitor_id";
     String client_type = "client_type";
@@ -86,12 +88,12 @@ public class DistinctCountTimeseriesQueryTest
     );
 
     TimeseriesQuery query = Druids.newTimeseriesQueryBuilder()
-                                  .dataSource(QueryRunnerTestHelper.dataSource)
-                                  .granularity(QueryRunnerTestHelper.allGran)
-                                  .intervals(QueryRunnerTestHelper.fullOnIntervalSpec)
+                                  .dataSource(QueryRunnerTestHelper.DATA_SOURCE)
+                                  .granularity(QueryRunnerTestHelper.ALL_GRAN)
+                                  .intervals(QueryRunnerTestHelper.FULL_ON_INTERVAL_SPEC)
                                   .aggregators(
                                       Lists.newArrayList(
-                                          QueryRunnerTestHelper.rowsCount,
+                                          QueryRunnerTestHelper.ROWS_COUNT,
                                           new DistinctCountAggregatorFactory("UV", visitor_id, null)
                                       )
                                   )

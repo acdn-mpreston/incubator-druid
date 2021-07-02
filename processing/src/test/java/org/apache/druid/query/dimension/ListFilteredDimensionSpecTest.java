@@ -21,6 +21,7 @@ package org.apache.druid.query.dimension;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableSet;
+import nl.jqno.equalsverifier.EqualsVerifier;
 import org.apache.druid.segment.DimensionSelector;
 import org.apache.druid.segment.TestHelper;
 import org.apache.druid.segment.data.IndexedInts;
@@ -122,7 +123,7 @@ public class ListFilteredDimensionSpecTest
         true
     );
 
-    DimensionSelector selector = spec.decorate(TestDimensionSelector.instance);
+    DimensionSelector selector = spec.decorate(TestDimensionSelector.INSTANCE);
 
     Assert.assertEquals(2, selector.getValueCardinality());
 
@@ -147,7 +148,7 @@ public class ListFilteredDimensionSpecTest
         false
     );
 
-    DimensionSelector selector = spec.decorate(TestDimensionSelector.instance);
+    DimensionSelector selector = spec.decorate(TestDimensionSelector.INSTANCE);
 
     Assert.assertEquals(24, selector.getValueCardinality());
 
@@ -171,7 +172,7 @@ public class ListFilteredDimensionSpecTest
         false
     );
 
-    DimensionSelector selector = spec.decorate(TestDimensionSelector.instance);
+    DimensionSelector selector = spec.decorate(TestDimensionSelector.INSTANCE);
 
     Assert.assertEquals(25, selector.getValueCardinality());
 
@@ -188,5 +189,11 @@ public class ListFilteredDimensionSpecTest
 
     Assert.assertEquals(0, selector.idLookup().lookupId("a"));
     Assert.assertEquals(24, selector.idLookup().lookupId("z"));
+  }
+
+  @Test
+  public void testEquals()
+  {
+    EqualsVerifier.forClass(ListFilteredDimensionSpec.class).withNonnullFields("values").usingGetClass().verify();
   }
 }

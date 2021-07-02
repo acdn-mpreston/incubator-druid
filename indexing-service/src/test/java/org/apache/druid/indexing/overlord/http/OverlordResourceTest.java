@@ -19,6 +19,8 @@
 
 package org.apache.druid.indexing.overlord.http;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.base.Optional;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
@@ -31,6 +33,7 @@ import org.apache.druid.indexer.TaskStatus;
 import org.apache.druid.indexer.TaskStatusPlus;
 import org.apache.druid.indexing.common.TaskToolbox;
 import org.apache.druid.indexing.common.actions.TaskActionClient;
+import org.apache.druid.indexing.common.config.TaskConfig;
 import org.apache.druid.indexing.common.task.AbstractTask;
 import org.apache.druid.indexing.common.task.NoopTask;
 import org.apache.druid.indexing.common.task.Task;
@@ -42,6 +45,7 @@ import org.apache.druid.indexing.overlord.TaskRunnerWorkItem;
 import org.apache.druid.indexing.overlord.TaskStorageQueryAdapter;
 import org.apache.druid.indexing.overlord.WorkerTaskRunnerQueryAdapter;
 import org.apache.druid.java.util.common.DateTimes;
+import org.apache.druid.java.util.common.Intervals;
 import org.apache.druid.java.util.common.RE;
 import org.apache.druid.segment.TestHelper;
 import org.apache.druid.server.security.Access;
@@ -69,6 +73,7 @@ import org.junit.rules.ExpectedException;
 import javax.servlet.http.HttpServletRequest;
 import javax.ws.rs.core.Response;
 import javax.ws.rs.core.Response.Status;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
@@ -956,7 +961,7 @@ public class OverlordResourceTest
   {
     // This is disabled since OverlordResource.getTaskStatus() is annotated with TaskResourceFilter which is supposed to
     // set authorization token properly, but isn't called in this test.
-    // This should be fixed in https://github.com/apache/incubator-druid/issues/6685.
+    // This should be fixed in https://github.com/apache/druid/issues/6685.
     // expectAuthorizationTokenCheck();
     final NoopTask task = NoopTask.create("mydatasource");
     EasyMock.expect(taskStorageQueryAdapter.getTask("mytask"))
@@ -994,13 +999,19 @@ public class OverlordResourceTest
   {
     // This is disabled since OverlordResource.getTaskStatus() is annotated with TaskResourceFilter which is supposed to
     // set authorization token properly, but isn't called in this test.
-    // This should be fixed in https://github.com/apache/incubator-druid/issues/6685.
+    // This should be fixed in https://github.com/apache/druid/issues/6685.
     // expectAuthorizationTokenCheck();
     final Task task = NoopTask.create("mytask", 0);
     final TaskStatus status = TaskStatus.running("mytask");
 
     EasyMock.expect(taskStorageQueryAdapter.getTaskInfo("mytask"))
-            .andReturn(new TaskInfo<>(task.getId(), DateTimes.of("2018-01-01"), status, task.getDataSource(), task));
+            .andReturn(new TaskInfo(
+                task.getId(),
+                DateTimes.of("2018-01-01"),
+                status,
+                task.getDataSource(),
+                task
+            ));
 
     EasyMock.expect(taskStorageQueryAdapter.getTaskInfo("othertask"))
             .andReturn(null);
@@ -1029,6 +1040,7 @@ public class OverlordResourceTest
             "mytask",
             new TaskStatusPlus(
                 "mytask",
+                "mytask",
                 "noop",
                 DateTimes.of("2018-01-01"),
                 DateTimes.EPOCH,
@@ -1052,10 +1064,66 @@ public class OverlordResourceTest
   }
 
   @Test
+  public void testGetLockedIntervals() throws Exception
+  {
+    final Map<String, Integer> minTaskPriority = Collections.singletonMap("ds1", 0);
+    final Map<String, List<Interval>> expectedLockedIntervals = Collections.singletonMap(
+        "ds1",
+        Arrays.asList(
+            Intervals.of("2012-01-01/2012-01-02"),
+            Intervals.of("2012-01-02/2012-01-03")
+        )
+    );
+
+    EasyMock.expect(taskStorageQueryAdapter.getLockedIntervals(minTaskPriority))
+            .andReturn(expectedLockedIntervals);
+    EasyMock.replay(
+        taskRunner,
+        taskMaster,
+        taskStorageQueryAdapter,
+        indexerMetadataStorageAdapter,
+        req,
+        workerTaskRunnerQueryAdapter
+    );
+
+    final Response response = overlordResource.getDatasourceLockedIntervals(minTaskPriority);
+    Assert.assertEquals(200, response.getStatus());
+
+    final ObjectMapper jsonMapper = TestHelper.makeJsonMapper();
+    Map<String, List<Interval>> observedLockedIntervals = jsonMapper.readValue(
+        jsonMapper.writeValueAsString(response.getEntity()),
+        new TypeReference<Map<String, List<Interval>>>()
+        {
+        }
+    );
+
+    Assert.assertEquals(expectedLockedIntervals, observedLockedIntervals);
+  }
+
+  @Test
+  public void testGetLockedIntervalsWithEmptyBody()
+  {
+    EasyMock.replay(
+        taskRunner,
+        taskMaster,
+        taskStorageQueryAdapter,
+        indexerMetadataStorageAdapter,
+        req,
+        workerTaskRunnerQueryAdapter
+    );
+
+    Response response = overlordResource.getDatasourceLockedIntervals(null);
+    Assert.assertEquals(400, response.getStatus());
+
+    response = overlordResource.getDatasourceLockedIntervals(Collections.emptyMap());
+    Assert.assertEquals(400, response.getStatus());
+  }
+
+  @Test
   public void testShutdownTask()
   {
     // This is disabled since OverlordResource.doShutdown is annotated with TaskResourceFilter
-    // This should be fixed in https://github.com/apache/incubator-druid/issues/6685.
+    // This should be fixed in https://github.com/apache/druid/issues/6685.
     // expectAuthorizationTokenCheck();
     TaskQueue mockQueue = EasyMock.createMock(TaskQueue.class);
     EasyMock.expect(taskMaster.isLeader()).andReturn(true).anyTimes();
@@ -1088,7 +1156,7 @@ public class OverlordResourceTest
   public void testShutdownAllTasks()
   {
     // This is disabled since OverlordResource.shutdownTasksForDataSource is annotated with DatasourceResourceFilter
-    // This should be fixed in https://github.com/apache/incubator-druid/issues/6685.
+    // This should be fixed in https://github.com/apache/druid/issues/6685.
     // expectAuthorizationTokenCheck();
     TaskQueue mockQueue = EasyMock.createMock(TaskQueue.class);
     EasyMock.expect(taskMaster.isLeader()).andReturn(true).anyTimes();
@@ -1277,6 +1345,11 @@ public class OverlordResourceTest
       public boolean isReady(TaskActionClient taskActionClient)
       {
         return false;
+      }
+
+      @Override
+      public void stopGracefully(TaskConfig taskConfig)
+      {
       }
 
       @Override

@@ -39,6 +39,7 @@ import org.jboss.netty.handler.codec.http.HttpHeaders;
 import org.jboss.netty.handler.codec.http.HttpMethod;
 import org.joda.time.Duration;
 
+import javax.annotation.Nullable;
 import javax.servlet.http.HttpServletResponse;
 import java.io.InputStream;
 import java.net.URL;
@@ -84,11 +85,13 @@ public class ChangeRequestHttpSyncer<T>
   private final LifecycleLock startStopLock = new LifecycleLock();
 
   private final String logIdentity;
-  private ChangeRequestHistory.Counter counter = null;
   private long unstableStartTime = -1;
   private int consecutiveFailedAttemptCount = 0;
   private long lastSuccessfulSyncTime = 0;
   private long lastSyncTime = 0;
+
+  @Nullable
+  private ChangeRequestHistory.Counter counter = null;
 
   public ChangeRequestHttpSyncer(
       ObjectMapper smileMapper,
@@ -388,7 +391,7 @@ public class ChangeRequestHttpSyncer<T>
         } else {
           log.makeAlert(
               th,
-              "WTF! Couldn't schedule next sync. [%s] is not being synced any more, restarting Druid process on that "
+              "Couldn't schedule next sync. [%s] is not being synced any more, restarting Druid process on that "
               + "server might fix the issue.",
               logIdentity
           ).emit();

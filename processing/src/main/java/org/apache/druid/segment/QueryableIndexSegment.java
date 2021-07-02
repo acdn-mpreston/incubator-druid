@@ -24,14 +24,16 @@ import org.joda.time.Interval;
 
 /**
  */
-public class QueryableIndexSegment extends AbstractSegment
+public class QueryableIndexSegment implements Segment
 {
   private final QueryableIndex index;
+  private final QueryableIndexStorageAdapter storageAdapter;
   private final SegmentId segmentId;
 
   public QueryableIndexSegment(QueryableIndex index, final SegmentId segmentId)
   {
     this.index = index;
+    this.storageAdapter = new QueryableIndexStorageAdapter(index);
     this.segmentId = segmentId;
   }
 
@@ -56,7 +58,7 @@ public class QueryableIndexSegment extends AbstractSegment
   @Override
   public StorageAdapter asStorageAdapter()
   {
-    return new QueryableIndexStorageAdapter(index);
+    return storageAdapter;
   }
 
   @Override

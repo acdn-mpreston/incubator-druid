@@ -54,6 +54,8 @@ import org.apache.druid.indexing.overlord.TaskStorage;
 import org.apache.druid.indexing.overlord.TaskStorageQueryAdapter;
 import org.apache.druid.indexing.overlord.WorkerTaskRunnerQueryAdapter;
 import org.apache.druid.indexing.overlord.autoscaling.ScalingStats;
+import org.apache.druid.indexing.overlord.config.DefaultTaskConfig;
+import org.apache.druid.indexing.overlord.config.TaskLockConfig;
 import org.apache.druid.indexing.overlord.config.TaskQueueConfig;
 import org.apache.druid.indexing.overlord.helpers.OverlordHelperManager;
 import org.apache.druid.indexing.overlord.supervisor.SupervisorManager;
@@ -170,7 +172,9 @@ public class OverlordTest
     druidNode = new DruidNode("hey", "what", false, 1234, null, true, false);
     ServiceEmitter serviceEmitter = new NoopServiceEmitter();
     taskMaster = new TaskMaster(
+        new TaskLockConfig(),
         new TaskQueueConfig(null, new Period(1), null, new Period(10)),
+        new DefaultTaskConfig(),
         taskLockbox,
         taskStorage,
         taskActionClientFactory,
@@ -212,7 +216,7 @@ public class OverlordTest
     }
     Assert.assertEquals(taskMaster.getCurrentLeader(), druidNode.getHostAndPort());
 
-    final TaskStorageQueryAdapter taskStorageQueryAdapter = new TaskStorageQueryAdapter(taskStorage);
+    final TaskStorageQueryAdapter taskStorageQueryAdapter = new TaskStorageQueryAdapter(taskStorage, taskLockbox);
     final WorkerTaskRunnerQueryAdapter workerTaskRunnerQueryAdapter = new WorkerTaskRunnerQueryAdapter(taskMaster, null);
     // Test Overlord resource stuff
     overlordResource = new OverlordResource(
@@ -229,7 +233,7 @@ public class OverlordTest
     Assert.assertEquals(druidNode.getHostAndPort(), response.getEntity());
 
     final String taskId_0 = "0";
-    NoopTask task_0 = new NoopTask(taskId_0, null, 0, 0, null, null, null);
+    NoopTask task_0 = NoopTask.create(taskId_0, 0);
     response = overlordResource.taskPost(task_0, req);
     Assert.assertEquals(200, response.getStatus());
     Assert.assertEquals(ImmutableMap.of("task", taskId_0), response.getEntity());
@@ -262,7 +266,7 @@ public class OverlordTest
     // Manually insert task in taskStorage
     // Verifies sync from storage
     final String taskId_1 = "1";
-    NoopTask task_1 = new NoopTask(taskId_1, null, 0, 0, null, null, null);
+    NoopTask task_1 = NoopTask.create(taskId_1, 0);
     taskStorage.insert(task_1, TaskStatus.running(taskId_1));
     // Wait for task runner to run task_1
     runTaskCountDownLatches[Integer.parseInt(taskId_1)].await();
@@ -448,6 +452,36 @@ public class OverlordTest
     public Optional<ScalingStats> getScalingStats()
     {
       return Optional.absent();
+    }
+
+    @Override
+    public long getTotalTaskSlotCount()
+    {
+      throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public long getIdleTaskSlotCount()
+    {
+      throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public long getUsedTaskSlotCount()
+    {
+      throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public long getLazyTaskSlotCount()
+    {
+      throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public long getBlacklistedTaskSlotCount()
+    {
+      throw new UnsupportedOperationException();
     }
 
     @Override

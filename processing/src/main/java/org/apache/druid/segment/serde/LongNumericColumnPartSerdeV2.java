@@ -40,7 +40,7 @@ public class LongNumericColumnPartSerdeV2 implements ColumnPartSerde
   @JsonCreator
   public static LongNumericColumnPartSerdeV2 createDeserializer(
       @JsonProperty("byteOrder") ByteOrder byteOrder,
-      @Nullable @JsonProperty("bitmapSerdeFactory") BitmapSerdeFactory bitmapSerdeFactory
+      @JsonProperty("bitmapSerdeFactory") @Nullable BitmapSerdeFactory bitmapSerdeFactory
   )
   {
     return new LongNumericColumnPartSerdeV2(
@@ -50,14 +50,16 @@ public class LongNumericColumnPartSerdeV2 implements ColumnPartSerde
     );
   }
 
+  @Nullable
+  private final Serializer serializer;
+  @Nullable
   private final ByteOrder byteOrder;
   @Nullable
-  private Serializer serializer;
   private final BitmapSerdeFactory bitmapSerdeFactory;
 
   private LongNumericColumnPartSerdeV2(
-      ByteOrder byteOrder,
-      BitmapSerdeFactory bitmapSerdeFactory,
+      @Nullable ByteOrder byteOrder,
+      @Nullable BitmapSerdeFactory bitmapSerdeFactory,
       @Nullable Serializer serializer
   )
   {
@@ -85,8 +87,11 @@ public class LongNumericColumnPartSerdeV2 implements ColumnPartSerde
 
   public static class SerializerBuilder
   {
+    @Nullable
     private ByteOrder byteOrder = null;
+    @Nullable
     private Serializer delegate = null;
+    @Nullable
     private BitmapSerdeFactory bitmapSerdeFactory = null;
 
     public SerializerBuilder withByteOrder(final ByteOrder byteOrder)
@@ -146,13 +151,17 @@ public class LongNumericColumnPartSerdeV2 implements ColumnPartSerde
       );
       buffer.position(initialPos + offset);
       final ImmutableBitmap bitmap;
+      final boolean hasNulls;
       if (buffer.hasRemaining()) {
         bitmap = bitmapSerdeFactory.getObjectStrategy().fromByteBufferWithSize(buffer);
+        hasNulls = !bitmap.isEmpty();
       } else {
         bitmap = bitmapSerdeFactory.getBitmapFactory().makeEmptyImmutableBitmap();
+        hasNulls = false;
       }
       builder.setType(ValueType.LONG)
              .setHasMultipleValues(false)
+             .setHasNulls(hasNulls)
              .setNumericColumnSupplier(new LongNumericColumnSupplier(column, bitmap));
     };
   }

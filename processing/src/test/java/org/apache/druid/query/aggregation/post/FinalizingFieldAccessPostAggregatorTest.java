@@ -23,19 +23,26 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Ordering;
-import org.apache.druid.data.input.MapBasedRow;
 import org.apache.druid.jackson.AggregatorsModule;
 import org.apache.druid.java.util.common.granularity.Granularities;
 import org.apache.druid.java.util.common.guava.Comparators;
 import org.apache.druid.java.util.common.guava.Sequence;
+import org.apache.druid.query.Druids;
 import org.apache.druid.query.aggregation.AggregationTestHelper;
 import org.apache.druid.query.aggregation.Aggregator;
 import org.apache.druid.query.aggregation.AggregatorFactory;
 import org.apache.druid.query.aggregation.CountAggregator;
 import org.apache.druid.query.aggregation.CountAggregatorFactory;
 import org.apache.druid.query.aggregation.PostAggregator;
+import org.apache.druid.query.aggregation.first.StringFirstAggregatorFactory;
 import org.apache.druid.query.groupby.GroupByQueryRunnerTest;
+import org.apache.druid.query.groupby.ResultRow;
+import org.apache.druid.query.timeseries.TimeseriesQuery;
+import org.apache.druid.query.timeseries.TimeseriesQueryQueryToolChest;
 import org.apache.druid.segment.TestHelper;
+import org.apache.druid.segment.column.RowSignature;
+import org.apache.druid.segment.column.ValueType;
+import org.apache.druid.testing.InitializedNullHandlingTest;
 import org.easymock.EasyMock;
 import org.junit.Assert;
 import org.junit.Rule;
@@ -50,7 +57,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-public class FinalizingFieldAccessPostAggregatorTest
+public class FinalizingFieldAccessPostAggregatorTest extends InitializedNullHandlingTest
 {
   @Rule
   public final TemporaryFolder tempFoler = new TemporaryFolder();
@@ -78,13 +85,14 @@ public class FinalizingFieldAccessPostAggregatorTest
     AggregatorFactory aggFactory = EasyMock.createMock(AggregatorFactory.class);
     EasyMock.expect(aggFactory.getComparator()).andReturn(Comparators.naturalNullsFirst()).once();
     EasyMock.expect(aggFactory.finalizeComputation("test")).andReturn(3L).once();
+    EasyMock.expect(aggFactory.getFinalizedType()).andReturn(ValueType.LONG).once();
     EasyMock.replay(aggFactory);
 
     FinalizingFieldAccessPostAggregator postAgg = buildDecorated(
         "final_billy", aggName, ImmutableMap.of(aggName, aggFactory)
     );
 
-    // Check that the class matches exactly; see https://github.com/apache/incubator-druid/issues/6063
+    // Check that the class matches exactly; see https://github.com/apache/druid/issues/6063
     Assert.assertEquals(FinalizingFieldAccessPostAggregator.class, postAgg.getClass());
 
     Map<String, Object> metricValues = new HashMap<>();
@@ -101,6 +109,7 @@ public class FinalizingFieldAccessPostAggregatorTest
     AggregatorFactory aggFactory = EasyMock.createMock(AggregatorFactory.class);
     EasyMock.expect(aggFactory.getComparator()).andReturn(Comparators.naturalNullsFirst()).once();
     EasyMock.expect(aggFactory.finalizeComputation("test")).andReturn(3L).once();
+    EasyMock.expect(aggFactory.getFinalizedType()).andReturn(ValueType.LONG).once();
     EasyMock.replay(aggFactory);
 
     FinalizingFieldAccessPostAggregator postAgg = buildDecorated(
@@ -139,6 +148,8 @@ public class FinalizingFieldAccessPostAggregatorTest
     EasyMock.expect(aggFactory.getComparator())
             .andReturn(Ordering.natural().<Long>nullsLast())
             .times(1);
+
+    EasyMock.expect(aggFactory.getFinalizedType()).andReturn(ValueType.LONG).once();
     EasyMock.replay(aggFactory);
 
     FinalizingFieldAccessPostAggregator postAgg = buildDecorated(
@@ -235,7 +246,7 @@ public class FinalizingFieldAccessPostAggregatorTest
                      + "\"intervals\": [ \"1970/2050\" ]"
                      + "}";
 
-      Sequence seq = helper.createIndexAndRunQueryOnSegment(
+      Sequence<ResultRow> seq = helper.createIndexAndRunQueryOnSegment(
           new File(this.getClass().getClassLoader().getResource("druid.sample.tsv").getFile()),
           parseSpec,
           metricSpec,
@@ -245,10 +256,10 @@ public class FinalizingFieldAccessPostAggregatorTest
           query
       );
 
-      MapBasedRow row = (MapBasedRow) seq.toList().get(0);
-      Assert.assertEquals(3.0, row.getMetric("hll_market").floatValue(), 0.1);
-      Assert.assertEquals(9.0, row.getMetric("hll_quality").floatValue(), 0.1);
-      Assert.assertEquals(12.0, row.getMetric("uniq_add").floatValue(), 0.1);
+      final ResultRow resultRow = seq.toList().get(0);
+      Assert.assertEquals("hll_market", 3.0, ((Number) resultRow.get(0)).floatValue(), 0.1);
+      Assert.assertEquals("hll_quality", 9.0, ((Number) resultRow.get(1)).floatValue(), 0.1);
+      Assert.assertEquals("uniq_add", 12.0, ((Number) resultRow.get(2)).floatValue(), 0.1);
     }
   }
 
@@ -263,6 +274,36 @@ public class FinalizingFieldAccessPostAggregatorTest
     Assert.assertEquals(
         original,
         objectMapper.readValue(objectMapper.writeValueAsString(decorated), PostAggregator.class)
+    );
+  }
+
+  @Test
+  public void testResultArraySignature()
+  {
+    final TimeseriesQuery query =
+        Druids.newTimeseriesQueryBuilder()
+              .dataSource("dummy")
+              .intervals("2000/3000")
+              .granularity(Granularities.HOUR)
+              .aggregators(
+                  new CountAggregatorFactory("count"),
+                  new StringFirstAggregatorFactory("stringo", "col", 1024)
+              )
+              .postAggregators(
+                  new FieldAccessPostAggregator("a", "stringo"),
+                  new FinalizingFieldAccessPostAggregator("b", "stringo")
+              )
+              .build();
+
+    Assert.assertEquals(
+        RowSignature.builder()
+                    .addTimeColumn()
+                    .add("count", ValueType.LONG)
+                    .add("stringo", null)
+                    .add("a", ValueType.COMPLEX)
+                    .add("b", ValueType.STRING)
+                    .build(),
+        new TimeseriesQueryQueryToolChest().resultArraySignature(query)
     );
   }
 

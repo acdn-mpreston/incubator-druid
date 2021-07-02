@@ -22,6 +22,7 @@ package org.apache.druid.java.util.common;
 import org.junit.Assert;
 import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.ExpectedException;
 import org.junit.rules.TemporaryFolder;
 
 import java.io.File;
@@ -34,6 +35,9 @@ public class FileUtilsTest
   @Rule
   public TemporaryFolder folder = new TemporaryFolder();
 
+  @Rule
+  public ExpectedException expectedException = ExpectedException.none();
+
   @Test
   public void testMap() throws IOException
   {
@@ -41,7 +45,7 @@ public class FileUtilsTest
     long buffersMemoryBefore = BufferUtils.totalMemoryUsedByDirectAndMappedBuffers();
     try (RandomAccessFile raf = new RandomAccessFile(dataFile, "rw")) {
       raf.write(42);
-      raf.setLength(1 << 20); // 1 MB
+      raf.setLength(1 << 20); // 1 MiB
     }
     try (MappedByteBufferHandler mappedByteBufferHandler = FileUtils.map(dataFile)) {
       Assert.assertEquals(42, mappedByteBufferHandler.get().get(0));
@@ -79,5 +83,62 @@ public class FileUtilsTest
       return null;
     });
     Assert.assertEquals("baz", StringUtils.fromUtf8(Files.readAllBytes(tmpFile.toPath())));
+  }
+
+  @Test
+  public void testCreateTempDir() throws IOException
+  {
+    final File tempDir = FileUtils.createTempDir();
+    try {
+      Assert.assertEquals(
+          new File(System.getProperty("java.io.tmpdir")).toPath(),
+          tempDir.getParentFile().toPath()
+      );
+    }
+    finally {
+      Files.delete(tempDir.toPath());
+    }
+  }
+
+  @Test
+  public void testCreateTempDirNonexistentBase()
+  {
+    final String oldJavaTmpDir = System.getProperty("java.io.tmpdir");
+    final String nonExistentDir = oldJavaTmpDir + "/nonexistent";
+
+    expectedException.expect(IllegalStateException.class);
+    expectedException.expectMessage(StringUtils.format("java.io.tmpdir (%s) does not exist", nonExistentDir));
+
+    try {
+      System.setProperty("java.io.tmpdir", nonExistentDir);
+      FileUtils.createTempDir();
+    }
+    finally {
+      System.setProperty("java.io.tmpdir", oldJavaTmpDir);
+    }
+  }
+
+  @Test
+  public void testCreateTempDirUnwritableBase() throws IOException
+  {
+    final File baseDir = FileUtils.createTempDir();
+    try {
+      expectedException.expect(IllegalStateException.class);
+      expectedException.expectMessage("java.io.tmpdir (" + baseDir + ") is not writable");
+
+      final String oldJavaTmpDir = System.getProperty("java.io.tmpdir");
+      try {
+        System.setProperty("java.io.tmpdir", baseDir.getPath());
+        baseDir.setWritable(false);
+        FileUtils.createTempDir();
+      }
+      finally {
+        System.setProperty("java.io.tmpdir", oldJavaTmpDir);
+      }
+    }
+    finally {
+      baseDir.setWritable(true);
+      Files.delete(baseDir.toPath());
+    }
   }
 }

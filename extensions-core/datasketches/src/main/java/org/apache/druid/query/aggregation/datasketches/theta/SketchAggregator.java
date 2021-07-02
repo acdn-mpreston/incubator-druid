@@ -19,19 +19,22 @@
 
 package org.apache.druid.query.aggregation.datasketches.theta;
 
-import com.yahoo.sketches.Family;
-import com.yahoo.sketches.theta.SetOperation;
-import com.yahoo.sketches.theta.Union;
+import org.apache.datasketches.Family;
+import org.apache.datasketches.theta.SetOperation;
+import org.apache.datasketches.theta.Union;
 import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.query.aggregation.Aggregator;
 import org.apache.druid.segment.BaseObjectColumnValueSelector;
 
+import javax.annotation.Nullable;
 import java.util.List;
 
 public class SketchAggregator implements Aggregator
 {
   private final BaseObjectColumnValueSelector selector;
   private final int size;
+
+  @Nullable
   private Union union;
 
   public SketchAggregator(BaseObjectColumnValueSelector selector, int size)
@@ -109,7 +112,7 @@ public class SketchAggregator implements Aggregator
     } else if (update instanceof byte[]) {
       union.update((byte[]) update);
     } else if (update instanceof Double) {
-      union.update(((Double) update));
+      union.update((Double) update);
     } else if (update instanceof Integer || update instanceof Long) {
       union.update(((Number) update).longValue());
     } else if (update instanceof int[]) {
@@ -118,7 +121,9 @@ public class SketchAggregator implements Aggregator
       union.update((long[]) update);
     } else if (update instanceof List) {
       for (Object entry : (List) update) {
-        union.update(entry.toString());
+        if (entry != null) {
+          union.update(entry.toString());
+        }
       }
     } else {
       throw new ISE("Illegal type received while theta sketch merging [%s]", update.getClass());

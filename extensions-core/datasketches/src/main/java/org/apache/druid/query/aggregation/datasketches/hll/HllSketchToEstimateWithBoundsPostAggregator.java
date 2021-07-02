@@ -21,12 +21,13 @@ package org.apache.druid.query.aggregation.datasketches.hll;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
-import com.yahoo.sketches.hll.HllSketch;
+import org.apache.datasketches.hll.HllSketch;
 import org.apache.druid.java.util.common.IAE;
 import org.apache.druid.query.aggregation.AggregatorFactory;
 import org.apache.druid.query.aggregation.AggregatorUtil;
 import org.apache.druid.query.aggregation.PostAggregator;
 import org.apache.druid.query.cache.CacheKeyBuilder;
+import org.apache.druid.segment.column.ValueType;
 
 import javax.annotation.Nullable;
 import java.util.Comparator;
@@ -43,6 +44,7 @@ import java.util.Set;
  */
 public class HllSketchToEstimateWithBoundsPostAggregator implements PostAggregator
 {
+  public static final int DEFAULT_NUM_STD_DEVS = 1;
 
   private final String name;
   private final PostAggregator field;
@@ -57,7 +59,7 @@ public class HllSketchToEstimateWithBoundsPostAggregator implements PostAggregat
   {
     this.name = name;
     this.field = field;
-    this.numStdDevs = numStdDevs == null ? 1 : numStdDevs;
+    this.numStdDevs = numStdDevs == null ? DEFAULT_NUM_STD_DEVS : numStdDevs;
   }
 
   @Override
@@ -65,6 +67,12 @@ public class HllSketchToEstimateWithBoundsPostAggregator implements PostAggregat
   public String getName()
   {
     return name;
+  }
+
+  @Override
+  public ValueType getType()
+  {
+    return ValueType.DOUBLE_ARRAY;
   }
 
   @JsonProperty
@@ -105,6 +113,16 @@ public class HllSketchToEstimateWithBoundsPostAggregator implements PostAggregat
   }
 
   @Override
+  public byte[] getCacheKey()
+  {
+    return new CacheKeyBuilder(AggregatorUtil.HLL_SKETCH_TO_ESTIMATE_AND_BOUNDS_CACHE_TYPE_ID)
+        .appendString(name)
+        .appendCacheable(field)
+        .appendInt(numStdDevs)
+        .build();
+  }
+
+  @Override
   public String toString()
   {
     return getClass().getSimpleName() + "{" +
@@ -115,24 +133,18 @@ public class HllSketchToEstimateWithBoundsPostAggregator implements PostAggregat
   }
 
   @Override
-  public boolean equals(final Object o)
+  public boolean equals(Object o)
   {
     if (this == o) {
       return true;
     }
-    if (!(o instanceof HllSketchToEstimateWithBoundsPostAggregator)) {
+    if (o == null || getClass() != o.getClass()) {
       return false;
     }
-
-    final HllSketchToEstimateWithBoundsPostAggregator that = (HllSketchToEstimateWithBoundsPostAggregator) o;
-
-    if (!name.equals(that.name)) {
-      return false;
-    }
-    if (numStdDevs != that.numStdDevs) {
-      return false;
-    }
-    return field.equals(that.field);
+    HllSketchToEstimateWithBoundsPostAggregator that = (HllSketchToEstimateWithBoundsPostAggregator) o;
+    return numStdDevs == that.numStdDevs &&
+           name.equals(that.name) &&
+           field.equals(that.field);
   }
 
   @Override
@@ -140,15 +152,4 @@ public class HllSketchToEstimateWithBoundsPostAggregator implements PostAggregat
   {
     return Objects.hash(name, field, numStdDevs);
   }
-
-  @Override
-  public byte[] getCacheKey()
-  {
-    return new CacheKeyBuilder(AggregatorUtil.HLL_SKETCH_TO_ESTIMATE_AND_BOUNDS_CACHE_TYPE_ID)
-        .appendString(name)
-        .appendCacheable(field)
-        .appendInt(numStdDevs)
-        .build();
-  }
-
 }

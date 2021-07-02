@@ -31,14 +31,15 @@ import org.apache.druid.indexer.TaskStatus;
 import org.apache.druid.indexing.common.task.HadoopIndexTask;
 import org.apache.druid.indexing.overlord.DataSourceMetadata;
 import org.apache.druid.indexing.overlord.IndexerMetadataStorageCoordinator;
+import org.apache.druid.indexing.overlord.Segments;
 import org.apache.druid.indexing.overlord.TaskMaster;
 import org.apache.druid.indexing.overlord.TaskStorage;
 import org.apache.druid.indexing.overlord.supervisor.Supervisor;
 import org.apache.druid.indexing.overlord.supervisor.SupervisorReport;
 import org.apache.druid.indexing.overlord.supervisor.SupervisorStateManager;
+import org.apache.druid.indexing.overlord.supervisor.autoscaler.LagStats;
 import org.apache.druid.java.util.common.DateTimes;
 import org.apache.druid.java.util.common.IAE;
-import org.apache.druid.java.util.common.Intervals;
 import org.apache.druid.java.util.common.JodaUtils;
 import org.apache.druid.java.util.common.Pair;
 import org.apache.druid.java.util.common.StringUtils;
@@ -47,14 +48,14 @@ import org.apache.druid.java.util.common.guava.Comparators;
 import org.apache.druid.java.util.emitter.EmittingLogger;
 import org.apache.druid.metadata.EntryExistsException;
 import org.apache.druid.metadata.MetadataSupervisorManager;
-import org.apache.druid.metadata.SQLMetadataSegmentManager;
+import org.apache.druid.metadata.SqlSegmentsMetadataManager;
 import org.apache.druid.timeline.DataSegment;
 import org.joda.time.Duration;
 import org.joda.time.Interval;
 
-import javax.annotation.Nullable;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -67,13 +68,13 @@ import java.util.concurrent.TimeUnit;
 public class MaterializedViewSupervisor implements Supervisor
 {
   private static final EmittingLogger log = new EmittingLogger(MaterializedViewSupervisor.class);
-  private static final Interval ALL_INTERVAL = Intervals.of("0000-01-01/3000-01-01");
   private static final int DEFAULT_MAX_TASK_COUNT = 1;
   // there is a lag between derivatives and base dataSource, to prevent repeatedly building for some delay data. 
-  private static final long DEFAULT_MIN_DATA_LAG_MS = 24 * 3600 * 1000L;
+  private static final long DEFAULT_MIN_DATA_LAG_MS = TimeUnit.DAYS.toMillis(1);
+
   private final MetadataSupervisorManager metadataSupervisorManager;
   private final IndexerMetadataStorageCoordinator metadataStorageCoordinator;
-  private final SQLMetadataSegmentManager segmentManager;
+  private final SqlSegmentsMetadataManager sqlSegmentsMetadataManager;
   private final MaterializedViewSupervisorSpec spec;
   private final TaskMaster taskMaster;
   private final TaskStorage taskStorage;
@@ -100,7 +101,7 @@ public class MaterializedViewSupervisor implements Supervisor
       TaskMaster taskMaster,
       TaskStorage taskStorage,
       MetadataSupervisorManager metadataSupervisorManager,
-      SQLMetadataSegmentManager segmentManager,
+      SqlSegmentsMetadataManager sqlSegmentsMetadataManager,
       IndexerMetadataStorageCoordinator metadataStorageCoordinator,
       MaterializedViewTaskConfig config,
       MaterializedViewSupervisorSpec spec
@@ -109,7 +110,7 @@ public class MaterializedViewSupervisor implements Supervisor
     this.taskMaster = taskMaster;
     this.taskStorage = taskStorage;
     this.metadataStorageCoordinator = metadataStorageCoordinator;
-    this.segmentManager = segmentManager;
+    this.sqlSegmentsMetadataManager = sqlSegmentsMetadataManager;
     this.metadataSupervisorManager = metadataSupervisorManager;
     this.config = config;
     this.spec = spec;
@@ -130,14 +131,14 @@ public class MaterializedViewSupervisor implements Supervisor
     synchronized (stateLock) {
       Preconditions.checkState(!started, "already started");
 
-      DataSourceMetadata metadata = metadataStorageCoordinator.getDataSourceMetadata(dataSource);
+      DataSourceMetadata metadata = metadataStorageCoordinator.retrieveDataSourceMetadata(dataSource);
       if (null == metadata) {
         metadataStorageCoordinator.insertDataSourceMetadata(
             dataSource,
             new DerivativeDataSourceMetadata(spec.getBaseDataSource(), spec.getDimensions(), spec.getMetrics())
         );
       }
-      exec = MoreExecutors.listeningDecorator(Execs.scheduledSingleThreaded(supervisorId));
+      exec = MoreExecutors.listeningDecorator(Execs.scheduledSingleThreaded(StringUtils.encodeForFormat(supervisorId)));
       final Duration delay = config.getTaskCheckDuration().toStandardDuration();
       future = exec.scheduleWithFixedDelay(
           MaterializedViewSupervisor.this::run,
@@ -162,7 +163,7 @@ public class MaterializedViewSupervisor implements Supervisor
         return;
       }
 
-      DataSourceMetadata metadata = metadataStorageCoordinator.getDataSourceMetadata(dataSource);
+      DataSourceMetadata metadata = metadataStorageCoordinator.retrieveDataSourceMetadata(dataSource);
       if (metadata instanceof DerivativeDataSourceMetadata
           && spec.getBaseDataSource().equals(((DerivativeDataSourceMetadata) metadata).getBaseDataSource())
           && spec.getDimensions().equals(((DerivativeDataSourceMetadata) metadata).getDimensions())
@@ -257,7 +258,7 @@ public class MaterializedViewSupervisor implements Supervisor
   {
     if (dataSourceMetadata == null) {
       // if oldMetadata is different from spec, tasks and segments will be removed when reset.
-      DataSourceMetadata oldMetadata = metadataStorageCoordinator.getDataSourceMetadata(dataSource);
+      DataSourceMetadata oldMetadata = metadataStorageCoordinator.retrieveDataSourceMetadata(dataSource);
       if (oldMetadata instanceof DerivativeDataSourceMetadata) {
         if (!((DerivativeDataSourceMetadata) oldMetadata).getBaseDataSource().equals(spec.getBaseDataSource()) ||
             !((DerivativeDataSourceMetadata) oldMetadata).getDimensions().equals(spec.getDimensions()) ||
@@ -277,14 +278,21 @@ public class MaterializedViewSupervisor implements Supervisor
   }
 
   @Override
-  public void checkpoint(
-      @Nullable Integer taskGroupId,
-      String baseSequenceName,
-      DataSourceMetadata previousCheckPoint,
-      DataSourceMetadata currentCheckPoint
-  )
+  public void checkpoint(int taskGroupId, DataSourceMetadata checkpointMetadata)
   {
     // do nothing
+  }
+
+  @Override
+  public LagStats computeLagStats()
+  {
+    throw new UnsupportedOperationException("Compute Lag Stats not supported in MaterializedViewSupervisor");
+  }
+
+  @Override
+  public int getActiveTaskGroupsCount()
+  {
+    throw new UnsupportedOperationException("Get Active Task Groups Count is not supported in MaterializedViewSupervisor");
   }
 
   /**
@@ -311,7 +319,8 @@ public class MaterializedViewSupervisor implements Supervisor
         //if the number of running tasks reach the max task count, supervisor won't submit new tasks.
         return;
       }
-      Pair<SortedMap<Interval, String>, Map<Interval, List<DataSegment>>> toBuildIntervalAndBaseSegments = checkSegments();
+      Pair<SortedMap<Interval, String>, Map<Interval, List<DataSegment>>> toBuildIntervalAndBaseSegments =
+          checkSegments();
       SortedMap<Interval, String> sortedToBuildVersion = toBuildIntervalAndBaseSegments.lhs;
       Map<Interval, List<DataSegment>> baseSegments = toBuildIntervalAndBaseSegments.rhs;
       missInterval = sortedToBuildVersion.keySet();
@@ -342,20 +351,14 @@ public class MaterializedViewSupervisor implements Supervisor
   Pair<SortedMap<Interval, String>, Map<Interval, List<DataSegment>>> checkSegments()
   {
     // Pair<interval -> version, interval -> list<DataSegment>>
+    Collection<DataSegment> derivativeSegmentsCollection =
+        metadataStorageCoordinator.retrieveAllUsedSegments(dataSource, Segments.ONLY_VISIBLE);
     Pair<Map<Interval, String>, Map<Interval, List<DataSegment>>> derivativeSegmentsSnapshot =
-        getVersionAndBaseSegments(
-            metadataStorageCoordinator.getUsedSegmentsForInterval(
-                dataSource,
-                ALL_INTERVAL
-            )
-        );
+        getVersionAndBaseSegments(derivativeSegmentsCollection);
     // Pair<interval -> max(created_date), interval -> list<DataSegment>>
     Pair<Map<Interval, String>, Map<Interval, List<DataSegment>>> baseSegmentsSnapshot =
         getMaxCreateDateAndBaseSegments(
-            metadataStorageCoordinator.getUsedSegmentAndCreatedDateForInterval(
-                spec.getBaseDataSource(),
-                ALL_INTERVAL
-            )
+            metadataStorageCoordinator.retrieveUsedSegmentsAndCreatedDates(spec.getBaseDataSource())
         );
     // baseSegments are used to create HadoopIndexTask
     Map<Interval, List<DataSegment>> baseSegments = baseSegmentsSnapshot.rhs;
@@ -369,28 +372,40 @@ public class MaterializedViewSupervisor implements Supervisor
     MapDifference<Interval, String> difference = Maps.difference(maxCreatedDate, derivativeVersion);
     Map<Interval, String> toBuildInterval = new HashMap<>(difference.entriesOnlyOnLeft());
     Map<Interval, String> toDropInterval = new HashMap<>(difference.entriesOnlyOnRight());
-    // if some intervals are in running tasks and the versions are the same, remove it from toBuildInterval
-    // if some intervals are in running tasks, but the versions are different, stop the task. 
-    for (Interval interval : runningVersion.keySet()) {
-      if (toBuildInterval.containsKey(interval)
-          && toBuildInterval.get(interval).equals(runningVersion.get(interval))
-          ) {
-        toBuildInterval.remove(interval);
-
-      } else if (
-          toBuildInterval.containsKey(interval)
-          && !toBuildInterval.get(interval).equals(runningVersion.get(interval))
-      ) {
-        if (taskMaster.getTaskQueue().isPresent()) {
-          taskMaster.getTaskQueue().get().shutdown(runningTasks.get(interval).getId(), "version mismatch");
-          runningTasks.remove(interval);
+    // update version of derived segments if isn't the max (created_date) of all base segments
+    // prevent user supplied segments list did not match with segments list obtained from db
+    Map<Interval, MapDifference.ValueDifference<String>> checkIfNewestVersion =
+            new HashMap<>(difference.entriesDiffering());
+    for (Map.Entry<Interval, MapDifference.ValueDifference<String>> entry : checkIfNewestVersion.entrySet()) {
+      final String versionOfBase = maxCreatedDate.get(entry.getKey());
+      final String versionOfDerivative = derivativeVersion.get(entry.getKey());
+      final int baseCount = baseSegments.get(entry.getKey()).size();
+      if (versionOfBase.compareTo(versionOfDerivative) > 0) {
+        int usedCount = metadataStorageCoordinator
+            .retrieveUsedSegmentsForInterval(spec.getBaseDataSource(), entry.getKey(), Segments.ONLY_VISIBLE).size();
+        if (baseCount == usedCount) {
+          toBuildInterval.put(entry.getKey(), versionOfBase);
         }
       }
     }
+    // if some intervals are in running tasks and the versions are the same, remove it from toBuildInterval
+    // if some intervals are in running tasks, but the versions are different, stop the task.
+    runningVersion.forEach((interval, version) -> {
+      if (toBuildInterval.containsKey(interval)) {
+        if (toBuildInterval.get(interval).equals(version)) {
+          toBuildInterval.remove(interval);
+        } else {
+          if (taskMaster.getTaskQueue().isPresent()) {
+            taskMaster.getTaskQueue().get().shutdown(runningTasks.get(interval).getId(), "version mismatch");
+            runningTasks.remove(interval);
+          }
+        }
+      }
+    });
     // drop derivative segments which interval equals the interval in toDeleteBaseSegments 
     for (Interval interval : toDropInterval.keySet()) {
       for (DataSegment segment : derivativeSegments.get(interval)) {
-        segmentManager.removeSegment(segment.getId().toString());
+        sqlSegmentsMetadataManager.markSegmentAsUnused(segment.getId().toString());
       }
     }
     // data of the latest interval will be built firstly.
@@ -424,7 +439,7 @@ public class MaterializedViewSupervisor implements Supervisor
   }
 
   private Pair<Map<Interval, String>, Map<Interval, List<DataSegment>>> getVersionAndBaseSegments(
-      List<DataSegment> snapshot
+      Collection<DataSegment> snapshot
   )
   {
     Map<Interval, String> versions = new HashMap<>();
@@ -432,14 +447,13 @@ public class MaterializedViewSupervisor implements Supervisor
     for (DataSegment segment : snapshot) {
       Interval interval = segment.getInterval();
       versions.put(interval, segment.getVersion());
-      segments.putIfAbsent(interval, new ArrayList<>());
-      segments.get(interval).add(segment);
+      segments.computeIfAbsent(interval, i -> new ArrayList<>()).add(segment);
     }
     return new Pair<>(versions, segments);
   }
 
   private Pair<Map<Interval, String>, Map<Interval, List<DataSegment>>> getMaxCreateDateAndBaseSegments(
-      List<Pair<DataSegment, String>> snapshot
+      Collection<Pair<DataSegment, String>> snapshot
   )
   {
     Interval maxAllowedToBuildInterval = snapshot.parallelStream()
@@ -456,15 +470,10 @@ public class MaterializedViewSupervisor implements Supervisor
       if (!hasEnoughLag(interval, maxAllowedToBuildInterval)) {
         continue;
       }
-      maxCreatedDate.put(
-          interval,
-          DateTimes.max(
-              DateTimes.of(createDate),
-              DateTimes.of(maxCreatedDate.getOrDefault(interval, DateTimes.MIN.toString()))
-          ).toString()
-      );
-      segments.putIfAbsent(interval, new ArrayList<>());
-      segments.get(interval).add(segment);
+      maxCreatedDate.merge(interval, createDate, (date1, date2) -> {
+        return DateTimes.max(DateTimes.of(date1), DateTimes.of(date2)).toString();
+      });
+      segments.computeIfAbsent(interval, i -> new ArrayList<>()).add(segment);
     }
     return new Pair<>(maxCreatedDate, segments);
   }
@@ -497,8 +506,8 @@ public class MaterializedViewSupervisor implements Supervisor
   private void clearSegments()
   {
     log.info("Clear all metadata of dataSource %s", dataSource);
-    metadataStorageCoordinator.deletePendingSegments(dataSource, ALL_INTERVAL);
-    segmentManager.removeDataSource(dataSource);
+    metadataStorageCoordinator.deletePendingSegments(dataSource);
+    sqlSegmentsMetadataManager.markAsUnusedAllSegmentsInDataSource(dataSource);
     metadataStorageCoordinator.deleteDataSourceMetadata(dataSource);
   }
 

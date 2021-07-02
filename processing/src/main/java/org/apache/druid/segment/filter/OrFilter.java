@@ -21,6 +21,7 @@ package org.apache.druid.segment.filter;
 
 import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
+import com.google.common.collect.Iterables;
 import org.apache.druid.collections.bitmap.ImmutableBitmap;
 import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.query.BitmapResultFactory;
@@ -29,33 +30,45 @@ import org.apache.druid.query.filter.BooleanFilter;
 import org.apache.druid.query.filter.Filter;
 import org.apache.druid.query.filter.RowOffsetMatcherFactory;
 import org.apache.druid.query.filter.ValueMatcher;
+import org.apache.druid.query.filter.vector.BaseVectorValueMatcher;
+import org.apache.druid.query.filter.vector.ReadableVectorMatch;
+import org.apache.druid.query.filter.vector.VectorMatch;
+import org.apache.druid.query.filter.vector.VectorValueMatcher;
 import org.apache.druid.query.monomorphicprocessing.RuntimeShapeInspector;
-import org.apache.druid.segment.ColumnSelector;
+import org.apache.druid.segment.ColumnInspector;
 import org.apache.druid.segment.ColumnSelectorFactory;
+import org.apache.druid.segment.vector.VectorColumnSelectorFactory;
 
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Objects;
 
 /**
+ *
  */
 public class OrFilter implements BooleanFilter
 {
   private static final Joiner OR_JOINER = Joiner.on(" || ");
 
-  private final List<Filter> filters;
+  private final LinkedHashSet<Filter> filters;
+
+  public OrFilter(LinkedHashSet<Filter> filters)
+  {
+    Preconditions.checkArgument(filters.size() > 0, "Can't construct empty OrFilter (the universe does not exist)");
+    this.filters = filters;
+  }
 
   public OrFilter(List<Filter> filters)
   {
-    Preconditions.checkArgument(filters.size() > 0, "Can't construct empty OrFilter (the universe does not exist)");
-
-    this.filters = filters;
+    this(new LinkedHashSet<>(filters));
   }
 
   @Override
   public <T> T getBitmapResult(BitmapIndexSelector selector, BitmapResultFactory<T> bitmapResultFactory)
   {
     if (filters.size() == 1) {
-      return filters.get(0).getBitmapResult(selector, bitmapResultFactory);
+      return Iterables.getOnlyElement(filters).getBitmapResult(selector, bitmapResultFactory);
     }
 
     List<T> bitmapResults = new ArrayList<>();
@@ -71,10 +84,29 @@ public class OrFilter implements BooleanFilter
   {
     final ValueMatcher[] matchers = new ValueMatcher[filters.size()];
 
-    for (int i = 0; i < filters.size(); i++) {
-      matchers[i] = filters.get(i).makeMatcher(factory);
+    int i = 0;
+    for (Filter filter : filters) {
+      matchers[i++] = filter.makeMatcher(factory);
     }
     return makeMatcher(matchers);
+  }
+
+  @Override
+  public VectorValueMatcher makeVectorMatcher(final VectorColumnSelectorFactory factory)
+  {
+    final VectorValueMatcher[] matchers = new VectorValueMatcher[filters.size()];
+
+    int i = 0;
+    for (Filter filter : filters) {
+      matchers[i++] = filter.makeVectorMatcher(factory);
+    }
+    return makeVectorMatcher(matchers);
+  }
+
+  @Override
+  public boolean canVectorizeMatcher(ColumnInspector inspector)
+  {
+    return filters.stream().allMatch(filter -> filter.canVectorizeMatcher(inspector));
   }
 
   @Override
@@ -102,11 +134,33 @@ public class OrFilter implements BooleanFilter
       matchers.add(0, offsetMatcher);
     }
 
-    return makeMatcher(matchers.toArray(AndFilter.EMPTY_VALUE_MATCHER_ARRAY));
+    return makeMatcher(matchers.toArray(BooleanFilter.EMPTY_VALUE_MATCHER_ARRAY));
   }
 
+  @Override
+  public LinkedHashSet<Filter> getFilters()
+  {
+    return filters;
+  }
 
-  private ValueMatcher makeMatcher(final ValueMatcher[] baseMatchers)
+  @Override
+  public double estimateSelectivity(BitmapIndexSelector indexSelector)
+  {
+    // Estimate selectivity with attribute value independence assumption
+    double selectivity = 0;
+    for (final Filter filter : filters) {
+      selectivity += filter.estimateSelectivity(indexSelector);
+    }
+    return Math.min(selectivity, 1.);
+  }
+
+  @Override
+  public String toString()
+  {
+    return StringUtils.format("(%s)", OR_JOINER.join(filters));
+  }
+
+  private static ValueMatcher makeMatcher(final ValueMatcher[] baseMatchers)
   {
     Preconditions.checkState(baseMatchers.length > 0);
 
@@ -138,48 +192,71 @@ public class OrFilter implements BooleanFilter
     };
   }
 
-  @Override
-  public List<Filter> getFilters()
+  private static VectorValueMatcher makeVectorMatcher(final VectorValueMatcher[] baseMatchers)
   {
-    return filters;
-  }
+    Preconditions.checkState(baseMatchers.length > 0);
+    if (baseMatchers.length == 1) {
+      return baseMatchers[0];
+    }
 
-  @Override
-  public boolean supportsBitmapIndex(BitmapIndexSelector selector)
-  {
-    for (Filter filter : filters) {
-      if (!filter.supportsBitmapIndex(selector)) {
-        return false;
+    return new BaseVectorValueMatcher(baseMatchers[0])
+    {
+      final VectorMatch currentMask = VectorMatch.wrap(new int[getMaxVectorSize()]);
+      final VectorMatch scratch = VectorMatch.wrap(new int[getMaxVectorSize()]);
+      final VectorMatch retVal = VectorMatch.wrap(new int[getMaxVectorSize()]);
+
+      @Override
+      public ReadableVectorMatch match(final ReadableVectorMatch mask)
+      {
+        ReadableVectorMatch currentMatch = baseMatchers[0].match(mask);
+
+        // Initialize currentMask = mask, then progressively remove rows from the mask as we find matches for them.
+        // This isn't necessary for correctness (we could use the original "mask" on every call to "match") but it
+        // allows for short-circuiting on a row-by-row basis.
+        currentMask.copyFrom(mask);
+
+        // Initialize retVal = currentMatch, the rows matched by the first matcher. We'll add more as we loop over
+        // the rest of the matchers.
+        retVal.copyFrom(currentMatch);
+
+        for (int i = 1; i < baseMatchers.length; i++) {
+          if (retVal.isAllTrue(getCurrentVectorSize())) {
+            // Short-circuit if the entire vector is true.
+            break;
+          }
+
+          currentMask.removeAll(currentMatch);
+          currentMatch = baseMatchers[i].match(currentMask);
+          retVal.addAll(currentMatch, scratch);
+
+          if (currentMatch == currentMask) {
+            // baseMatchers[i] matched every remaining row. Short-circuit out.
+            break;
+          }
+        }
+
+        assert retVal.isValid(mask);
+        return retVal;
       }
-    }
-    return true;
+    };
   }
 
   @Override
-  public boolean supportsSelectivityEstimation(ColumnSelector columnSelector, BitmapIndexSelector indexSelector)
+  public boolean equals(Object o)
   {
-    for (Filter filter : filters) {
-      if (!filter.supportsSelectivityEstimation(columnSelector, indexSelector)) {
-        return false;
-      }
+    if (this == o) {
+      return true;
     }
-    return true;
+    if (o == null || getClass() != o.getClass()) {
+      return false;
+    }
+    OrFilter orFilter = (OrFilter) o;
+    return Objects.equals(getFilters(), orFilter.getFilters());
   }
 
   @Override
-  public double estimateSelectivity(BitmapIndexSelector indexSelector)
+  public int hashCode()
   {
-    // Estimate selectivity with attribute value independence assumption
-    double selectivity = 0;
-    for (final Filter filter : filters) {
-      selectivity += filter.estimateSelectivity(indexSelector);
-    }
-    return Math.min(selectivity, 1.);
-  }
-
-  @Override
-  public String toString()
-  {
-    return StringUtils.format("(%s)", OR_JOINER.join(filters));
+    return Objects.hash(getFilters());
   }
 }

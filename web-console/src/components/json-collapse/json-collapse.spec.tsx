@@ -16,17 +16,17 @@
  * limitations under the License.
  */
 
+import { shallow } from 'enzyme';
+import * as JSONBig from 'json-bigint-native';
 import React from 'react';
-import { render } from 'react-testing-library';
 
-import { JSONCollapse } from './json-collapse';
+import { JsonCollapse } from './json-collapse';
 
-describe('json collapse', () => {
+describe('JsonCollapse', () => {
   it('matches snapshot', () => {
-    const jsonCollapse = (
-      <JSONCollapse buttonText={'test'} stringValue={JSON.stringify({ name: 'test' })} />
+    const jsonCollapse = shallow(
+      <JsonCollapse buttonText="test" stringValue={JSONBig.stringify({ name: 'test' })} />,
     );
-    const { container } = render(jsonCollapse);
-    expect(container.firstChild).toMatchSnapshot();
+    expect(jsonCollapse).toMatchSnapshot();
   });
 });

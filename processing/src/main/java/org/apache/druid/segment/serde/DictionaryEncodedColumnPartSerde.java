@@ -98,7 +98,7 @@ public class DictionaryEncodedColumnPartSerde implements ColumnPartSerde
 
   @JsonCreator
   public static DictionaryEncodedColumnPartSerde createDeserializer(
-      @Nullable @JsonProperty("bitmapSerdeFactory") BitmapSerdeFactory bitmapSerdeFactory,
+      @JsonProperty("bitmapSerdeFactory") @Nullable BitmapSerdeFactory bitmapSerdeFactory,
       @NotNull @JsonProperty("byteOrder") ByteOrder byteOrder
   )
   {
@@ -116,7 +116,7 @@ public class DictionaryEncodedColumnPartSerde implements ColumnPartSerde
   private DictionaryEncodedColumnPartSerde(
       ByteOrder byteOrder,
       BitmapSerdeFactory bitmapSerdeFactory,
-      Serializer serializer
+      @Nullable Serializer serializer
   )
   {
     this.byteOrder = byteOrder;
@@ -143,13 +143,21 @@ public class DictionaryEncodedColumnPartSerde implements ColumnPartSerde
 
   public static class SerializerBuilder
   {
-    private VERSION version = null;
     private int flags = STARTING_FLAGS;
+
+    @Nullable
+    private VERSION version = null;
+    @Nullable
     private GenericIndexedWriter<String> dictionaryWriter = null;
+    @Nullable
     private ColumnarIntsSerializer valueWriter = null;
+    @Nullable
     private BitmapSerdeFactory bitmapSerdeFactory = null;
+    @Nullable
     private GenericIndexedWriter<ImmutableBitmap> bitmapIndexWriter = null;
+    @Nullable
     private ByteBufferWriter<ImmutableRTree> spatialIndexWriter = null;
+    @Nullable
     private ByteOrder byteOrder = null;
 
     public SerializerBuilder withDictionary(GenericIndexedWriter<String> dictionaryWriter)
@@ -295,11 +303,19 @@ public class DictionaryEncodedColumnPartSerde implements ColumnPartSerde
 
         final boolean hasMultipleValues = Feature.MULTI_VALUE.isSet(rFlags) || Feature.MULTI_VALUE_V3.isSet(rFlags);
 
+        // Duplicate the first buffer since we are reading the dictionary twice.
         final GenericIndexed<String> rDictionary = GenericIndexed.read(
-            buffer,
+            buffer.duplicate(),
             GenericIndexed.STRING_STRATEGY,
             builder.getFileMapper()
         );
+
+        final GenericIndexed<ByteBuffer> rDictionaryUtf8 = GenericIndexed.read(
+            buffer,
+            GenericIndexed.BYTE_BUFFER_STRATEGY,
+            builder.getFileMapper()
+        );
+
         builder.setType(ValueType.STRING);
 
         final WritableSupplier<ColumnarInts> rSingleValuedColumn;
@@ -313,14 +329,18 @@ public class DictionaryEncodedColumnPartSerde implements ColumnPartSerde
           rMultiValuedColumn = null;
         }
 
+        final String firstDictionaryEntry = rDictionary.get(0);
+
         DictionaryEncodedColumnSupplier dictionaryEncodedColumnSupplier = new DictionaryEncodedColumnSupplier(
             rDictionary,
+            rDictionaryUtf8,
             rSingleValuedColumn,
             rMultiValuedColumn,
             columnConfig.columnCacheSizeBytes()
         );
         builder
             .setHasMultipleValues(hasMultipleValues)
+            .setHasNulls(firstDictionaryEntry == null)
             .setDictionaryEncodedColumnSupplier(dictionaryEncodedColumnSupplier);
 
         if (!Feature.NO_BITMAP_INDEX.isSet(rFlags)) {

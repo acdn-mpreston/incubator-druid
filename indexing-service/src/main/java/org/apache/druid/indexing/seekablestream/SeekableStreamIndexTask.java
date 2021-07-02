@@ -21,47 +21,44 @@ package org.apache.druid.indexing.seekablestream;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Joiner;
-import com.google.common.base.Optional;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Supplier;
 import com.google.common.base.Suppliers;
 import org.apache.druid.data.input.InputRow;
+import org.apache.druid.data.input.impl.ByteEntity;
 import org.apache.druid.indexer.TaskStatus;
 import org.apache.druid.indexing.appenderator.ActionBasedSegmentAllocator;
 import org.apache.druid.indexing.appenderator.ActionBasedUsedSegmentChecker;
+import org.apache.druid.indexing.common.LockGranularity;
 import org.apache.druid.indexing.common.TaskToolbox;
 import org.apache.druid.indexing.common.actions.SegmentAllocateAction;
 import org.apache.druid.indexing.common.actions.TaskActionClient;
 import org.apache.druid.indexing.common.config.TaskConfig;
-import org.apache.druid.indexing.common.stats.RowIngestionMetersFactory;
 import org.apache.druid.indexing.common.task.AbstractTask;
 import org.apache.druid.indexing.common.task.TaskResource;
 import org.apache.druid.indexing.common.task.Tasks;
 import org.apache.druid.indexing.seekablestream.common.RecordSupplier;
-import org.apache.druid.indexing.seekablestream.utils.RandomIdUtils;
-import org.apache.druid.java.util.common.Intervals;
 import org.apache.druid.java.util.common.StringUtils;
-import org.apache.druid.java.util.common.parsers.ParseException;
 import org.apache.druid.java.util.emitter.EmittingLogger;
 import org.apache.druid.query.NoopQueryRunner;
 import org.apache.druid.query.Query;
 import org.apache.druid.query.QueryRunner;
+import org.apache.druid.segment.incremental.ParseExceptionHandler;
+import org.apache.druid.segment.incremental.RowIngestionMeters;
 import org.apache.druid.segment.indexing.DataSchema;
 import org.apache.druid.segment.realtime.FireDepartmentMetrics;
 import org.apache.druid.segment.realtime.appenderator.Appenderator;
-import org.apache.druid.segment.realtime.appenderator.Appenderators;
 import org.apache.druid.segment.realtime.appenderator.StreamAppenderatorDriver;
 import org.apache.druid.segment.realtime.firehose.ChatHandler;
-import org.apache.druid.segment.realtime.firehose.ChatHandlerProvider;
 import org.apache.druid.server.security.AuthorizerMapper;
-import org.apache.druid.utils.CircularBuffer;
+import org.apache.druid.timeline.partition.NumberedPartialShardSpec;
+import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
 
 import javax.annotation.Nullable;
 import java.util.Map;
 
 
-public abstract class SeekableStreamIndexTask<PartitionIdType, SequenceOffsetType>
+public abstract class SeekableStreamIndexTask<PartitionIdType, SequenceOffsetType, RecordType extends ByteEntity>
     extends AbstractTask implements ChatHandler
 {
   public static final long LOCK_ACQUIRE_TIMEOUT_SECONDS = 15;
@@ -70,16 +67,16 @@ public abstract class SeekableStreamIndexTask<PartitionIdType, SequenceOffsetTyp
   protected final DataSchema dataSchema;
   protected final SeekableStreamIndexTaskTuningConfig tuningConfig;
   protected final SeekableStreamIndexTaskIOConfig<PartitionIdType, SequenceOffsetType> ioConfig;
-  protected final Optional<ChatHandlerProvider> chatHandlerProvider;
   protected final Map<String, Object> context;
-  protected final AuthorizerMapper authorizerMapper;
-  protected final RowIngestionMetersFactory rowIngestionMetersFactory;
-  protected final CircularBuffer<Throwable> savedParseExceptions;
+  protected final LockGranularity lockGranularityToUse;
 
   // Lazily initialized, to avoid calling it on the overlord when tasks are instantiated.
-  // See https://github.com/apache/incubator-druid/issues/7724 for issues that can cause.
+  // See https://github.com/apache/druid/issues/7724 for issues that can cause.
   // By the way, lazily init is synchronized because the runner may be needed in multiple threads.
-  private final Supplier<SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOffsetType>> runnerSupplier;
+  private final Supplier<SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOffsetType, ?>> runnerSupplier;
+
+  @MonotonicNonNull
+  protected AuthorizerMapper authorizerMapper;
 
   public SeekableStreamIndexTask(
       final String id,
@@ -88,9 +85,6 @@ public abstract class SeekableStreamIndexTask<PartitionIdType, SequenceOffsetTyp
       final SeekableStreamIndexTaskTuningConfig tuningConfig,
       final SeekableStreamIndexTaskIOConfig<PartitionIdType, SequenceOffsetType> ioConfig,
       @Nullable final Map<String, Object> context,
-      @Nullable final ChatHandlerProvider chatHandlerProvider,
-      final AuthorizerMapper authorizerMapper,
-      final RowIngestionMetersFactory rowIngestionMetersFactory,
       @Nullable final String groupId
   )
   {
@@ -104,27 +98,11 @@ public abstract class SeekableStreamIndexTask<PartitionIdType, SequenceOffsetTyp
     this.dataSchema = Preconditions.checkNotNull(dataSchema, "dataSchema");
     this.tuningConfig = Preconditions.checkNotNull(tuningConfig, "tuningConfig");
     this.ioConfig = Preconditions.checkNotNull(ioConfig, "ioConfig");
-    this.chatHandlerProvider = Optional.fromNullable(chatHandlerProvider);
-    if (tuningConfig.getMaxSavedParseExceptions() > 0) {
-      savedParseExceptions = new CircularBuffer<>(tuningConfig.getMaxSavedParseExceptions());
-    } else {
-      savedParseExceptions = null;
-    }
     this.context = context;
-    this.authorizerMapper = authorizerMapper;
-    this.rowIngestionMetersFactory = rowIngestionMetersFactory;
     this.runnerSupplier = Suppliers.memoize(this::createTaskRunner);
-  }
-
-  private static String makeTaskId(String dataSource, String type)
-  {
-    final String suffix = RandomIdUtils.getRandomId();
-    return Joiner.on("_").join(type, dataSource, suffix);
-  }
-
-  protected static String getFormattedId(String dataSource, String type)
-  {
-    return makeTaskId(dataSource, type);
+    this.lockGranularityToUse = getContextValue(Tasks.FORCE_TIME_CHUNK_LOCK_KEY, Tasks.DEFAULT_FORCE_TIME_CHUNK_LOCK)
+                                ? LockGranularity.TIME_CHUNK
+                                : LockGranularity.SEGMENT;
   }
 
   protected static String getFormattedGroupId(String dataSource, String type)
@@ -179,6 +157,8 @@ public abstract class SeekableStreamIndexTask<PartitionIdType, SequenceOffsetTyp
   {
     if (taskConfig.isRestoreTasksOnRestart()) {
       getRunner().stopGracefully();
+    } else {
+      getRunner().stopForcefully();
     }
   }
 
@@ -193,23 +173,32 @@ public abstract class SeekableStreamIndexTask<PartitionIdType, SequenceOffsetTyp
     return (queryPlus, responseContext) -> queryPlus.run(getRunner().getAppenderator(), responseContext);
   }
 
-  public Appenderator newAppenderator(FireDepartmentMetrics metrics, TaskToolbox toolbox)
+  public Appenderator newAppenderator(
+      TaskToolbox toolbox,
+      FireDepartmentMetrics metrics,
+      RowIngestionMeters rowIngestionMeters,
+      ParseExceptionHandler parseExceptionHandler
+  )
   {
-    return Appenderators.createRealtime(
+    return toolbox.getAppenderatorsManager().createRealtimeAppenderatorForTask(
+        getId(),
         dataSchema,
         tuningConfig.withBasePersistDirectory(toolbox.getPersistDir()),
         metrics,
         toolbox.getSegmentPusher(),
-        toolbox.getObjectMapper(),
+        toolbox.getJsonMapper(),
         toolbox.getIndexIO(),
         toolbox.getIndexMergerV9(),
         toolbox.getQueryRunnerFactoryConglomerate(),
         toolbox.getSegmentAnnouncer(),
         toolbox.getEmitter(),
-        toolbox.getQueryExecutorService(),
+        toolbox.getQueryProcessingPool(),
+        toolbox.getJoinableFactory(),
         toolbox.getCache(),
         toolbox.getCacheConfig(),
-        toolbox.getCachePopulatorStats()
+        toolbox.getCachePopulatorStats(),
+        rowIngestionMeters,
+        parseExceptionHandler
     );
   }
 
@@ -231,13 +220,15 @@ public abstract class SeekableStreamIndexTask<PartitionIdType, SequenceOffsetTyp
                 schema.getGranularitySpec().getSegmentGranularity(),
                 sequenceName,
                 previousSegmentId,
-                skipSegmentLineageCheck
+                skipSegmentLineageCheck,
+                NumberedPartialShardSpec.instance(),
+                lockGranularityToUse
             )
         ),
         toolbox.getSegmentHandoffNotifierFactory(),
         new ActionBasedUsedSegmentChecker(toolbox.getTaskActionClient()),
         toolbox.getDataSegmentKiller(),
-        toolbox.getObjectMapper(),
+        toolbox.getJsonMapper(),
         metrics
     );
   }
@@ -249,14 +240,6 @@ public abstract class SeekableStreamIndexTask<PartitionIdType, SequenceOffsetTyp
 
     final boolean afterMaximumMessageTime = ioConfig.getMaximumMessageTime().isPresent()
                                             && ioConfig.getMaximumMessageTime().get().isBefore(row.getTimestamp());
-
-    if (!Intervals.ETERNITY.contains(row.getTimestamp())) {
-      final String errorMsg = StringUtils.format(
-          "Encountered row with timestamp that cannot be represented as a long: [%s]",
-          row
-      );
-      throw new ParseException(errorMsg);
-    }
 
     if (log.isDebugEnabled()) {
       if (beforeMinimumMessageTime) {
@@ -277,9 +260,9 @@ public abstract class SeekableStreamIndexTask<PartitionIdType, SequenceOffsetTyp
     return !beforeMinimumMessageTime && !afterMaximumMessageTime;
   }
 
-  protected abstract SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOffsetType> createTaskRunner();
+  protected abstract SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOffsetType, RecordType> createTaskRunner();
 
-  protected abstract RecordSupplier<PartitionIdType, SequenceOffsetType> newTaskRecordSupplier();
+  protected abstract RecordSupplier<PartitionIdType, SequenceOffsetType, RecordType> newTaskRecordSupplier();
 
   @VisibleForTesting
   public Appenderator getAppenderator()
@@ -288,7 +271,7 @@ public abstract class SeekableStreamIndexTask<PartitionIdType, SequenceOffsetTyp
   }
 
   @VisibleForTesting
-  public SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOffsetType> getRunner()
+  public SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOffsetType, ?> getRunner()
   {
     return runnerSupplier.get();
   }

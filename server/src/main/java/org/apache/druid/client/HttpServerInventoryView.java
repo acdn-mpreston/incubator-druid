@@ -58,7 +58,6 @@ import java.net.MalformedURLException;
 import java.net.URL;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -414,7 +413,7 @@ public class HttpServerInventoryView implements ServerInventoryView, FilteredSer
   {
     Preconditions.checkArgument(lifecycleLock.awaitStarted(1, TimeUnit.MILLISECONDS));
 
-    Map<String, Object> result = new HashMap<>(servers.size());
+    Map<String, Object> result = Maps.newHashMapWithExpectedSize(servers.size());
     for (Map.Entry<String, DruidServerHolder> e : servers.entrySet()) {
       DruidServerHolder serverHolder = e.getValue();
       result.put(
@@ -587,18 +586,19 @@ public class HttpServerInventoryView implements ServerInventoryView, FilteredSer
       };
     }
 
-    private void addSegment(final DataSegment segment)
+    private void addSegment(DataSegment segment)
     {
       if (finalPredicate.apply(Pair.of(druidServer.getMetadata(), segment))) {
         if (druidServer.getSegment(segment.getId()) == null) {
-          druidServer.addDataSegment(segment);
+          DataSegment theSegment = DataSegmentInterner.intern(segment);
+          druidServer.addDataSegment(theSegment);
           runSegmentCallbacks(
               new Function<SegmentCallback, CallbackAction>()
               {
                 @Override
                 public CallbackAction apply(SegmentCallback input)
                 {
-                  return input.segmentAdded(druidServer.getMetadata(), segment);
+                  return input.segmentAdded(druidServer.getMetadata(), theSegment);
                 }
               }
           );

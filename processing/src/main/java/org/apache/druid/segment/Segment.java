@@ -57,5 +57,15 @@ public interface Segment extends Closeable
    * @param <T> desired interface
    * @return instance of clazz, or null if the interface is not supported by this segment
    */
-  <T> T as(Class<T> clazz);
+  @SuppressWarnings("unused")
+  @Nullable
+  default <T> T as(Class<T> clazz)
+  {
+    if (clazz.equals(QueryableIndex.class)) {
+      return (T) asQueryableIndex();
+    } else if (clazz.equals(StorageAdapter.class)) {
+      return (T) asStorageAdapter();
+    }
+    return null;
+  }
 }

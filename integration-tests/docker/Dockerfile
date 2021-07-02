@@ -13,8 +13,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Base image is built from integration-tests/docker-base in the Druid repo
-FROM imply/druiditbase:0.2
+ARG JDK_VERSION=8-slim
+FROM openjdk:$JDK_VERSION as druidbase
+
+# Bundle everything into one script so cleanup can reduce image size.
+# Otherwise docker's layered images mean that things are not actually deleted.
+
+COPY base-setup.sh /root/base-setup.sh
+ARG KAFKA_VERSION
+# ZooKeeper version to install in the base image
+# This is passed in by maven at build time to align with the client version we depend on in the pom file
+ARG ZK_VERSION
+ARG APACHE_ARCHIVE_MIRROR_HOST=https://archive.apache.org
+RUN APACHE_ARCHIVE_MIRROR_HOST=${APACHE_ARCHIVE_MIRROR_HOST} /root/base-setup.sh && rm -f /root/base-setup.sh
+
+FROM druidbase
+ARG MYSQL_VERSION
+ARG CONFLUENT_VERSION
+
+# Verify Java version
+RUN java -version
 
 RUN echo "[mysqld]\ncharacter-set-server=utf8\ncollation-server=utf8_bin\n" >> /etc/mysql/my.cnf
 
@@ -28,23 +46,25 @@ RUN find /var/lib/mysql -type f -exec touch {} \; && /etc/init.d/mysql start \
 ADD lib/* /usr/local/druid/lib/
 
 # Download the MySQL Java connector
-ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y --no-install-recommends apt-utils libmysql-java
-RUN ln -sf /usr/share/java/mysql-connector-java.jar /usr/local/druid/lib/mysql-connector-java.jar
+# target path must match the exact path referenced in environment-configs/common
+RUN wget -q "https://repo1.maven.org/maven2/mysql/mysql-connector-java/$MYSQL_VERSION/mysql-connector-java-$MYSQL_VERSION.jar" \
+    -O /usr/local/druid/lib/mysql-connector-java.jar
+
+RUN wget -q "https://packages.confluent.io/maven/io/confluent/kafka-protobuf-provider/$CONFLUENT_VERSION/kafka-protobuf-provider-$CONFLUENT_VERSION.jar" \
+    -O /usr/local/druid/lib/kafka-protobuf-provider.jar
 
 # Add sample data
 # touch is needed because OverlayFS's copy-up operation breaks POSIX standards. See https://github.com/docker/for-linux/issues/72.
 RUN find /var/lib/mysql -type f -exec touch {} \; && service mysql start \
       && java -cp "/usr/local/druid/lib/*" -Ddruid.metadata.storage.type=mysql org.apache.druid.cli.Main tools metadata-init --connectURI="jdbc:mysql://localhost:3306/druid" --user=druid --password=diurd \
       && /etc/init.d/mysql stop
-ADD sample-data.sql sample-data.sql
-# touch is needed because OverlayFS's copy-up operation breaks POSIX standards. See https://github.com/docker/for-linux/issues/72.
-RUN find /var/lib/mysql -type f -exec touch {} \; && service mysql start \
-      && cat sample-data.sql | mysql -u root druid \
-      && /etc/init.d/mysql stop
+ADD test-data /test-data
 
 # Setup supervisord
 ADD supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+
+# Add druid configuration setup script
+ADD druid.sh /druid.sh
 
 # mysql
 ADD run-mysql.sh /run-mysql.sh
@@ -86,4 +106,15 @@ EXPOSE 8300 8301 8302 8303 8304 8305
 EXPOSE 9092 9093
 
 WORKDIR /var/lib/druid
-ENTRYPOINT export HOST_IP="$(resolveip -s $HOSTNAME)" && /tls/generate-server-certs-and-keystores.sh && exec /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf
+ENTRYPOINT  /tls/generate-server-certs-and-keystores.sh \
+            && . /druid.sh \
+            # Create druid service config files with all the config variables
+            && setupConfig \
+            # Some test groups require pre-existing data to be setup
+            && setupData \
+            # Export the service config file path to use in supervisord conf file
+            && export DRUID_COMMON_CONF_DIR="$(. /druid.sh; getConfPath ${DRUID_SERVICE})" \
+            # Export the common config file path to use in supervisord conf file
+            && export DRUID_SERVICE_CONF_DIR="$(. /druid.sh; getConfPath _common)" \
+            # Run Druid service using supervisord
+            && exec /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf

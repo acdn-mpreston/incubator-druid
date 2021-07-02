@@ -26,6 +26,7 @@ import org.apache.druid.guice.annotations.PublicApi;
 import org.apache.druid.java.util.common.parsers.TimestampParser;
 import org.joda.time.DateTime;
 
+import javax.annotation.Nullable;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -41,7 +42,7 @@ public class TimestampSpec
     DateTime lastDateTime = null;
   }
 
-  private static final String DEFAULT_COLUMN = "timestamp";
+  public static final String DEFAULT_COLUMN = "timestamp";
   private static final String DEFAULT_FORMAT = "auto";
   private static final DateTime DEFAULT_MISSING_VALUE = null;
 
@@ -53,14 +54,14 @@ public class TimestampSpec
   private final Function<Object, DateTime> timestampConverter;
 
   // remember last value parsed
-  private static final ThreadLocal<ParseCtx> parseCtx = ThreadLocal.withInitial(ParseCtx::new);
+  private static final ThreadLocal<ParseCtx> PARSE_CTX = ThreadLocal.withInitial(ParseCtx::new);
 
   @JsonCreator
   public TimestampSpec(
-      @JsonProperty("column") String timestampColumn,
-      @JsonProperty("format") String format,
+      @JsonProperty("column") @Nullable String timestampColumn,
+      @JsonProperty("format") @Nullable String format,
       // this value should never be set for production data; the data loader uses it before a timestamp column is chosen
-      @JsonProperty("missingValue") DateTime missingValue
+      @JsonProperty("missingValue") @Nullable DateTime missingValue
   )
   {
     this.timestampColumn = (timestampColumn == null) ? DEFAULT_COLUMN : timestampColumn;
@@ -89,16 +90,24 @@ public class TimestampSpec
     return missingValue;
   }
 
-  public DateTime extractTimestamp(Map<String, Object> input)
+  @Nullable
+  public DateTime extractTimestamp(@Nullable Map<String, Object> input)
   {
-    return parseDateTime(input.get(timestampColumn));
+    return parseDateTime(getRawTimestamp(input));
   }
 
-  public DateTime parseDateTime(Object input)
+  @Nullable
+  public Object getRawTimestamp(@Nullable Map<String, Object> input)
+  {
+    return input == null ? null : input.get(timestampColumn);
+  }
+
+  @Nullable
+  public DateTime parseDateTime(@Nullable Object input)
   {
     DateTime extracted = missingValue;
     if (input != null) {
-      ParseCtx ctx = parseCtx.get();
+      ParseCtx ctx = PARSE_CTX.get();
       // Check if the input is equal to the last input, so we don't need to parse it again
       if (input.equals(ctx.lastTimeObject)) {
         extracted = ctx.lastDateTime;
@@ -107,7 +116,7 @@ public class TimestampSpec
         ParseCtx newCtx = new ParseCtx();
         newCtx.lastTimeObject = input;
         newCtx.lastDateTime = extracted;
-        parseCtx.set(newCtx);
+        PARSE_CTX.set(newCtx);
       }
     }
     return extracted;

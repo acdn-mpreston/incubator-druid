@@ -16,14 +16,42 @@
  * limitations under the License.
  */
 
+import { render } from '@testing-library/react';
+import { QueryResult, SqlQuery } from 'druid-query-toolkit';
 import React from 'react';
-import { render } from 'react-testing-library';
 
 import { QueryOutput } from './query-output';
 
 describe('query output', () => {
   it('matches snapshot', () => {
-    const queryOutput = <QueryOutput loading={false} result={null} error="lol" />;
+    const parsedQuery = SqlQuery.parse(`SELECT
+  "language",
+  COUNT(*) AS "Count", COUNT(DISTINCT "language") AS "dist_language", COUNT(*) FILTER (WHERE "language"= 'xxx') AS "language_filtered_count"
+FROM "github"
+WHERE "__time" >= CURRENT_TIMESTAMP - INTERVAL '1' DAY AND "language" != 'TypeScript'
+GROUP BY 1
+HAVING "Count" != 37392
+ORDER BY "Count" DESC`);
+
+    const queryOutput = (
+      <QueryOutput
+        runeMode={false}
+        queryResult={QueryResult.fromRawResult(
+          [
+            ['language', 'Count', 'dist_language', 'language_filtered_count'],
+            ['', 6881, 1, 0],
+            ['JavaScript', 166, 1, 0],
+            ['Python', 62, 1, 0],
+            ['HTML', 46, 1, 0],
+            [],
+          ],
+          false,
+          true,
+        ).attachQuery({}, parsedQuery)}
+        onQueryChange={() => {}}
+        onLoadMore={() => {}}
+      />
+    );
 
     const { container } = render(queryOutput);
     expect(container.firstChild).toMatchSnapshot();

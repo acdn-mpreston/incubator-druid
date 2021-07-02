@@ -23,10 +23,10 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.io.ByteSource;
 import com.google.common.io.Files;
-import org.apache.commons.io.FileUtils;
 import org.apache.druid.data.input.InputRow;
 import org.apache.druid.data.input.MapBasedInputRow;
 import org.apache.druid.java.util.common.DateTimes;
+import org.apache.druid.java.util.common.FileUtils;
 import org.apache.druid.java.util.common.JodaUtils;
 import org.apache.druid.query.aggregation.AggregatorFactory;
 import org.apache.druid.query.aggregation.CountAggregatorFactory;
@@ -35,6 +35,7 @@ import org.apache.druid.segment.data.CompressionStrategy;
 import org.apache.druid.segment.data.ConciseBitmapSerdeFactory;
 import org.apache.druid.segment.incremental.IncrementalIndex;
 import org.apache.druid.segment.incremental.IncrementalIndexSchema;
+import org.apache.druid.segment.incremental.OnheapIncrementalIndex;
 import org.apache.druid.segment.writeout.OffHeapMemorySegmentWriteOutMediumFactory;
 import org.apache.druid.segment.writeout.SegmentWriteOutMediumFactory;
 import org.apache.druid.segment.writeout.TmpFileSegmentWriteOutMediumFactory;
@@ -133,7 +134,7 @@ public class IndexMergerV9CompatibilityTest
   @Before
   public void setUp() throws IOException
   {
-    toPersist = new IncrementalIndex.Builder()
+    toPersist = new OnheapIncrementalIndex.Builder()
         .setIndexSchema(
             new IncrementalIndexSchema.Builder()
                 .withMinTimestamp(JodaUtils.MIN_INSTANT)
@@ -141,15 +142,15 @@ public class IndexMergerV9CompatibilityTest
                 .build()
         )
     .setMaxRowCount(1000000)
-    .buildOnheap();
+    .build();
 
     toPersist.getMetadata().put("key", "value");
     for (InputRow event : events) {
       toPersist.add(event);
     }
-    tmpDir = Files.createTempDir();
+    tmpDir = FileUtils.createTempDir();
     persistTmpDir = new File(tmpDir, "persistDir");
-    FileUtils.forceMkdir(persistTmpDir);
+    org.apache.commons.io.FileUtils.forceMkdir(persistTmpDir);
     String[] files = new String[] {"00000.smoosh", "meta.smoosh", "version.bin"};
     for (String file : files) {
       new ByteSource()
@@ -172,10 +173,10 @@ public class IndexMergerV9CompatibilityTest
   @Test
   public void testPersistWithSegmentMetadata() throws IOException
   {
-    File outDir = Files.createTempDir();
+    File outDir = FileUtils.createTempDir();
     QueryableIndex index = null;
     try {
-      outDir = Files.createTempDir();
+      outDir = FileUtils.createTempDir();
       index = indexIO.loadIndex(indexMerger.persist(toPersist, outDir, INDEX_SPEC, null));
 
       Assert.assertEquals("value", index.getMetadata().get("key"));

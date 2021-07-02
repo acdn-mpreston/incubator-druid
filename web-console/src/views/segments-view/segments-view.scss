@@ -31,10 +31,16 @@
     .-totalPages {
       display: none;
     }
+  }
 
-    .segment-detail {
-      padding: 20px;
-      background: #212d36;
+  &.show-segment-timeline {
+    .segment-timeline {
+      height: calc(50% - 55px);
+      margin-top: 10px;
+    }
+
+    .ReactTable {
+      top: 50%;
     }
   }
 }

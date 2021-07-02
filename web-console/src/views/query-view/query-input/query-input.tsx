@@ -16,18 +16,22 @@
  * limitations under the License.
  */
 
-import { IResizeEntry, ResizeSensor } from '@blueprintjs/core';
-import ace from 'brace';
+import { ResizeEntry } from '@blueprintjs/core';
+import { ResizeSensor2 } from '@blueprintjs/popover2';
+import ace, { Editor } from 'brace';
+import escape from 'lodash.escape';
 import React from 'react';
 import AceEditor from 'react-ace';
-import ReactDOMServer from 'react-dom/server';
 
-import { SQL_DATE_TYPES, SQL_FUNCTIONS, SyntaxDescription } from '../../../../lib/sql-function-doc';
-import { uniq } from '../../../utils';
+import {
+  SQL_CONSTANTS,
+  SQL_DYNAMICS,
+  SQL_EXPRESSION_PARTS,
+  SQL_KEYWORDS,
+} from '../../../../lib/keywords';
+import { SQL_DATA_TYPES, SQL_FUNCTIONS } from '../../../../lib/sql-docs';
+import { RowColumn, uniq } from '../../../utils';
 import { ColumnMetadata } from '../../../utils/column-metadata';
-import { ColumnTreeProps, ColumnTreeState } from '../column-tree/column-tree';
-
-import { SQL_CONSTANTS, SQL_DYNAMICS, SQL_EXPRESSION_PARTS, SQL_KEYWORDS } from './keywords';
 
 import './query-input.scss';
 
@@ -37,61 +41,25 @@ export interface QueryInputProps {
   queryString: string;
   onQueryStringChange: (newQueryString: string) => void;
   runeMode: boolean;
-  columnMetadata: ColumnMetadata[] | null;
+  columnMetadata?: readonly ColumnMetadata[];
+  currentSchema?: string;
+  currentTable?: string;
 }
 
 export interface QueryInputState {
   // For reasons (https://github.com/securingsincity/react-ace/issues/415) react ace editor needs an explicit height
   // Since this component will grown and shrink dynamically we will measure its height and then set it.
   editorHeight: number;
-  prevColumnMetadata: ColumnMetadata[] | null;
+  completions: any[];
+  prevColumnMetadata?: readonly ColumnMetadata[];
+  prevCurrentTable?: string;
+  prevCurrentSchema?: string;
 }
 
 export class QueryInput extends React.PureComponent<QueryInputProps, QueryInputState> {
-  static getDerivedStateFromProps(props: ColumnTreeProps, state: ColumnTreeState) {
-    const { columnMetadata } = props;
+  private aceEditor: Editor | undefined;
 
-    if (columnMetadata && columnMetadata !== state.prevColumnMetadata) {
-      const completions = ([] as any[]).concat(
-        uniq(columnMetadata.map(d => d.TABLE_SCHEMA)).map(v => ({
-          value: v,
-          score: 10,
-          meta: 'schema',
-        })),
-        uniq(columnMetadata.map(d => d.TABLE_NAME)).map(v => ({
-          value: v,
-          score: 49,
-          meta: 'datasource',
-        })),
-        uniq(columnMetadata.map(d => d.COLUMN_NAME)).map(v => ({
-          value: v,
-          score: 50,
-          meta: 'column',
-        })),
-      );
-
-      langTools.addCompleter({
-        getCompletions: (_editor: any, _session: any, _pos: any, _prefix: any, callback: any) => {
-          callback(null, completions);
-        },
-      });
-
-      return {
-        prevColumnMetadata: columnMetadata,
-      };
-    }
-    return null;
-  }
-
-  constructor(props: QueryInputProps, context: any) {
-    super(props, context);
-    this.state = {
-      editorHeight: 200,
-      prevColumnMetadata: null,
-    };
-  }
-
-  private replaceDefaultAutoCompleter = () => {
+  static replaceDefaultAutoCompleter(): void {
     if (!langTools) return;
 
     const keywordList = ([] as any[]).concat(
@@ -99,38 +67,45 @@ export class QueryInput extends React.PureComponent<QueryInputProps, QueryInputS
       SQL_EXPRESSION_PARTS.map(v => ({ name: v, value: v, score: 0, meta: 'keyword' })),
       SQL_CONSTANTS.map(v => ({ name: v, value: v, score: 0, meta: 'constant' })),
       SQL_DYNAMICS.map(v => ({ name: v, value: v, score: 0, meta: 'dynamic' })),
-      SQL_DATE_TYPES.map(v => ({ name: v.syntax, value: v.syntax, score: 0, meta: 'keyword' })),
+      SQL_DATA_TYPES.map(([name, runtime, description]) => ({
+        name,
+        value: name,
+        score: 0,
+        meta: 'type',
+        syntax: `Druid runtime type: ${runtime}`,
+        description,
+      })),
     );
-
-    const keywordCompleter = {
-      getCompletions: (_editor: any, _session: any, _pos: any, _prefix: any, callback: any) => {
-        return callback(null, keywordList);
-      },
-    };
 
     langTools.setCompleters([
       langTools.snippetCompleter,
       langTools.textCompleter,
-      keywordCompleter,
+      {
+        getCompletions: (_editor: any, _session: any, _pos: any, _prefix: any, callback: any) => {
+          return callback(null, keywordList);
+        },
+        getDocTooltip: (item: any) => {
+          if (item.meta === 'type') {
+            item.docHTML = QueryInput.makeDocHtml(item);
+          }
+        },
+      },
     ]);
-  };
+  }
 
-  private addFunctionAutoCompleter = (): void => {
+  static addFunctionAutoCompleter(): void {
     if (!langTools) return;
 
-    const functionList: any[] = SQL_FUNCTIONS.map((entry: SyntaxDescription) => {
-      const funcName: string = entry.syntax.replace(/\(.*\)/, '()');
+    const functionList: any[] = SQL_FUNCTIONS.map(([name, args, description]) => {
       return {
-        value: funcName,
+        value: name,
         score: 80,
         meta: 'function',
-        syntax: entry.syntax,
-        description: entry.description,
+        syntax: `${name}(${args})`,
+        description,
         completer: {
           insertMatch: (editor: any, data: any) => {
             editor.completer.insertMatch({ value: data.caption });
-            const pos = editor.getCursorPosition();
-            editor.gotoLine(pos.row + 1, pos.column - 1);
           },
         },
       };
@@ -142,56 +117,127 @@ export class QueryInput extends React.PureComponent<QueryInputProps, QueryInputS
       },
       getDocTooltip: (item: any) => {
         if (item.meta === 'function') {
-          const functionName = item.caption.slice(0, -2);
-          item.docHTML = ReactDOMServer.renderToStaticMarkup(
-            <div className="function-doc">
-              <div className="function-doc-name">
-                <b>{functionName}</b>
-              </div>
-              <hr />
-              <div>
-                <b>Syntax:</b>
-              </div>
-              <div>{item.syntax}</div>
-              <br />
-              <div>
-                <b>Description:</b>
-              </div>
-              <div>{item.description}</div>
-            </div>,
-          );
+          item.docHTML = QueryInput.makeDocHtml(item);
         }
       },
     });
-  };
-
-  componentDidMount(): void {
-    this.replaceDefaultAutoCompleter();
-    this.addFunctionAutoCompleter();
   }
 
-  private handleAceContainerResize = (entries: IResizeEntry[]) => {
+  static makeDocHtml(item: any) {
+    return `
+<div class="doc-name">${escape(item.caption)}</div>
+<div class="doc-syntax">${escape(item.syntax)}</div>
+<div class="doc-description">${escape(item.description)}</div>`;
+  }
+
+  static getDerivedStateFromProps(props: QueryInputProps, state: QueryInputState) {
+    const { columnMetadata, currentSchema, currentTable } = props;
+
+    if (
+      columnMetadata &&
+      (columnMetadata !== state.prevColumnMetadata ||
+        currentSchema !== state.prevCurrentSchema ||
+        currentTable !== state.prevCurrentTable)
+    ) {
+      const completions = ([] as any[]).concat(
+        uniq(columnMetadata.map(d => d.TABLE_SCHEMA)).map(v => ({
+          value: v,
+          score: 10,
+          meta: 'schema',
+        })),
+        uniq(
+          columnMetadata
+            .filter(d => (currentSchema ? d.TABLE_SCHEMA === currentSchema : true))
+            .map(d => d.TABLE_NAME),
+        ).map(v => ({
+          value: v,
+          score: 49,
+          meta: 'datasource',
+        })),
+        uniq(
+          columnMetadata
+            .filter(d =>
+              currentTable && currentSchema
+                ? d.TABLE_NAME === currentTable && d.TABLE_SCHEMA === currentSchema
+                : true,
+            )
+            .map(d => d.COLUMN_NAME),
+        ).map(v => ({
+          value: v,
+          score: 50,
+          meta: 'column',
+        })),
+      );
+
+      return {
+        completions,
+        prevColumnMetadata: columnMetadata,
+        prevCurrentSchema: currentSchema,
+        prevCurrentTable: currentTable,
+      };
+    }
+    return null;
+  }
+
+  constructor(props: QueryInputProps, context: any) {
+    super(props, context);
+    this.state = {
+      editorHeight: 200,
+      completions: [],
+    };
+  }
+
+  componentDidMount(): void {
+    QueryInput.replaceDefaultAutoCompleter();
+    QueryInput.addFunctionAutoCompleter();
+    if (langTools) {
+      langTools.addCompleter({
+        getCompletions: (_editor: any, _session: any, _pos: any, _prefix: any, callback: any) => {
+          callback(null, this.state.completions);
+        },
+      });
+    }
+  }
+
+  private readonly handleAceContainerResize = (entries: ResizeEntry[]) => {
     if (entries.length !== 1) return;
     this.setState({ editorHeight: entries[0].contentRect.height });
   };
 
-  render() {
-    const { queryString, runeMode, onQueryStringChange } = this.props;
+  private readonly handleChange = (value: string) => {
+    // This gets the event as a second arg
+    const { onQueryStringChange } = this.props;
+    onQueryStringChange(value);
+  };
+
+  public goToPosition(rowColumn: RowColumn) {
+    const { aceEditor } = this;
+    if (!aceEditor) return;
+    aceEditor.focus(); // Grab the focus
+    aceEditor.getSelection().moveCursorTo(rowColumn.row, rowColumn.column);
+    if (rowColumn.endRow && rowColumn.endColumn) {
+      aceEditor
+        .getSelection()
+        .selectToPosition({ row: rowColumn.endRow, column: rowColumn.endColumn });
+    }
+  }
+
+  render(): JSX.Element {
+    const { queryString, runeMode } = this.props;
     const { editorHeight } = this.state;
 
     // Set the key in the AceEditor to force a rebind and prevent an error that happens otherwise
     return (
       <div className="query-input">
-        <ResizeSensor onResize={this.handleAceContainerResize}>
+        <ResizeSensor2 onResize={this.handleAceContainerResize}>
           <div className="ace-container">
             <AceEditor
-              key={runeMode ? 'hjson' : 'sql'}
-              mode={runeMode ? 'hjson' : 'sql'}
+              mode={runeMode ? 'hjson' : 'dsql'}
               theme="solarized_dark"
               name="ace-editor"
-              onChange={onQueryStringChange}
+              onChange={this.handleChange}
               focus
-              fontSize={14}
+              fontSize={13}
               width="100%"
               height={`${editorHeight}px`}
               showPrintMargin={false}
@@ -206,9 +252,15 @@ export class QueryInput extends React.PureComponent<QueryInputProps, QueryInputS
                 tabSize: 2,
               }}
               style={{}}
+              placeholder="SELECT * FROM ..."
+              onLoad={(editor: any) => {
+                editor.renderer.setPadding(10);
+                editor.renderer.setScrollMargin(10);
+                this.aceEditor = editor;
+              }}
             />
           </div>
-        </ResizeSensor>
+        </ResizeSensor2>
       </div>
     );
   }

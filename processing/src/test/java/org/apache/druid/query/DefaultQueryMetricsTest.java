@@ -19,6 +19,7 @@
 
 package org.apache.druid.query;
 
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import org.apache.druid.java.util.common.granularity.Granularities;
 import org.apache.druid.java.util.emitter.service.ServiceEmitter;
@@ -28,12 +29,10 @@ import org.apache.druid.query.dimension.ListFilteredDimensionSpec;
 import org.apache.druid.query.filter.SelectorDimFilter;
 import org.apache.druid.query.topn.TopNQuery;
 import org.apache.druid.query.topn.TopNQueryBuilder;
-import org.apache.druid.segment.TestHelper;
 import org.joda.time.Interval;
 import org.junit.Assert;
 import org.junit.Test;
 
-import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -50,7 +49,7 @@ public class DefaultQueryMetricsTest
   {
     CachingEmitter cachingEmitter = new CachingEmitter();
     ServiceEmitter serviceEmitter = new ServiceEmitter("", "", cachingEmitter);
-    DefaultQueryMetrics<Query<?>> queryMetrics = new DefaultQueryMetrics<>(TestHelper.makeJsonMapper());
+    DefaultQueryMetrics<Query<?>> queryMetrics = new DefaultQueryMetrics<>();
     TopNQuery query = new TopNQueryBuilder()
         .dataSource("xx")
         .granularity(Granularities.ALL)
@@ -60,22 +59,23 @@ public class DefaultQueryMetricsTest
             null
         ))
         .metric("count")
-        .intervals(QueryRunnerTestHelper.fullOnIntervalSpec)
-        .aggregators(Collections.singletonList(new CountAggregatorFactory("count")))
+        .intervals(QueryRunnerTestHelper.FULL_ON_INTERVAL_SPEC)
+        .aggregators(new CountAggregatorFactory("count"))
         .threshold(5)
         .filters(new SelectorDimFilter("tags", "t3", null))
+        .context(ImmutableMap.of("testKey", "testValue"))
         .build();
     queryMetrics.query(query);
     queryMetrics.reportQueryTime(0).emit(serviceEmitter);
     Map<String, Object> actualEvent = cachingEmitter.getLastEmittedEvent().toMap();
-    Assert.assertEquals(12, actualEvent.size());
+    Assert.assertEquals(13, actualEvent.size());
     Assert.assertTrue(actualEvent.containsKey("feed"));
     Assert.assertTrue(actualEvent.containsKey("timestamp"));
     Assert.assertEquals("", actualEvent.get("host"));
     Assert.assertEquals("", actualEvent.get("service"));
     Assert.assertEquals("xx", actualEvent.get(DruidMetrics.DATASOURCE));
     Assert.assertEquals(query.getType(), actualEvent.get(DruidMetrics.TYPE));
-    List<Interval> expectedIntervals = QueryRunnerTestHelper.fullOnIntervalSpec.getIntervals();
+    List<Interval> expectedIntervals = QueryRunnerTestHelper.FULL_ON_INTERVAL_SPEC.getIntervals();
     List<String> expectedStringIntervals =
         expectedIntervals.stream().map(Interval::toString).collect(Collectors.toList());
     Assert.assertEquals(expectedStringIntervals, actualEvent.get(DruidMetrics.INTERVAL));
@@ -84,6 +84,7 @@ public class DefaultQueryMetricsTest
     Assert.assertEquals("", actualEvent.get(DruidMetrics.ID));
     Assert.assertEquals("query/time", actualEvent.get("metric"));
     Assert.assertEquals(0L, actualEvent.get("value"));
+    Assert.assertEquals(ImmutableMap.of("testKey", "testValue"), actualEvent.get("context"));
   }
 
   @Test
@@ -91,7 +92,7 @@ public class DefaultQueryMetricsTest
   {
     CachingEmitter cachingEmitter = new CachingEmitter();
     ServiceEmitter serviceEmitter = new ServiceEmitter("", "", cachingEmitter);
-    DefaultQueryMetrics<Query<?>> queryMetrics = new DefaultQueryMetrics<>(TestHelper.makeJsonMapper());
+    DefaultQueryMetrics<Query<?>> queryMetrics = new DefaultQueryMetrics<>();
     testQueryMetricsDefaultMetricNamesAndUnits(cachingEmitter, serviceEmitter, queryMetrics);
   }
 
@@ -121,11 +122,6 @@ public class DefaultQueryMetricsTest
     actualEvent = cachingEmitter.getLastEmittedEvent().toMap();
     Assert.assertEquals("query/segmentAndCache/time", actualEvent.get("metric"));
     Assert.assertEquals(4L, actualEvent.get("value"));
-
-    queryMetrics.reportIntervalChunkTime(5000001).emit(serviceEmitter);
-    actualEvent = cachingEmitter.getLastEmittedEvent().toMap();
-    Assert.assertEquals("query/intervalChunk/time", actualEvent.get("metric"));
-    Assert.assertEquals(5L, actualEvent.get("value"));
 
     queryMetrics.reportCpuTime(6000001).emit(serviceEmitter);
     actualEvent = cachingEmitter.getLastEmittedEvent().toMap();

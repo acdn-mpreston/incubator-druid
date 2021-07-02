@@ -16,38 +16,41 @@
  * limitations under the License.
  */
 
+import axios, { CancelToken } from 'axios';
 import debounce from 'lodash.debounce';
 
-export interface QueryStateInt<R> {
-  result: R | null;
-  loading: boolean;
-  error: string | null;
-}
+import { QueryState } from './query-state';
 
 export interface QueryManagerOptions<Q, R> {
-  processQuery: (query: Q) => Promise<R>;
-  onStateChange?: (queryResolve: QueryStateInt<R>) => void;
+  processQuery: (
+    query: Q,
+    cancelToken: CancelToken,
+    setIntermediateQuery: (intermediateQuery: any) => void,
+  ) => Promise<R>;
+  onStateChange?: (queryResolve: QueryState<R>) => void;
   debounceIdle?: number;
   debounceLoading?: number;
 }
 
 export class QueryManager<Q, R> {
-  private processQuery: (query: Q) => Promise<R>;
-  private onStateChange?: (queryResolve: QueryStateInt<R>) => void;
+  private readonly processQuery: (
+    query: Q,
+    cancelToken: CancelToken,
+    setIntermediateQuery: (intermediateQuery: any) => void,
+  ) => Promise<R>;
+
+  private readonly onStateChange?: (queryResolve: QueryState<R>) => void;
 
   private terminated = false;
   private nextQuery: Q | undefined;
   private lastQuery: Q | undefined;
-  private actuallyLoading = false;
-  private state: QueryStateInt<R> = {
-    result: null,
-    loading: false,
-    error: null,
-  };
+  private lastIntermediateQuery: any;
+  private currentRunCancelFn: (() => void) | undefined;
+  private state: QueryState<R> = QueryState.INIT;
   private currentQueryId = 0;
 
-  private runWhenIdle: () => void;
-  private runWhenLoading: () => void;
+  private readonly runWhenIdle: () => void;
+  private readonly runWhenLoading: () => void;
 
   constructor(options: QueryManagerOptions<Q, R>) {
     this.processQuery = options.processQuery;
@@ -64,7 +67,7 @@ export class QueryManager<Q, R> {
     }
   }
 
-  private setState(queryState: QueryStateInt<R>) {
+  private setState(queryState: QueryState<R>) {
     this.state = queryState;
     if (this.onStateChange && !this.terminated) {
       this.onStateChange(queryState);
@@ -77,39 +80,52 @@ export class QueryManager<Q, R> {
     this.currentQueryId++;
     const myQueryId = this.currentQueryId;
 
-    this.actuallyLoading = true;
-    this.processQuery(this.lastQuery).then(
-      result => {
+    if (this.currentRunCancelFn) {
+      this.currentRunCancelFn();
+    }
+    const cancelToken = new axios.CancelToken(cancelFn => {
+      this.currentRunCancelFn = cancelFn;
+    });
+    this.processQuery(this.lastQuery, cancelToken, (intermediateQuery: any) => {
+      this.lastIntermediateQuery = intermediateQuery;
+    }).then(
+      data => {
         if (this.currentQueryId !== myQueryId) return;
-        this.actuallyLoading = false;
-        this.setState({
-          result,
-          loading: false,
-          error: null,
-        });
+        this.currentRunCancelFn = undefined;
+        this.setState(
+          new QueryState<R>({
+            data,
+            lastData: this.state.getSomeData(),
+          }),
+        );
       },
-      (e: Error) => {
+      (e: any) => {
         if (this.currentQueryId !== myQueryId) return;
-        this.actuallyLoading = false;
-        this.setState({
-          result: null,
-          loading: false,
-          error: e.message,
-        });
+        this.currentRunCancelFn = undefined;
+        if (axios.isCancel(e)) {
+          e = new Error(`canceled.`); // ToDo: fix!
+        }
+        this.setState(
+          new QueryState<R>({
+            error: e,
+            lastData: this.state.getSomeData(),
+          }),
+        );
       },
     );
   }
 
   private trigger() {
-    const currentActuallyLoading = this.actuallyLoading;
+    const currentlyLoading = Boolean(this.currentRunCancelFn);
 
-    this.setState({
-      result: null,
-      loading: true,
-      error: null,
-    });
+    this.setState(
+      new QueryState<R>({
+        loading: true,
+        lastData: this.state.getSomeData(),
+      }),
+    );
 
-    if (currentActuallyLoading) {
+    if (currentlyLoading) {
       this.runWhenLoading();
     } else {
       this.runWhenIdle();
@@ -117,33 +133,43 @@ export class QueryManager<Q, R> {
   }
 
   public runQuery(query: Q): void {
+    if (this.terminated) return;
     this.nextQuery = query;
     this.trigger();
   }
 
-  public rerunLastQuery(): void {
+  public rerunLastQuery(runInBackground = false): void {
+    if (this.terminated) return;
     this.nextQuery = this.lastQuery;
-    this.trigger();
-  }
-
-  public rerunLastQueryInBackground(auto: boolean): void {
-    this.nextQuery = this.lastQuery;
-    if (auto) {
+    if (runInBackground) {
       this.runWhenIdle();
     } else {
       this.trigger();
     }
   }
 
+  public cancelCurrent(): void {
+    if (!this.currentRunCancelFn) return;
+    this.currentRunCancelFn();
+    this.currentRunCancelFn = undefined;
+  }
+
   public getLastQuery(): Q | undefined {
     return this.lastQuery;
   }
 
-  public getState(): QueryStateInt<R> {
+  public getLastIntermediateQuery(): any {
+    return this.lastIntermediateQuery;
+  }
+
+  public getState(): QueryState<R> {
     return this.state;
   }
 
   public terminate(): void {
     this.terminated = true;
+    if (this.currentRunCancelFn) {
+      this.currentRunCancelFn();
+    }
   }
 }

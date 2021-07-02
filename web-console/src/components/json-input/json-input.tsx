@@ -16,69 +16,130 @@
  * limitations under the License.
  */
 
-import React from 'react';
+import { Editor } from 'brace';
+import classNames from 'classnames';
+import Hjson from 'hjson';
+import * as JSONBig from 'json-bigint-native';
+import React, { useEffect, useRef, useState } from 'react';
 import AceEditor from 'react-ace';
 
-import { parseStringToJSON, stringifyJSON, validJson } from '../../utils';
+import './json-input.scss';
 
-interface JSONInputProps {
-  onChange: (newJSONValue: any) => void;
+function parseHjson(str: string) {
+  // Throwing on empty input is more consistent with how JSON.parse works
+  if (str.trim() === '') throw new Error('empty hjson');
+  return Hjson.parse(str);
+}
+
+export function extractRowColumnFromHjsonError(
+  error: Error,
+): { row: number; column: number } | undefined {
+  // Message would be something like:
+  // `Found '}' where a key name was expected at line 26,7`
+  // Use this to extract the row and column (subtract 1) and jump the cursor to the right place on click
+  const m = /line (\d+),(\d+)/.exec(error.message);
+  if (!m) return;
+
+  return { row: Number(m[1]) - 1, column: Number(m[2]) - 1 };
+}
+
+function stringifyJson(item: any): string {
+  if (item != null) {
+    const str = JSONBig.stringify(item, undefined, 2);
+    if (str === '{}') return '{\n\n}'; // Very special case for an empty object to make it more beautiful
+    return str;
+  } else {
+    return '';
+  }
+}
+
+// Not the best way to check for deep equality but good enough for what we need
+function deepEqual(a: any, b: any): boolean {
+  return JSONBig.stringify(a) === JSONBig.stringify(b);
+}
+
+interface InternalValue {
+  value?: any;
+  error?: Error;
+  stringified: string;
+}
+
+interface JsonInputProps {
   value: any;
-  updateInputValidity?: (valueValid: boolean) => void;
+  onChange: (value: any) => void;
+  onError?: (error: Error) => void;
+  placeholder?: string;
   focus?: boolean;
   width?: string;
   height?: string;
+  issueWithValue?: (value: any) => string | undefined;
 }
 
-interface JSONInputState {
-  stringValue: string;
-}
+export const JsonInput = React.memo(function JsonInput(props: JsonInputProps) {
+  const { onChange, onError, placeholder, focus, width, height, value, issueWithValue } = props;
+  const [internalValue, setInternalValue] = useState<InternalValue>(() => ({
+    value,
+    stringified: stringifyJson(value),
+  }));
+  const [showErrorIfNeeded, setShowErrorIfNeeded] = useState(false);
+  const aceEditor = useRef<Editor | undefined>();
 
-export class JSONInput extends React.PureComponent<JSONInputProps, JSONInputState> {
-  constructor(props: JSONInputProps) {
-    super(props);
-    this.state = {
-      stringValue: '',
-    };
-  }
-
-  componentDidMount(): void {
-    const { value } = this.props;
-    const stringValue = stringifyJSON(value);
-    this.setState({
-      stringValue,
+  useEffect(() => {
+    if (deepEqual(value, internalValue.value)) return;
+    setInternalValue({
+      value,
+      stringified: stringifyJson(value),
     });
-  }
+  }, [value]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  componentWillReceiveProps(nextProps: JSONInputProps): void {
-    if (JSON.stringify(nextProps.value) !== JSON.stringify(this.props.value)) {
-      this.setState({
-        stringValue: stringifyJSON(nextProps.value),
-      });
-    }
-  }
-
-  render() {
-    const { onChange, updateInputValidity, focus, width, height } = this.props;
-    const { stringValue } = this.state;
-    return (
+  const internalValueError = internalValue.error;
+  return (
+    <div className={classNames('json-input', { invalid: showErrorIfNeeded && internalValueError })}>
       <AceEditor
-        key="hjson"
         mode="hjson"
         theme="solarized_dark"
-        name="ace-editor"
-        onChange={(e: string) => {
-          this.setState({ stringValue: e });
-          if (validJson(e) || e === '') onChange(parseStringToJSON(e));
-          if (updateInputValidity) updateInputValidity(validJson(e) || e === '');
+        onChange={(inputJson: string) => {
+          let value: any;
+          let error: Error | undefined;
+          try {
+            value = parseHjson(inputJson);
+          } catch (e) {
+            error = e;
+          }
+
+          if (!error && issueWithValue) {
+            const issue = issueWithValue(value);
+            if (issue) {
+              value = undefined;
+              error = new Error(issue);
+            }
+          }
+
+          setInternalValue({
+            value,
+            error,
+            stringified: inputJson,
+          });
+
+          if (error) {
+            onError?.(error);
+          } else {
+            onChange(value);
+          }
+
+          if (showErrorIfNeeded) {
+            setShowErrorIfNeeded(false);
+          }
         }}
+        onBlur={() => setShowErrorIfNeeded(true)}
         focus={focus}
         fontSize={12}
         width={width || '100%'}
         height={height || '8vh'}
         showPrintMargin={false}
         showGutter={false}
-        value={stringValue}
+        value={internalValue.stringified}
+        placeholder={placeholder}
         editorProps={{
           $blockScrolling: Infinity,
         }}
@@ -89,7 +150,26 @@ export class JSONInput extends React.PureComponent<JSONInputProps, JSONInputStat
           tabSize: 2,
         }}
         style={{}}
+        onLoad={(editor: any) => {
+          aceEditor.current = editor;
+        }}
       />
-    );
-  }
-}
+      {showErrorIfNeeded && internalValueError && (
+        <div
+          className="json-error"
+          onClick={() => {
+            if (!aceEditor.current || !internalValueError) return;
+
+            const rc = extractRowColumnFromHjsonError(internalValueError);
+            if (!rc) return;
+
+            aceEditor.current.focus(); // Grab the focus
+            aceEditor.current.getSelection().moveCursorTo(rc.row, rc.column);
+          }}
+        >
+          {internalValueError.message}
+        </div>
+      )}
+    </div>
+  );
+});

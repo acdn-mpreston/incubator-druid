@@ -19,12 +19,15 @@
 
 package org.apache.druid.server.lookup.namespace.cache;
 
+import com.fasterxml.jackson.databind.InjectableValues.Std;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.ListeningExecutorService;
 import com.google.common.util.concurrent.MoreExecutors;
 import org.apache.druid.common.config.NullHandling;
+import org.apache.druid.jackson.DefaultObjectMapper;
 import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.java.util.common.concurrent.Execs;
 import org.apache.druid.java.util.common.io.Closer;
@@ -34,7 +37,7 @@ import org.apache.druid.metadata.TestDerbyConnector;
 import org.apache.druid.query.lookup.namespace.CacheGenerator;
 import org.apache.druid.query.lookup.namespace.ExtractionNamespace;
 import org.apache.druid.query.lookup.namespace.JdbcExtractionNamespace;
-import org.apache.druid.server.ServerTestHelper;
+import org.apache.druid.server.initialization.JdbcAccessSecurityConfig;
 import org.apache.druid.server.lookup.namespace.JdbcCacheGenerator;
 import org.apache.druid.server.lookup.namespace.NamespaceExtractionConfig;
 import org.apache.druid.server.metrics.NoopServiceEmitter;
@@ -67,15 +70,20 @@ import java.util.concurrent.locks.ReentrantLock;
 @RunWith(Parameterized.class)
 public class JdbcExtractionNamespaceTest
 {
+  static {
+    NullHandling.initializeForTests();
+  }
+
   @Rule
   public final TestDerbyConnector.DerbyConnectorRule derbyConnectorRule = new TestDerbyConnector.DerbyConnectorRule();
+
   private static final Logger log = new Logger(JdbcExtractionNamespaceTest.class);
-  private static final String tableName = "abstractDbRenameTest";
-  private static final String keyName = "keyName";
-  private static final String valName = "valName";
-  private static final String tsColumn_ = "tsColumn";
-  private static final String filterColumn = "filterColumn";
-  private static final Map<String, String[]> renames = ImmutableMap.of(
+  private static final String TABLE_NAME = "abstractDbRenameTest";
+  private static final String KEY_NAME = "keyName";
+  private static final String VAL_NAME = "valName";
+  private static final String TS_COLUMN = "tsColumn";
+  private static final String FILTER_COLUMN = "filterColumn";
+  private static final Map<String, String[]> RENAMES = ImmutableMap.of(
       "foo", new String[]{"bar", "1"},
       "bad", new String[]{"bar", "1"},
       "how about that", new String[]{"foo", "0"},
@@ -129,22 +137,22 @@ public class JdbcExtractionNamespaceTest
                 handle.createStatement(
                     StringUtils.format(
                         "CREATE TABLE %s (%s TIMESTAMP, %s VARCHAR(64), %s VARCHAR(64), %s VARCHAR(64))",
-                        tableName,
-                        tsColumn_,
-                        filterColumn,
-                        keyName,
-                        valName
+                        TABLE_NAME,
+                        TS_COLUMN,
+                        FILTER_COLUMN,
+                        KEY_NAME,
+                        VAL_NAME
                     )
                 ).setQueryTimeout(1).execute()
             );
-            handle.createStatement(StringUtils.format("TRUNCATE TABLE %s", tableName)).setQueryTimeout(1).execute();
+            handle.createStatement(StringUtils.format("TRUNCATE TABLE %s", TABLE_NAME)).setQueryTimeout(1).execute();
             handle.commit();
             closer.register(new Closeable()
             {
               @Override
               public void close() throws IOException
               {
-                handle.createStatement("DROP TABLE " + tableName).setQueryTimeout(1).execute();
+                handle.createStatement("DROP TABLE " + TABLE_NAME).setQueryTimeout(1).execute();
                 final ListenableFuture future = setupTeardownService.submit(new Runnable()
                 {
                   @Override
@@ -179,7 +187,7 @@ public class JdbcExtractionNamespaceTest
                 Assert.assertEquals(0, scheduler.getActiveEntries());
               }
             });
-            for (Map.Entry<String, String[]> entry : renames.entrySet()) {
+            for (Map.Entry<String, String[]> entry : RENAMES.entrySet()) {
               try {
                 String key = entry.getKey();
                 String value = entry.getValue()[0];
@@ -338,19 +346,19 @@ public class JdbcExtractionNamespaceTest
     final String statementVal = val != null ? "'%s'" : "%s";
     if (tsColumn == null) {
       handle.createStatement(
-          StringUtils.format("DELETE FROM %s WHERE %s='%s'", tableName, keyName, key)
+          StringUtils.format("DELETE FROM %s WHERE %s='%s'", TABLE_NAME, KEY_NAME, key)
       ).setQueryTimeout(1).execute();
       query = StringUtils.format(
           "INSERT INTO %s (%s, %s, %s) VALUES ('%s', '%s', " + statementVal + ")",
-          tableName,
-          filterColumn, keyName, valName,
+          TABLE_NAME,
+          FILTER_COLUMN, KEY_NAME, VAL_NAME,
           filter, key, val
       );
     } else {
       query = StringUtils.format(
           "INSERT INTO %s (%s, %s, %s, %s) VALUES ('%s', '%s', '%s', " + statementVal + ")",
-          tableName,
-          tsColumn, filterColumn, keyName, valName,
+          TABLE_NAME,
+          tsColumn, FILTER_COLUMN, KEY_NAME, VAL_NAME,
           updateTs, filter, key, val
       );
     }
@@ -367,18 +375,19 @@ public class JdbcExtractionNamespaceTest
   {
     final JdbcExtractionNamespace extractionNamespace = new JdbcExtractionNamespace(
         derbyConnectorRule.getMetadataConnectorConfig(),
-        tableName,
-        keyName,
-        valName,
+        TABLE_NAME,
+        KEY_NAME,
+        VAL_NAME,
         tsColumn,
         null,
-        new Period(0)
+        new Period(0),
+        new JdbcAccessSecurityConfig()
     );
     try (CacheScheduler.Entry entry = scheduler.schedule(extractionNamespace)) {
       CacheSchedulerTest.waitFor(entry);
       final Map<String, String> map = entry.getCache();
 
-      for (Map.Entry<String, String[]> e : renames.entrySet()) {
+      for (Map.Entry<String, String[]> e : RENAMES.entrySet()) {
         String key = e.getKey();
         String[] val = e.getValue();
         String field = val[0];
@@ -398,18 +407,19 @@ public class JdbcExtractionNamespaceTest
   {
     final JdbcExtractionNamespace extractionNamespace = new JdbcExtractionNamespace(
         derbyConnectorRule.getMetadataConnectorConfig(),
-        tableName,
-        keyName,
-        valName,
+        TABLE_NAME,
+        KEY_NAME,
+        VAL_NAME,
         tsColumn,
-        filterColumn + "='1'",
-        new Period(0)
+        FILTER_COLUMN + "='1'",
+        new Period(0),
+        new JdbcAccessSecurityConfig()
     );
     try (CacheScheduler.Entry entry = scheduler.schedule(extractionNamespace)) {
       CacheSchedulerTest.waitFor(entry);
       final Map<String, String> map = entry.getCache();
 
-      for (Map.Entry<String, String[]> e : renames.entrySet()) {
+      for (Map.Entry<String, String[]> e : RENAMES.entrySet()) {
         String key = e.getKey();
         String[] val = e.getValue();
         String field = val[0];
@@ -468,18 +478,22 @@ public class JdbcExtractionNamespaceTest
   @Test
   public void testSerde() throws IOException
   {
+    final JdbcAccessSecurityConfig securityConfig = new JdbcAccessSecurityConfig();
     final JdbcExtractionNamespace extractionNamespace = new JdbcExtractionNamespace(
         derbyConnectorRule.getMetadataConnectorConfig(),
-        tableName,
-        keyName,
-        valName,
+        TABLE_NAME,
+        KEY_NAME,
+        VAL_NAME,
         tsColumn,
         "some filter",
-        new Period(10)
+        new Period(10),
+        securityConfig
     );
+    final ObjectMapper mapper = new DefaultObjectMapper();
+    mapper.setInjectableValues(new Std().addValue(JdbcAccessSecurityConfig.class, securityConfig));
 
-    final ExtractionNamespace extractionNamespace2 = ServerTestHelper.MAPPER.readValue(
-        ServerTestHelper.MAPPER.writeValueAsBytes(extractionNamespace),
+    final ExtractionNamespace extractionNamespace2 = mapper.readValue(
+        mapper.writeValueAsBytes(extractionNamespace),
         ExtractionNamespace.class
     );
 
@@ -491,12 +505,13 @@ public class JdbcExtractionNamespaceTest
   {
     final JdbcExtractionNamespace extractionNamespace = new JdbcExtractionNamespace(
         derbyConnectorRule.getMetadataConnectorConfig(),
-        tableName,
-        keyName,
-        valName,
+        TABLE_NAME,
+        KEY_NAME,
+        VAL_NAME,
         tsColumn,
         null,
-        new Period(10)
+        new Period(10),
+        new JdbcAccessSecurityConfig()
     );
     CacheScheduler.Entry entry = scheduler.schedule(extractionNamespace);
 

@@ -25,11 +25,11 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Function;
-import com.google.common.base.Optional;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Supplier;
 import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 import com.google.common.util.concurrent.FutureCallback;
@@ -37,24 +37,31 @@ import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.SettableFuture;
 import org.apache.druid.data.input.Committer;
+import org.apache.druid.data.input.InputFormat;
 import org.apache.druid.data.input.InputRow;
+import org.apache.druid.data.input.InputRowSchema;
+import org.apache.druid.data.input.impl.ByteEntity;
 import org.apache.druid.data.input.impl.InputRowParser;
 import org.apache.druid.discovery.DiscoveryDruidNode;
 import org.apache.druid.discovery.LookupNodeService;
-import org.apache.druid.discovery.NodeType;
+import org.apache.druid.discovery.NodeRole;
 import org.apache.druid.indexer.IngestionState;
 import org.apache.druid.indexer.TaskStatus;
+import org.apache.druid.indexer.partitions.DynamicPartitionsSpec;
 import org.apache.druid.indexing.common.IngestionStatsAndErrorsTaskReport;
 import org.apache.druid.indexing.common.IngestionStatsAndErrorsTaskReportData;
+import org.apache.druid.indexing.common.LockGranularity;
+import org.apache.druid.indexing.common.TaskLockType;
 import org.apache.druid.indexing.common.TaskRealtimeMetricsMonitorBuilder;
 import org.apache.druid.indexing.common.TaskReport;
 import org.apache.druid.indexing.common.TaskToolbox;
 import org.apache.druid.indexing.common.actions.CheckPointDataSourceMetadataAction;
 import org.apache.druid.indexing.common.actions.ResetDataSourceMetadataAction;
-import org.apache.druid.indexing.common.stats.RowIngestionMeters;
-import org.apache.druid.indexing.common.stats.RowIngestionMetersFactory;
+import org.apache.druid.indexing.common.actions.SegmentLockAcquireAction;
+import org.apache.druid.indexing.common.actions.TimeChunkLockAcquireAction;
 import org.apache.druid.indexing.common.task.IndexTaskUtils;
 import org.apache.druid.indexing.common.task.RealtimeIndexTask;
+import org.apache.druid.indexing.input.InputRowSchemas;
 import org.apache.druid.indexing.seekablestream.common.OrderedPartitionableRecord;
 import org.apache.druid.indexing.seekablestream.common.OrderedSequenceNumber;
 import org.apache.druid.indexing.seekablestream.common.RecordSupplier;
@@ -63,23 +70,23 @@ import org.apache.druid.indexing.seekablestream.supervisor.SeekableStreamSupervi
 import org.apache.druid.java.util.common.DateTimes;
 import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.StringUtils;
-import org.apache.druid.java.util.common.collect.Utils;
-import org.apache.druid.java.util.common.parsers.ParseException;
 import org.apache.druid.java.util.emitter.EmittingLogger;
+import org.apache.druid.segment.incremental.ParseExceptionHandler;
+import org.apache.druid.segment.incremental.RowIngestionMeters;
 import org.apache.druid.segment.indexing.RealtimeIOConfig;
 import org.apache.druid.segment.realtime.FireDepartment;
 import org.apache.druid.segment.realtime.FireDepartmentMetrics;
 import org.apache.druid.segment.realtime.appenderator.Appenderator;
 import org.apache.druid.segment.realtime.appenderator.AppenderatorDriverAddResult;
-import org.apache.druid.segment.realtime.appenderator.SegmentsAndMetadata;
+import org.apache.druid.segment.realtime.appenderator.SegmentsAndCommitMetadata;
 import org.apache.druid.segment.realtime.appenderator.StreamAppenderatorDriver;
 import org.apache.druid.segment.realtime.firehose.ChatHandler;
-import org.apache.druid.segment.realtime.firehose.ChatHandlerProvider;
 import org.apache.druid.server.security.Access;
 import org.apache.druid.server.security.Action;
 import org.apache.druid.server.security.AuthorizerMapper;
 import org.apache.druid.timeline.DataSegment;
-import org.apache.druid.utils.CircularBuffer;
+import org.apache.druid.utils.CollectionUtils;
+import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
 import org.joda.time.DateTime;
 
 import javax.annotation.Nullable;
@@ -127,7 +134,7 @@ import java.util.stream.Collectors;
  * @param <PartitionIdType>    Partition Number Type
  * @param <SequenceOffsetType> Sequence Number Type
  */
-public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOffsetType> implements ChatHandler
+public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOffsetType, RecordType extends ByteEntity> implements ChatHandler
 {
   public enum Status
   {
@@ -186,19 +193,31 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
   protected final Lock pollRetryLock = new ReentrantLock();
   protected final Condition isAwaitingRetry = pollRetryLock.newCondition();
 
-  private final SeekableStreamIndexTask<PartitionIdType, SequenceOffsetType> task;
+  private final SeekableStreamIndexTask<PartitionIdType, SequenceOffsetType, RecordType> task;
   private final SeekableStreamIndexTaskIOConfig<PartitionIdType, SequenceOffsetType> ioConfig;
   private final SeekableStreamIndexTaskTuningConfig tuningConfig;
+  private final InputRowSchema inputRowSchema;
+  @Nullable
+  private final InputFormat inputFormat;
+  @Nullable
   private final InputRowParser<ByteBuffer> parser;
-  private final AuthorizerMapper authorizerMapper;
-  private final Optional<ChatHandlerProvider> chatHandlerProvider;
-  private final CircularBuffer<Throwable> savedParseExceptions;
   private final String stream;
-  private final RowIngestionMeters rowIngestionMeters;
 
   private final Set<String> publishingSequences = Sets.newConcurrentHashSet();
-  private final List<ListenableFuture<SegmentsAndMetadata>> publishWaitList = new ArrayList<>();
-  private final List<ListenableFuture<SegmentsAndMetadata>> handOffWaitList = new ArrayList<>();
+  private final List<ListenableFuture<SegmentsAndCommitMetadata>> publishWaitList = new ArrayList<>();
+  private final List<ListenableFuture<SegmentsAndCommitMetadata>> handOffWaitList = new ArrayList<>();
+
+  private final LockGranularity lockGranularityToUse;
+
+  @MonotonicNonNull
+  private RowIngestionMeters rowIngestionMeters;
+  @MonotonicNonNull
+  private ParseExceptionHandler parseExceptionHandler;
+  @MonotonicNonNull
+  private FireDepartmentMetrics fireDepartmentMetrics;
+
+  @MonotonicNonNull
+  private AuthorizerMapper authorizerMapper;
 
   private volatile DateTime startTime;
   private volatile Status status = Status.NOT_STARTED; // this is only ever set by the task runner thread (runThread)
@@ -215,27 +234,25 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
   private volatile Throwable backgroundThreadException;
 
   public SeekableStreamIndexTaskRunner(
-      final SeekableStreamIndexTask<PartitionIdType, SequenceOffsetType> task,
-      final InputRowParser<ByteBuffer> parser,
+      final SeekableStreamIndexTask<PartitionIdType, SequenceOffsetType, RecordType> task,
+      @Nullable final InputRowParser<ByteBuffer> parser,
       final AuthorizerMapper authorizerMapper,
-      final Optional<ChatHandlerProvider> chatHandlerProvider,
-      final CircularBuffer<Throwable> savedParseExceptions,
-      final RowIngestionMetersFactory rowIngestionMetersFactory
+      final LockGranularity lockGranularityToUse
   )
   {
     Preconditions.checkNotNull(task);
     this.task = task;
     this.ioConfig = task.getIOConfig();
     this.tuningConfig = task.getTuningConfig();
+    this.inputRowSchema = InputRowSchemas.fromDataSchema(task.getDataSchema());
+    this.inputFormat = ioConfig.getInputFormat();
     this.parser = parser;
     this.authorizerMapper = authorizerMapper;
-    this.chatHandlerProvider = chatHandlerProvider;
-    this.savedParseExceptions = savedParseExceptions;
     this.stream = ioConfig.getStartSequenceNumbers().getStream();
-    this.rowIngestionMeters = rowIngestionMetersFactory.createRowIngestionMeters();
     this.endOffsets = new ConcurrentHashMap<>(ioConfig.getEndSequenceNumbers().getPartitionSequenceNumberMap());
     this.sequences = new CopyOnWriteArrayList<>();
     this.ingestionState = IngestionState.NOT_STARTED;
+    this.lockGranularityToUse = lockGranularityToUse;
 
     resetNextCheckpointTime();
   }
@@ -248,7 +265,7 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
     catch (Exception e) {
       log.error(e, "Encountered exception while running task.");
       final String errorMsg = Throwables.getStackTraceAsString(e);
-      toolbox.getTaskReportFileWriter().write(getTaskCompletionReports(errorMsg));
+      toolbox.getTaskReportFileWriter().write(task.getId(), getTaskCompletionReports(errorMsg));
       return TaskStatus.failure(
           task.getId(),
           errorMsg
@@ -329,36 +346,52 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
       }
     }
 
-    log.info("Starting with sequences:  %s", sequences);
+    log.info("Starting with sequences: %s", sequences);
   }
 
   private TaskStatus runInternal(TaskToolbox toolbox) throws Exception
   {
-    log.info("SeekableStream indexing task starting up!");
     startTime = DateTimes.nowUtc();
     status = Status.STARTING;
 
     setToolbox(toolbox);
+
+    authorizerMapper = toolbox.getAuthorizerMapper();
+    rowIngestionMeters = toolbox.getRowIngestionMetersFactory().createRowIngestionMeters();
+    parseExceptionHandler = new ParseExceptionHandler(
+        rowIngestionMeters,
+        tuningConfig.isLogParseExceptions(),
+        tuningConfig.getMaxParseExceptions(),
+        tuningConfig.getMaxSavedParseExceptions()
+    );
+
+    // Now we can initialize StreamChunkReader with the given toolbox.
+    final StreamChunkParser parser = new StreamChunkParser<RecordType>(
+        this.parser,
+        inputFormat,
+        inputRowSchema,
+        task.getDataSchema().getTransformSpec(),
+        toolbox.getIndexingTmpDir(),
+        row -> row != null && task.withinMinMaxRecordTime(row),
+        rowIngestionMeters,
+        parseExceptionHandler
+    );
+
     initializeSequences();
 
-    if (chatHandlerProvider.isPresent()) {
-      log.info("Found chat handler of class[%s]", chatHandlerProvider.get().getClass().getName());
-      chatHandlerProvider.get().register(task.getId(), this, false);
-    } else {
-      log.warn("No chat handler detected");
-    }
+    log.debug("Found chat handler of class[%s]", toolbox.getChatHandlerProvider().getClass().getName());
+    toolbox.getChatHandlerProvider().register(task.getId(), this, false);
 
     runThread = Thread.currentThread();
 
     // Set up FireDepartmentMetrics
     final FireDepartment fireDepartmentForMetrics = new FireDepartment(
         task.getDataSchema(),
-        new RealtimeIOConfig(null, null, null),
+        new RealtimeIOConfig(null, null),
         null
     );
-    FireDepartmentMetrics fireDepartmentMetrics = fireDepartmentForMetrics.getMetrics();
-    toolbox.getMonitorScheduler()
-           .addMonitor(TaskRealtimeMetricsMonitorBuilder.build(task, fireDepartmentForMetrics, rowIngestionMeters));
+    this.fireDepartmentMetrics = fireDepartmentForMetrics.getMetrics();
+    toolbox.addMonitor(TaskRealtimeMetricsMonitorBuilder.build(task, fireDepartmentForMetrics, rowIngestionMeters));
 
     final String lookupTier = task.getContextValue(RealtimeIndexTask.CTX_KEY_LOOKUP_TIER);
     final LookupNodeService lookupNodeService = lookupTier == null ?
@@ -367,7 +400,7 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
 
     final DiscoveryDruidNode discoveryDruidNode = new DiscoveryDruidNode(
         toolbox.getDruidNode(),
-        NodeType.PEON,
+        NodeRole.PEON,
         ImmutableMap.of(
             toolbox.getDataNodeService().getName(), toolbox.getDataNodeService(),
             lookupNodeService.getName(), lookupNodeService
@@ -375,15 +408,44 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
     );
 
     Throwable caughtExceptionOuter = null;
-    try (final RecordSupplier<PartitionIdType, SequenceOffsetType> recordSupplier = task.newTaskRecordSupplier()) {
-      toolbox.getDataSegmentServerAnnouncer().announce();
-      toolbox.getDruidNodeAnnouncer().announce(discoveryDruidNode);
+    try (final RecordSupplier<PartitionIdType, SequenceOffsetType, RecordType> recordSupplier = task.newTaskRecordSupplier()) {
 
-      appenderator = task.newAppenderator(fireDepartmentMetrics, toolbox);
+      if (toolbox.getAppenderatorsManager().shouldTaskMakeNodeAnnouncements()) {
+        toolbox.getDataSegmentServerAnnouncer().announce();
+        toolbox.getDruidNodeAnnouncer().announce(discoveryDruidNode);
+      }
+      appenderator = task.newAppenderator(toolbox, fireDepartmentMetrics, rowIngestionMeters, parseExceptionHandler);
       driver = task.newDriver(appenderator, toolbox, fireDepartmentMetrics);
 
       // Start up, set up initial sequences.
-      final Object restoredMetadata = driver.startJob();
+      final Object restoredMetadata = driver.startJob(
+          segmentId -> {
+            try {
+              if (lockGranularityToUse == LockGranularity.SEGMENT) {
+                return toolbox.getTaskActionClient().submit(
+                    new SegmentLockAcquireAction(
+                        TaskLockType.EXCLUSIVE,
+                        segmentId.getInterval(),
+                        segmentId.getVersion(),
+                        segmentId.getShardSpec().getPartitionNum(),
+                        1000L
+                    )
+                ).isOk();
+              } else {
+                return toolbox.getTaskActionClient().submit(
+                    new TimeChunkLockAcquireAction(
+                        TaskLockType.EXCLUSIVE,
+                        segmentId.getInterval(),
+                        1000L
+                    )
+                ) != null;
+              }
+            }
+            catch (IOException e) {
+              throw new RuntimeException(e);
+            }
+          }
+      );
       if (restoredMetadata == null) {
         // no persist has happened so far
         // so either this is a brand new task or replacement of a failed task
@@ -401,7 +463,7 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
         final Map<String, Object> restoredMetadataMap = (Map) restoredMetadata;
         final SeekableStreamEndSequenceNumbers<PartitionIdType, SequenceOffsetType> restoredNextPartitions =
             deserializePartitionsFromMetadata(
-                toolbox.getObjectMapper(),
+                toolbox.getJsonMapper(),
                 restoredMetadataMap.get(METADATA_NEXT_PARTITIONS)
             );
 
@@ -410,7 +472,7 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
         // Sanity checks.
         if (!restoredNextPartitions.getStream().equals(ioConfig.getStartSequenceNumbers().getStream())) {
           throw new ISE(
-              "WTF?! Restored stream[%s] but expected stream[%s]",
+              "Restored stream[%s] but expected stream[%s]",
               restoredNextPartitions.getStream(),
               ioConfig.getStartSequenceNumbers().getStream()
           );
@@ -418,7 +480,7 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
 
         if (!currOffsets.keySet().equals(ioConfig.getStartSequenceNumbers().getPartitionSequenceNumberMap().keySet())) {
           throw new ISE(
-              "WTF?! Restored partitions[%s] but expected partitions[%s]",
+              "Restored partitions[%s] but expected partitions[%s]",
               currOffsets.keySet(),
               ioConfig.getStartSequenceNumbers().getPartitionSequenceNumberMap().keySet()
           );
@@ -429,16 +491,20 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
           this.endOffsets.putAll(sequences.size() == 0
                                  ? currOffsets
                                  : getLastSequenceMetadata().getEndOffsets());
-          log.info("End sequences changed to [%s]", endOffsets);
         }
       }
+
+      log.info(
+          "Initialized sequences: %s",
+          sequences.stream().map(SequenceMetadata::toString).collect(Collectors.joining(", "))
+      );
 
       // Filter out partitions with END_OF_SHARD markers since these partitions have already been fully read. This
       // should have been done by the supervisor already so this is defensive.
       int numPreFilterPartitions = currOffsets.size();
       if (currOffsets.entrySet().removeIf(x -> isEndOfShard(x.getValue()))) {
         log.info(
-            "Removed [%d] partitions from assignment which have already been closed",
+            "Removed [%d] partitions from assignment which have already been closed.",
             numPreFilterPartitions - currOffsets.size()
         );
       }
@@ -505,7 +571,7 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
             possiblyResetDataSourceMetadata(toolbox, recordSupplier, assignment);
 
             if (assignment.isEmpty()) {
-              log.info("All partitions have been fully read");
+              log.debug("All partitions have been fully read.");
               publishOnStop.set(true);
               stopRequested.set(true);
             }
@@ -530,7 +596,7 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
 
           // calling getRecord() ensures that exceptions specific to kafka/kinesis like OffsetOutOfRangeException
           // are handled in the subclasses.
-          List<OrderedPartitionableRecord<PartitionIdType, SequenceOffsetType>> records = getRecords(
+          List<OrderedPartitionableRecord<PartitionIdType, SequenceOffsetType, RecordType>> records = getRecords(
               recordSupplier,
               toolbox
           );
@@ -539,7 +605,7 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
           stillReading = !assignment.isEmpty();
 
           SequenceMetadata<PartitionIdType, SequenceOffsetType> sequenceToCheckpoint = null;
-          for (OrderedPartitionableRecord<PartitionIdType, SequenceOffsetType> record : records) {
+          for (OrderedPartitionableRecord<PartitionIdType, SequenceOffsetType, RecordType> record : records) {
             final boolean shouldProcess = verifyRecordInRange(record.getPartitionId(), record.getSequenceNumber());
 
             log.trace(
@@ -551,92 +617,73 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
             );
 
             if (shouldProcess) {
-              try {
-                final List<byte[]> valueBytess = record.getData();
-                final List<InputRow> rows;
-                if (valueBytess == null || valueBytess.isEmpty()) {
-                  rows = Utils.nullableListOf((InputRow) null);
+              final List<InputRow> rows = parser.parse(record.getData(), isEndOfShard(record.getSequenceNumber()));
+              boolean isPersistRequired = false;
+
+              final SequenceMetadata<PartitionIdType, SequenceOffsetType> sequenceToUse = sequences
+                  .stream()
+                  .filter(sequenceMetadata -> sequenceMetadata.canHandle(this, record))
+                  .findFirst()
+                  .orElse(null);
+
+              if (sequenceToUse == null) {
+                throw new ISE(
+                    "Cannot find any valid sequence for record with partition [%s] and sequenceNumber [%s]. Current sequences: %s",
+                    record.getPartitionId(),
+                    record.getSequenceNumber(),
+                    sequences
+                );
+              }
+
+              for (InputRow row : rows) {
+                final AppenderatorDriverAddResult addResult = driver.add(
+                    row,
+                    sequenceToUse.getSequenceName(),
+                    committerSupplier,
+                    true,
+                    // do not allow incremental persists to happen until all the rows from this batch
+                    // of rows are indexed
+                    false
+                );
+
+                if (addResult.isOk()) {
+                  // If the number of rows in the segment exceeds the threshold after adding a row,
+                  // move the segment out from the active segments of BaseAppenderatorDriver to make a new segment.
+                  final boolean isPushRequired = addResult.isPushRequired(
+                      tuningConfig.getPartitionsSpec().getMaxRowsPerSegment(),
+                      tuningConfig.getPartitionsSpec()
+                                  .getMaxTotalRowsOr(DynamicPartitionsSpec.DEFAULT_MAX_TOTAL_ROWS)
+                  );
+                  if (isPushRequired && !sequenceToUse.isCheckpointed()) {
+                    sequenceToCheckpoint = sequenceToUse;
+                  }
+                  isPersistRequired |= addResult.isPersistRequired();
                 } else {
-                  rows = new ArrayList<>();
-                  for (byte[] valueBytes : valueBytess) {
-                    rows.addAll(parser.parseBatch(ByteBuffer.wrap(valueBytes)));
-                  }
-                }
-                boolean isPersistRequired = false;
-
-                final SequenceMetadata<PartitionIdType, SequenceOffsetType> sequenceToUse = sequences
-                    .stream()
-                    .filter(sequenceMetadata -> sequenceMetadata.canHandle(this, record))
-                    .findFirst()
-                    .orElse(null);
-
-                if (sequenceToUse == null) {
-                  throw new ISE(
-                      "WTH?! cannot find any valid sequence for record with partition [%s] and sequenceNumber [%s]. Current sequences: %s",
-                      record.getPartitionId(),
-                      record.getSequenceNumber(),
-                      sequences
-                  );
-                }
-
-                for (InputRow row : rows) {
-                  if (row != null && task.withinMinMaxRecordTime(row)) {
-                    final AppenderatorDriverAddResult addResult = driver.add(
-                        row,
-                        sequenceToUse.getSequenceName(),
-                        committerSupplier,
-                        true,
-                        // do not allow incremental persists to happen until all the rows from this batch
-                        // of rows are indexed
-                        false
-                    );
-
-                    if (addResult.isOk()) {
-                      // If the number of rows in the segment exceeds the threshold after adding a row,
-                      // move the segment out from the active segments of BaseAppenderatorDriver to make a new segment.
-                      if (addResult.isPushRequired(tuningConfig) && !sequenceToUse.isCheckpointed()) {
-                        sequenceToCheckpoint = sequenceToUse;
-                      }
-                      isPersistRequired |= addResult.isPersistRequired();
-                    } else {
-                      // Failure to allocate segment puts determinism at risk, bail out to be safe.
-                      // May want configurable behavior here at some point.
-                      // If we allow continuing, then consider blacklisting the interval for a while to avoid constant checks.
-                      throw new ISE("Could not allocate segment for row with timestamp[%s]", row.getTimestamp());
-                    }
-
-                    if (addResult.getParseException() != null) {
-                      handleParseException(addResult.getParseException(), record);
-                    } else {
-                      rowIngestionMeters.incrementProcessed();
-                    }
-                  } else {
-                    rowIngestionMeters.incrementThrownAway();
-                  }
-                }
-                if (isPersistRequired) {
-                  Futures.addCallback(
-                      driver.persistAsync(committerSupplier.get()),
-                      new FutureCallback<Object>()
-                      {
-                        @Override
-                        public void onSuccess(@Nullable Object result)
-                        {
-                          log.info("Persist completed with metadata [%s]", result);
-                        }
-
-                        @Override
-                        public void onFailure(Throwable t)
-                        {
-                          log.error("Persist failed, dying");
-                          backgroundThreadException = t;
-                        }
-                      }
-                  );
+                  // Failure to allocate segment puts determinism at risk, bail out to be safe.
+                  // May want configurable behavior here at some point.
+                  // If we allow continuing, then consider blacklisting the interval for a while to avoid constant checks.
+                  throw new ISE("Could not allocate segment for row with timestamp[%s]", row.getTimestamp());
                 }
               }
-              catch (ParseException e) {
-                handleParseException(e, record);
+              if (isPersistRequired) {
+                Futures.addCallback(
+                    driver.persistAsync(committerSupplier.get()),
+                    new FutureCallback<Object>()
+                    {
+                      @Override
+                      public void onSuccess(@Nullable Object result)
+                      {
+                        log.debug("Persist completed with metadata: %s", result);
+                      }
+
+                      @Override
+                      public void onFailure(Throwable t)
+                      {
+                        log.error("Persist failed, dying");
+                        backgroundThreadException = t;
+                      }
+                    }
+                );
               }
 
               // in kafka, we can easily get the next offset by adding 1, but for kinesis, there's no way
@@ -660,6 +707,12 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
             }
           }
 
+          if (!stillReading) {
+            // We let the fireDepartmentMetrics know that all messages have been read. This way, some metrics such as
+            // high message gap need not be reported
+            fireDepartmentMetrics.markProcessingDone();
+          }
+
           if (System.currentTimeMillis() > nextCheckpointTime) {
             sequenceToCheckpoint = getLastSequenceMetadata();
           }
@@ -667,8 +720,8 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
           if (sequenceToCheckpoint != null && stillReading) {
             Preconditions.checkArgument(
                 getLastSequenceMetadata()
-                         .getSequenceName()
-                         .equals(sequenceToCheckpoint.getSequenceName()),
+                    .getSequenceName()
+                    .equals(sequenceToCheckpoint.getSequenceName()),
                 "Cannot checkpoint a sequence [%s] which is not the latest one, sequences %s",
                 sequenceToCheckpoint,
                 sequences
@@ -677,18 +730,12 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
             final CheckPointDataSourceMetadataAction checkpointAction = new CheckPointDataSourceMetadataAction(
                 task.getDataSource(),
                 ioConfig.getTaskGroupId(),
-                task.getIOConfig().getBaseSequenceName(),
+                null,
                 createDataSourceMetadata(
                     new SeekableStreamStartSequenceNumbers<>(
                         stream,
                         sequenceToCheckpoint.getStartOffsets(),
                         sequenceToCheckpoint.getExclusiveStartPartitions()
-                    )
-                ),
-                createDataSourceMetadata(
-                    new SeekableStreamEndSequenceNumbers<>(
-                        stream,
-                        currOffsets
                     )
                 )
             );
@@ -706,7 +753,6 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
         throw e;
       }
       finally {
-        log.info("Persisting all pending data");
         try {
           driver.persist(committerSupplier.get()); // persist pending data
         }
@@ -727,10 +773,14 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
         status = Status.PUBLISHING;
       }
 
-      for (int i = 0; i < sequences.size(); i++) {
-        final SequenceMetadata<PartitionIdType, SequenceOffsetType> sequenceMetadata = sequences.get(i);
+      // We need to copy sequences here, because the success callback in publishAndRegisterHandoff removes items from
+      // the sequence list. If a publish finishes before we finish iterating through the sequence list, we can
+      // end up skipping some sequences.
+      List<SequenceMetadata<PartitionIdType, SequenceOffsetType>> sequencesSnapshot = new ArrayList<>(sequences);
+      for (int i = 0; i < sequencesSnapshot.size(); i++) {
+        final SequenceMetadata<PartitionIdType, SequenceOffsetType> sequenceMetadata = sequencesSnapshot.get(i);
         if (!publishingSequences.contains(sequenceMetadata.getSequenceName())) {
-          final boolean isLast = i == (sequences.size() - 1);
+          final boolean isLast = i == (sequencesSnapshot.size() - 1);
           if (isLast) {
             // Shorten endOffsets of the last sequence to match currOffsets.
             sequenceMetadata.setEndOffsets(currOffsets);
@@ -757,7 +807,7 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
       // handoffFuture. handoffFuture can throw an exception if 1) the corresponding publishFuture failed or 2) it
       // failed to persist sequences. It might also return null if handoff failed, but was recoverable.
       // See publishAndRegisterHandoff() for details.
-      List<SegmentsAndMetadata> handedOffList = Collections.emptyList();
+      List<SegmentsAndCommitMetadata> handedOffList = Collections.emptyList();
       if (tuningConfig.getHandoffConditionTimeout() == 0) {
         handedOffList = Futures.allAsList(handOffWaitList).get();
       } else {
@@ -768,17 +818,17 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
         catch (TimeoutException e) {
           // Handoff timeout is not an indexing failure, but coordination failure. We simply ignore timeout exception
           // here.
-          log.makeAlert("Timed out after [%d] millis waiting for handoffs", tuningConfig.getHandoffConditionTimeout())
-             .addData("TaskId", task.getId())
+          log.makeAlert("Timeout waiting for handoff")
+             .addData("taskId", task.getId())
+             .addData("handoffConditionTimeout", tuningConfig.getHandoffConditionTimeout())
              .emit();
         }
       }
 
-      for (SegmentsAndMetadata handedOff : handedOffList) {
+      for (SegmentsAndCommitMetadata handedOff : handedOffList) {
         log.info(
-            "Handoff completed for segments %s with metadata[%s].",
-            Lists.transform(handedOff.getSegments(), DataSegment::getId),
-            Preconditions.checkNotNull(handedOff.getCommitMetadata(), "commitMetadata")
+            "Handoff complete for segments: %s",
+            String.join(", ", Lists.transform(handedOff.getSegments(), DataSegment::toString))
         );
       }
 
@@ -810,8 +860,6 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
         Thread.currentThread().interrupt();
         throw e;
       }
-
-      log.info("The task was asked to stop before completing");
     }
     catch (Exception e) {
       // (3) catch all other exceptions thrown for the whole ingestion steps including the final publishing.
@@ -834,12 +882,12 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
         if (driver != null) {
           driver.close();
         }
-        if (chatHandlerProvider.isPresent()) {
-          chatHandlerProvider.get().unregister(task.getId());
-        }
+        toolbox.getChatHandlerProvider().unregister(task.getId());
 
-        toolbox.getDruidNodeAnnouncer().unannounce(discoveryDruidNode);
-        toolbox.getDataSegmentServerAnnouncer().unannounce();
+        if (toolbox.getAppenderatorsManager().shouldTaskMakeNodeAnnouncements()) {
+          toolbox.getDruidNodeAnnouncer().unannounce(discoveryDruidNode);
+          toolbox.getDataSegmentServerAnnouncer().unannounce();
+        }
       }
       catch (Throwable e) {
         if (caughtExceptionOuter != null) {
@@ -850,19 +898,19 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
       }
     }
 
-    toolbox.getTaskReportFileWriter().write(getTaskCompletionReports(null));
+    toolbox.getTaskReportFileWriter().write(task.getId(), getTaskCompletionReports(null));
     return TaskStatus.success(task.getId());
   }
 
   private void checkPublishAndHandoffFailure() throws ExecutionException, InterruptedException
   {
     // Check if any publishFuture failed.
-    final List<ListenableFuture<SegmentsAndMetadata>> publishFinished = publishWaitList
+    final List<ListenableFuture<SegmentsAndCommitMetadata>> publishFinished = publishWaitList
         .stream()
         .filter(Future::isDone)
         .collect(Collectors.toList());
 
-    for (ListenableFuture<SegmentsAndMetadata> publishFuture : publishFinished) {
+    for (ListenableFuture<SegmentsAndCommitMetadata> publishFuture : publishFinished) {
       // If publishFuture failed, the below line will throw an exception and catched by (1), and then (2) or (3).
       publishFuture.get();
     }
@@ -870,12 +918,12 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
     publishWaitList.removeAll(publishFinished);
 
     // Check if any handoffFuture failed.
-    final List<ListenableFuture<SegmentsAndMetadata>> handoffFinished = handOffWaitList
+    final List<ListenableFuture<SegmentsAndCommitMetadata>> handoffFinished = handOffWaitList
         .stream()
         .filter(Future::isDone)
         .collect(Collectors.toList());
 
-    for (ListenableFuture<SegmentsAndMetadata> handoffFuture : handoffFinished) {
+    for (ListenableFuture<SegmentsAndCommitMetadata> handoffFuture : handoffFinished) {
       // If handoffFuture failed, the below line will throw an exception and catched by (1), and then (2) or (3).
       handoffFuture.get();
     }
@@ -885,15 +933,15 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
 
   private void publishAndRegisterHandoff(SequenceMetadata<PartitionIdType, SequenceOffsetType> sequenceMetadata)
   {
-    log.info("Publishing segments for sequence [%s]", sequenceMetadata);
+    log.debug("Publishing segments for sequence [%s].", sequenceMetadata);
 
-    final ListenableFuture<SegmentsAndMetadata> publishFuture = Futures.transform(
+    final ListenableFuture<SegmentsAndCommitMetadata> publishFuture = Futures.transform(
         driver.publish(
             sequenceMetadata.createPublisher(this, toolbox, ioConfig.isUseTransaction()),
             sequenceMetadata.getCommitterSupplier(this, stream, lastPersistedOffsets).get(),
             Collections.singletonList(sequenceMetadata.getSequenceName())
         ),
-        (Function<SegmentsAndMetadata, SegmentsAndMetadata>) publishedSegmentsAndMetadata -> {
+        (Function<SegmentsAndCommitMetadata, SegmentsAndCommitMetadata>) publishedSegmentsAndMetadata -> {
           if (publishedSegmentsAndMetadata == null) {
             throw new ISE(
                 "Transaction failure publishing segments for sequence [%s]",
@@ -907,24 +955,27 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
     publishWaitList.add(publishFuture);
 
     // Create a handoffFuture for every publishFuture. The created handoffFuture must fail if publishFuture fails.
-    final SettableFuture<SegmentsAndMetadata> handoffFuture = SettableFuture.create();
+    final SettableFuture<SegmentsAndCommitMetadata> handoffFuture = SettableFuture.create();
     handOffWaitList.add(handoffFuture);
 
     Futures.addCallback(
         publishFuture,
-        new FutureCallback<SegmentsAndMetadata>()
+        new FutureCallback<SegmentsAndCommitMetadata>()
         {
           @Override
-          public void onSuccess(SegmentsAndMetadata publishedSegmentsAndMetadata)
+          public void onSuccess(SegmentsAndCommitMetadata publishedSegmentsAndCommitMetadata)
           {
             log.info(
-                "Published segments %s with metadata[%s].",
-                Lists.transform(publishedSegmentsAndMetadata.getSegments(), DataSegment::getId),
-                Preconditions.checkNotNull(publishedSegmentsAndMetadata.getCommitMetadata(), "commitMetadata")
+                "Published %s segments for sequence [%s] with metadata [%s].",
+                publishedSegmentsAndCommitMetadata.getSegments().size(),
+                sequenceMetadata.getSequenceName(),
+                Preconditions.checkNotNull(publishedSegmentsAndCommitMetadata.getCommitMetadata(), "commitMetadata")
             );
+            log.infoSegments(publishedSegmentsAndCommitMetadata.getSegments(), "Published segments");
 
             sequences.remove(sequenceMetadata);
             publishingSequences.remove(sequenceMetadata.getSequenceName());
+
             try {
               persistSequences();
             }
@@ -935,20 +986,24 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
             }
 
             Futures.transform(
-                driver.registerHandoff(publishedSegmentsAndMetadata),
-                new Function<SegmentsAndMetadata, Void>()
+                driver.registerHandoff(publishedSegmentsAndCommitMetadata),
+                new Function<SegmentsAndCommitMetadata, Void>()
                 {
                   @Nullable
                   @Override
-                  public Void apply(@Nullable SegmentsAndMetadata handoffSegmentsAndMetadata)
+                  public Void apply(@Nullable SegmentsAndCommitMetadata handoffSegmentsAndCommitMetadata)
                   {
-                    if (handoffSegmentsAndMetadata == null) {
+                    if (handoffSegmentsAndCommitMetadata == null) {
                       log.warn(
-                          "Failed to handoff segments %s",
-                          Lists.transform(publishedSegmentsAndMetadata.getSegments(), DataSegment::getId)
+                          "Failed to hand off %s segments",
+                          publishedSegmentsAndCommitMetadata.getSegments().size()
+                      );
+                      log.warnSegments(
+                          publishedSegmentsAndCommitMetadata.getSegments(),
+                          "Failed to hand off segments"
                       );
                     }
-                    handoffFuture.set(handoffSegmentsAndMetadata);
+                    handoffFuture.set(handoffSegmentsAndCommitMetadata);
                     return null;
                   }
                 }
@@ -975,7 +1030,7 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
     final File sequencesPersistFile = getSequencesPersistFile(toolbox);
     if (sequencesPersistFile.exists()) {
       sequences = new CopyOnWriteArrayList<>(
-          toolbox.getObjectMapper().<List<SequenceMetadata<PartitionIdType, SequenceOffsetType>>>readValue(
+          toolbox.getJsonMapper().readValue(
               sequencesPersistFile,
               getSequenceMetadataTypeReference()
           )
@@ -988,12 +1043,25 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
 
   private synchronized void persistSequences() throws IOException
   {
-    log.info("Persisting Sequences Metadata [%s]", sequences);
-    toolbox.getObjectMapper().writerWithType(
+    toolbox.getJsonMapper().writerFor(
         getSequenceMetadataTypeReference()
     ).writeValue(getSequencesPersistFile(toolbox), sequences);
+
+    log.info("Saved sequence metadata to disk: %s", sequences);
   }
 
+  /**
+   * Return a map of reports for the task.
+   *
+   * A successfull task should always have a null errorMsg. Segments availability is inherently confirmed
+   * if the task was succesful.
+   *
+   * A falied task should always have a non-null errorMsg. Segment availability is never confirmed if the task
+   * was not successful.
+   *
+   * @param errorMsg Nullable error message for the task. null if task succeeded.
+   * @return Map of reports for the task.
+   */
   private Map<String, TaskReport> getTaskCompletionReports(@Nullable String errorMsg)
   {
     return TaskReport.buildTaskReports(
@@ -1003,7 +1071,8 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
                 ingestionState,
                 getTaskCompletionUnparseableEvents(),
                 getTaskCompletionRowStats(),
-                errorMsg
+                errorMsg,
+                errorMsg == null
             )
         )
     );
@@ -1013,7 +1082,7 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
   {
     Map<String, Object> unparseableEventsMap = new HashMap<>();
     List<String> buildSegmentsParseExceptionMessages = IndexTaskUtils.getMessagesFromSavedParseExceptions(
-        savedParseExceptions
+        parseExceptionHandler.getSavedParseExceptions()
     );
     if (buildSegmentsParseExceptionMessages != null) {
       unparseableEventsMap.put(RowIngestionMeters.BUILD_SEGMENTS, buildSegmentsParseExceptionMessages);
@@ -1040,16 +1109,16 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
       if (!sequenceMetadata.isOpen() && !publishingSequences.contains(sequenceMetadata.getSequenceName())) {
         publishingSequences.add(sequenceMetadata.getSequenceName());
         try {
-          Object result = driver.persist(committerSupplier.get());
-          log.info(
-              "Persist completed with results: [%s], adding sequence [%s] to publish queue",
+          final Object result = driver.persist(committerSupplier.get());
+          log.debug(
+              "Persist completed with metadata [%s], adding sequence [%s] to publish queue.",
               result,
-              sequenceMetadata
+              sequenceMetadata.getSequenceName()
           );
           publishAndRegisterHandoff(sequenceMetadata);
         }
         catch (InterruptedException e) {
-          log.warn("Interrupted while persisting sequence [%s]", sequenceMetadata);
+          log.warn("Interrupted while persisting metadata for sequence [%s].", sequenceMetadata.getSequenceName());
           throw e;
         }
       }
@@ -1057,7 +1126,7 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
   }
 
   private Set<StreamPartition<PartitionIdType>> assignPartitions(
-      RecordSupplier<PartitionIdType, SequenceOffsetType> recordSupplier
+      RecordSupplier<PartitionIdType, SequenceOffsetType, RecordType> recordSupplier
   )
   {
     final Set<StreamPartition<PartitionIdType>> assignment = new HashSet<>();
@@ -1076,7 +1145,7 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
 
         assignment.add(StreamPartition.of(stream, partition));
       } else {
-        log.info("Finished reading partition[%s].", partition);
+        log.info("Finished reading partition[%s], up to[%s].", partition, currOffset);
       }
     }
 
@@ -1119,7 +1188,7 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
     // Actually do the add.
     sequences.add(sequenceMetadata);
   }
-  
+
   private SequenceMetadata<PartitionIdType, SequenceOffsetType> getLastSequenceMetadata()
   {
     Preconditions.checkState(!sequences.isEmpty(), "Empty sequences");
@@ -1175,13 +1244,13 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
   }
 
   private void seekToStartingSequence(
-      RecordSupplier<PartitionIdType, SequenceOffsetType> recordSupplier,
+      RecordSupplier<PartitionIdType, SequenceOffsetType, RecordType> recordSupplier,
       Set<StreamPartition<PartitionIdType>> partitions
   ) throws InterruptedException
   {
     for (final StreamPartition<PartitionIdType> partition : partitions) {
       final SequenceOffsetType sequence = currOffsets.get(partition.getPartitionId());
-      log.info("Seeking partition[%s] to sequenceNumber[%s].", partition.getPartitionId(), sequence);
+      log.info("Seeking partition[%s] to[%s].", partition.getPartitionId(), sequence);
       recordSupplier.seek(partition, sequence);
     }
   }
@@ -1210,14 +1279,14 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
         status = Status.PAUSED;
         hasPaused.signalAll();
 
+        log.debug("Received pause command, pausing ingestion until resumed.");
         while (pauseRequested) {
-          log.info("Pausing ingestion until resumed");
           shouldResume.await();
         }
 
         status = Status.READING;
         shouldResume.signalAll();
-        log.info("Ingestion loop resumed");
+        log.debug("Received resume command, resuming ingestion.");
         return true;
       }
     }
@@ -1226,35 +1295,6 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
     }
 
     return false;
-  }
-
-
-  private void handleParseException(ParseException pe, OrderedPartitionableRecord record)
-  {
-    if (pe.isFromPartiallyValidRow()) {
-      rowIngestionMeters.incrementProcessedWithError();
-    } else {
-      rowIngestionMeters.incrementUnparseable();
-    }
-
-    if (tuningConfig.isLogParseExceptions()) {
-      log.error(
-          pe,
-          "Encountered parse exception on row from partition[%s] sequenceNumber[%s]",
-          record.getPartitionId(),
-          record.getSequenceNumber()
-      );
-    }
-
-    if (savedParseExceptions != null) {
-      savedParseExceptions.add(pe);
-    }
-
-    if (rowIngestionMeters.getUnparseable() + rowIngestionMeters.getProcessedWithError()
-        > tuningConfig.getMaxParseExceptions()) {
-      log.error("Max parse exceptions exceeded, terminating task...");
-      throw new RuntimeException("Max parse exceptions exceeded, terminating task...");
-    }
   }
 
   private boolean isPaused()
@@ -1271,11 +1311,12 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
   protected void sendResetRequestAndWait(
       Map<StreamPartition<PartitionIdType>, SequenceOffsetType> outOfRangePartitions,
       TaskToolbox taskToolbox
-  )
-      throws IOException
+  ) throws IOException
   {
-    Map<PartitionIdType, SequenceOffsetType> partitionOffsetMap = outOfRangePartitions
-        .entrySet().stream().collect(Collectors.toMap(x -> x.getKey().getPartitionId(), Map.Entry::getValue));
+    Map<PartitionIdType, SequenceOffsetType> partitionOffsetMap = CollectionUtils.mapKeys(
+        outOfRangePartitions,
+        StreamPartition::getPartitionId
+    );
 
     boolean result = taskToolbox
         .getTaskActionClient()
@@ -1283,24 +1324,28 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
             new ResetDataSourceMetadataAction(
                 task.getDataSource(),
                 createDataSourceMetadata(
-                    new SeekableStreamStartSequenceNumbers<>(
+                    new SeekableStreamEndSequenceNumbers<>(
                         ioConfig.getStartSequenceNumbers().getStream(),
-                        partitionOffsetMap,
-                        // Clear all exclusive start offsets for automatic reset
-                        Collections.emptySet()
+                        partitionOffsetMap
                     )
                 )
             )
         );
 
     if (result) {
-      log.makeAlert("Resetting sequences for datasource [%s]", task.getDataSource())
+      log.makeAlert("Offsets were reset automatically, potential data duplication or loss")
+         .addData("task", task.getId())
+         .addData("dataSource", task.getDataSource())
          .addData("partitions", partitionOffsetMap.keySet())
          .emit();
 
       requestPause();
     } else {
-      log.makeAlert("Failed to send reset request for partitions [%s]", partitionOffsetMap.keySet()).emit();
+      log.makeAlert("Failed to send offset reset request")
+         .addData("task", task.getId())
+         .addData("dataSource", task.getDataSource())
+         .addData("partitions", ImmutableSet.copyOf(partitionOffsetMap.keySet()))
+         .emit();
     }
   }
 
@@ -1325,6 +1370,18 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
     return rowIngestionMeters;
   }
 
+  @VisibleForTesting
+  public FireDepartmentMetrics getFireDepartmentMetrics()
+  {
+    return fireDepartmentMetrics;
+  }
+
+  public void stopForcefully()
+  {
+    log.info("Stopping forcefully (status: [%s])", status);
+    stopRequested.set(true);
+    runThread.interrupt();
+  }
 
   public void stopGracefully()
   {
@@ -1439,14 +1496,8 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
     return setEndOffsets(sequences, finish);
   }
 
-  @GET
-  @Path("/rowStats")
-  @Produces(MediaType.APPLICATION_JSON)
-  public Response getRowStats(
-      @Context final HttpServletRequest req
-  )
+  public Map<String, Object> doGetRowStats()
   {
-    authorizationCheck(req, Action.READ);
     Map<String, Object> returnMap = new HashMap<>();
     Map<String, Object> totalsMap = new HashMap<>();
     Map<String, Object> averagesMap = new HashMap<>();
@@ -1462,8 +1513,50 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
 
     returnMap.put("movingAverages", averagesMap);
     returnMap.put("totals", totalsMap);
-    return Response.ok(returnMap).build();
+    return returnMap;
   }
+
+  public Map<String, Object> doGetLiveReports()
+  {
+    Map<String, Object> returnMap = new HashMap<>();
+    Map<String, Object> ingestionStatsAndErrors = new HashMap<>();
+    Map<String, Object> payload = new HashMap<>();
+    Map<String, Object> events = getTaskCompletionUnparseableEvents();
+
+    payload.put("ingestionState", ingestionState);
+    payload.put("unparseableEvents", events);
+    payload.put("rowStats", doGetRowStats());
+
+    ingestionStatsAndErrors.put("taskId", task.getId());
+    ingestionStatsAndErrors.put("payload", payload);
+    ingestionStatsAndErrors.put("type", "ingestionStatsAndErrors");
+
+    returnMap.put("ingestionStatsAndErrors", ingestionStatsAndErrors);
+    return returnMap;
+  }
+
+  @GET
+  @Path("/rowStats")
+  @Produces(MediaType.APPLICATION_JSON)
+  public Response getRowStats(
+      @Context final HttpServletRequest req
+  )
+  {
+    authorizationCheck(req, Action.READ);
+    return Response.ok(doGetRowStats()).build();
+  }
+
+  @GET
+  @Path("/liveReports")
+  @Produces(MediaType.APPLICATION_JSON)
+  public Response getLiveReport(
+      @Context final HttpServletRequest req
+  )
+  {
+    authorizationCheck(req, Action.READ);
+    return Response.ok(doGetLiveReports()).build();
+  }
+
 
   @GET
   @Path("/unparseableEvents")
@@ -1473,7 +1566,9 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
   )
   {
     authorizationCheck(req, Action.READ);
-    List<String> events = IndexTaskUtils.getMessagesFromSavedParseExceptions(savedParseExceptions);
+    List<String> events = IndexTaskUtils.getMessagesFromSavedParseExceptions(
+        parseExceptionHandler.getSavedParseExceptions()
+    );
     return Response.ok(events).build();
   }
 
@@ -1501,7 +1596,7 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
         pauseLock.lockInterruptibly();
         // Perform all sequence related checks before checking for isPaused()
         // and after acquiring pauseLock to correctly guard against duplicate requests
-        Preconditions.checkState(sequenceNumbers.size() > 0, "WTH?! No Sequences found to set end sequences");
+        Preconditions.checkState(sequenceNumbers.size() > 0, "No sequences found to set end sequences");
 
         final SequenceMetadata<PartitionIdType, SequenceOffsetType> latestSequence = getLastSequenceMetadata();
         final Set<PartitionIdType> exclusiveStartPartitions;
@@ -1520,24 +1615,25 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
              && latestSequence.getExclusiveStartPartitions().equals(exclusiveStartPartitions)
              && !finish)
             || (latestSequence.getEndOffsets().equals(sequenceNumbers) && finish)) {
-          log.warn("Ignoring duplicate request, end sequences already set for sequences [%s]", sequenceNumbers);
+          log.warn("Ignoring duplicate request, end offsets already set for sequences [%s]", sequenceNumbers);
           resume();
           return Response.ok(sequenceNumbers).build();
         } else if (latestSequence.isCheckpointed()) {
           return Response.status(Response.Status.BAD_REQUEST)
                          .entity(StringUtils.format(
-                             "WTH?! Sequence [%s] has already endOffsets set, cannot set to [%s]",
+                             "Sequence [%s] has already endOffsets set, cannot set to [%s]",
                              latestSequence,
                              sequenceNumbers
                          )).build();
         } else if (!isPaused()) {
           return Response.status(Response.Status.BAD_REQUEST)
-                         .entity("Task must be paused before changing the end sequences")
+                         .entity("Task must be paused before changing the end offsets")
                          .build();
         }
 
         for (Map.Entry<PartitionIdType, SequenceOffsetType> entry : sequenceNumbers.entrySet()) {
-          if (createSequenceNumber(entry.getValue()).compareTo(createSequenceNumber(currOffsets.get(entry.getKey()))) < 0) {
+          if (createSequenceNumber(entry.getValue()).compareTo(createSequenceNumber(currOffsets.get(entry.getKey())))
+              < 0) {
             return Response.status(Response.Status.BAD_REQUEST)
                            .entity(
                                StringUtils.format(
@@ -1554,11 +1650,15 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
         latestSequence.setEndOffsets(sequenceNumbers);
 
         if (finish) {
-          log.info("Updating endOffsets from [%s] to [%s]", endOffsets, sequenceNumbers);
+          log.info(
+              "Sequence[%s] end offsets updated from [%s] to [%s].",
+              latestSequence.getSequenceName(),
+              endOffsets,
+              sequenceNumbers
+          );
           endOffsets.putAll(sequenceNumbers);
         } else {
           // create new sequence
-          log.info("Creating new sequence with startOffsets [%s] and endOffsets [%s]", sequenceNumbers, endOffsets);
           final SequenceMetadata<PartitionIdType, SequenceOffsetType> newSequence = new SequenceMetadata<>(
               latestSequence.getSequenceId() + 1,
               StringUtils.format("%s_%d", ioConfig.getBaseSequenceName(), latestSequence.getSequenceId() + 1),
@@ -1567,12 +1667,20 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
               false,
               exclusiveStartPartitions
           );
+
+          log.info(
+              "Sequence[%s] created with start offsets [%s] and end offsets [%s].",
+              newSequence.getSequenceName(),
+              sequenceNumbers,
+              endOffsets
+          );
+
           addSequence(newSequence);
         }
         persistSequences();
       }
       catch (Exception e) {
-        log.error(e, "Unable to set end sequences, dying");
+        log.error(e, "Failed to set end offsets.");
         backgroundThreadException = e;
         // should resume to immediately finish kafka index task as failed
         resume();
@@ -1679,7 +1787,7 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
     }
 
     try {
-      return Response.ok().entity(toolbox.getObjectMapper().writeValueAsString(getCurrentOffsets())).build();
+      return Response.ok().entity(toolbox.getJsonMapper().writeValueAsString(getCurrentOffsets())).build();
     }
     catch (JsonProcessingException e) {
       throw new RuntimeException(e);
@@ -1729,7 +1837,7 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
 
   /**
    * This method does two things:
-   *
+   * <p>
    * 1) Verifies that the sequence numbers we read are at least as high as those read previously, and throws an
    * exception if not.
    * 2) Returns false if we should skip this record because it's either (a) the first record in a partition that we are
@@ -1743,7 +1851,7 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
     // Verify that the record is at least as high as its currOffset.
     final SequenceOffsetType currOffset = Preconditions.checkNotNull(
         currOffsets.get(partition),
-        "Current offset is null for sequenceNumber[%s] and partition[%s]",
+        "Current offset is null for partition[%s]",
         recordOffset,
         partition
     );
@@ -1826,8 +1934,8 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
    * @throws Exception
    */
   @NotNull
-  protected abstract List<OrderedPartitionableRecord<PartitionIdType, SequenceOffsetType>> getRecords(
-      RecordSupplier<PartitionIdType, SequenceOffsetType> recordSupplier,
+  protected abstract List<OrderedPartitionableRecord<PartitionIdType, SequenceOffsetType, RecordType>> getRecords(
+      RecordSupplier<PartitionIdType, SequenceOffsetType, RecordType> recordSupplier,
       TaskToolbox toolbox
   ) throws Exception;
 
@@ -1857,7 +1965,7 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
    */
   protected abstract void possiblyResetDataSourceMetadata(
       TaskToolbox toolbox,
-      RecordSupplier<PartitionIdType, SequenceOffsetType> recordSupplier,
+      RecordSupplier<PartitionIdType, SequenceOffsetType, RecordType> recordSupplier,
       Set<StreamPartition<PartitionIdType>> assignment
   );
 

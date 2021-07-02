@@ -22,7 +22,6 @@ package org.apache.druid.indexing.overlord;
 import com.google.common.base.Optional;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.Iterables;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.ListeningExecutorService;
 import com.google.common.util.concurrent.MoreExecutors;
@@ -51,6 +50,7 @@ import org.apache.druid.query.Query;
 import org.apache.druid.query.QueryRunner;
 import org.apache.druid.query.QuerySegmentWalker;
 import org.apache.druid.query.SegmentDescriptor;
+import org.apache.druid.query.planning.DataSourceAnalysis;
 import org.apache.druid.server.DruidNode;
 import org.apache.druid.server.SetAndVerifyContextQueryRunner;
 import org.apache.druid.server.initialization.ServerConfig;
@@ -171,7 +171,7 @@ public class SingleTaskBackgroundRunner implements TaskRunner, QuerySegmentWalke
         executorService.shutdown();
       }
       catch (SecurityException ex) {
-        log.wtf(ex, "I can't control my own threads!");
+        log.error(ex, "I can't control my own threads!");
       }
     }
 
@@ -233,7 +233,7 @@ public class SingleTaskBackgroundRunner implements TaskRunner, QuerySegmentWalke
         executorService.shutdownNow();
       }
       catch (SecurityException ex) {
-        log.wtf(ex, "I can't control my own threads!");
+        log.error(ex, "I can't control my own threads!");
       }
     }
   }
@@ -302,9 +302,45 @@ public class SingleTaskBackgroundRunner implements TaskRunner, QuerySegmentWalke
   }
 
   @Override
+  public TaskLocation getTaskLocation(String taskId)
+  {
+    return location;
+  }
+
+  @Override
   public Optional<ScalingStats> getScalingStats()
   {
     return Optional.absent();
+  }
+
+  @Override
+  public long getTotalTaskSlotCount()
+  {
+    return 1;
+  }
+
+  @Override
+  public long getIdleTaskSlotCount()
+  {
+    return runningItem == null ? 1 : 0;
+  }
+
+  @Override
+  public long getUsedTaskSlotCount()
+  {
+    return runningItem == null ? 0 : 1;
+  }
+
+  @Override
+  public long getLazyTaskSlotCount()
+  {
+    return 0;
+  }
+
+  @Override
+  public long getBlacklistedTaskSlotCount()
+  {
+    return 0;
   }
 
   @Override
@@ -322,11 +358,13 @@ public class SingleTaskBackgroundRunner implements TaskRunner, QuerySegmentWalke
   private <T> QueryRunner<T> getQueryRunnerImpl(Query<T> query)
   {
     QueryRunner<T> queryRunner = null;
-    final String queryDataSource = Iterables.getOnlyElement(query.getDataSource().getNames());
 
     if (runningItem != null) {
+      final DataSourceAnalysis analysis = DataSourceAnalysis.forDataSource(query.getDataSource());
       final Task task = runningItem.getTask();
-      if (task.getDataSource().equals(queryDataSource)) {
+
+      if (analysis.getBaseTableDataSource().isPresent()
+          && task.getDataSource().equals(analysis.getBaseTableDataSource().get().getName())) {
         final QueryRunner<T> taskQueryRunner = task.getQueryRunner(query);
 
         if (taskQueryRunner != null) {
@@ -373,7 +411,7 @@ public class SingleTaskBackgroundRunner implements TaskRunner, QuerySegmentWalke
     {
       return task.getType();
     }
-    
+
     @Override
     public String getDataSource()
     {

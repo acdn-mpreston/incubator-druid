@@ -22,20 +22,28 @@ package org.apache.druid.indexing.common.config;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableList;
+import org.apache.druid.segment.loading.StorageLocationConfig;
 import org.joda.time.Period;
 
+import javax.annotation.Nullable;
 import java.io.File;
 import java.nio.file.Paths;
+import java.util.Collections;
 import java.util.List;
 
+/**
+ * Configurations for ingestion tasks. These configurations can be applied per middleManager, indexer, or overlord.
+ *
+ * See {@link org.apache.druid.indexing.overlord.config.DefaultTaskConfig} if you want to apply the same configuration
+ * to all tasks submitted to the overlord.
+ */
 public class TaskConfig
 {
   public static final List<String> DEFAULT_DEFAULT_HADOOP_COORDINATES = ImmutableList.of(
-      "org.apache.hadoop:hadoop-client:2.8.3"
+      "org.apache.hadoop:hadoop-client:2.8.5"
   );
 
   private static final Period DEFAULT_DIRECTORY_LOCK_TIMEOUT = new Period("PT10M");
-
   private static final Period DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT = new Period("PT5M");
 
   @JsonProperty
@@ -62,6 +70,15 @@ public class TaskConfig
   @JsonProperty
   private final Period directoryLockTimeout;
 
+  @JsonProperty
+  private final List<StorageLocationConfig> shuffleDataLocations;
+
+  @JsonProperty
+  private final boolean ignoreTimestampSpecForDruidInputSource;
+
+  @JsonProperty
+  private final boolean batchMemoryMappedIndex;
+
   @JsonCreator
   public TaskConfig(
       @JsonProperty("baseDir") String baseDir,
@@ -71,7 +88,10 @@ public class TaskConfig
       @JsonProperty("defaultHadoopCoordinates") List<String> defaultHadoopCoordinates,
       @JsonProperty("restoreTasksOnRestart") boolean restoreTasksOnRestart,
       @JsonProperty("gracefulShutdownTimeout") Period gracefulShutdownTimeout,
-      @JsonProperty("directoryLockTimeout") Period directoryLockTimeout
+      @JsonProperty("directoryLockTimeout") Period directoryLockTimeout,
+      @JsonProperty("shuffleDataLocations") List<StorageLocationConfig> shuffleDataLocations,
+      @JsonProperty("ignoreTimestampSpecForDruidInputSource") boolean ignoreTimestampSpecForDruidInputSource,
+      @JsonProperty("batchMemoryMappedIndex") boolean batchMemoryMapIndex // only set to true to fall back to older behavior
   )
   {
     this.baseDir = baseDir == null ? System.getProperty("java.io.tmpdir") : baseDir;
@@ -89,6 +109,15 @@ public class TaskConfig
     this.directoryLockTimeout = directoryLockTimeout == null
                                 ? DEFAULT_DIRECTORY_LOCK_TIMEOUT
                                 : directoryLockTimeout;
+    if (shuffleDataLocations == null) {
+      this.shuffleDataLocations = Collections.singletonList(
+          new StorageLocationConfig(new File(defaultDir(null, "intermediary-segments")), null, null)
+      );
+    } else {
+      this.shuffleDataLocations = shuffleDataLocations;
+    }
+    this.ignoreTimestampSpecForDruidInputSource = ignoreTimestampSpecForDruidInputSource;
+    this.batchMemoryMappedIndex = batchMemoryMapIndex;
   }
 
   @JsonProperty
@@ -111,6 +140,11 @@ public class TaskConfig
   public File getTaskWorkDir(String taskId)
   {
     return new File(getTaskDir(taskId), "work");
+  }
+
+  public File getTaskTempDir(String taskId)
+  {
+    return new File(getTaskDir(taskId), "temp");
   }
 
   public File getTaskLockFile(String taskId)
@@ -154,7 +188,26 @@ public class TaskConfig
     return directoryLockTimeout;
   }
 
-  private String defaultDir(String configParameter, final String defaultVal)
+  @JsonProperty
+  public List<StorageLocationConfig> getShuffleDataLocations()
+  {
+    return shuffleDataLocations;
+  }
+
+  @JsonProperty
+  public boolean isIgnoreTimestampSpecForDruidInputSource()
+  {
+    return ignoreTimestampSpecForDruidInputSource;
+  }
+
+  @JsonProperty
+  public boolean getBatchMemoryMappedIndex()
+  {
+    return batchMemoryMappedIndex;
+  }
+
+
+  private String defaultDir(@Nullable String configParameter, final String defaultVal)
   {
     if (configParameter == null) {
       return Paths.get(getBaseDir(), defaultVal).toString();

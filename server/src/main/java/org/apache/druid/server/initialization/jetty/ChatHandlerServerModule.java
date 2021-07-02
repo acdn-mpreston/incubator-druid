@@ -62,7 +62,11 @@ public class ChatHandlerServerModule implements Module
 
     if (properties.containsKey(MAX_CHAT_REQUESTS_PROPERTY)) {
       final int maxRequests = Integer.parseInt(properties.getProperty(MAX_CHAT_REQUESTS_PROPERTY));
-      JettyBindings.addQosFilter(binder, "/druid/worker/v1/chat/*", maxRequests);
+      JettyBindings.addQosFilter(
+          binder,
+          "/druid/worker/v1/chat/*",
+          maxRequests
+      );
     }
 
     Multibinder.newSetBinder(binder, ServletFilterHolder.class).addBinding().to(TaskIdResponseHeaderFilterHolder.class);
@@ -102,7 +106,7 @@ public class ChatHandlerServerModule implements Module
         node,
         config,
         TLSServerConfig,
-        injector.getExistingBinding(Key.get(SslContextFactory.class)),
+        injector.getExistingBinding(Key.get(SslContextFactory.Server.class)),
         injector.getInstance(TLSCertificateChecker.class)
     );
   }

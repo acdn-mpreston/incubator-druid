@@ -25,6 +25,7 @@ import org.apache.druid.timeline.DataSegment;
 import javax.annotation.Nullable;
 import java.io.IOException;
 import java.util.Set;
+import java.util.function.Function;
 
 public interface TransactionalSegmentPublisher
 {
@@ -38,8 +39,37 @@ public interface TransactionalSegmentPublisher
    * @throws IOException if there was an I/O error when publishing
    * @throws RuntimeException if we cannot tell if the segments were published or not, for some other reason
    */
-  SegmentPublishResult publishSegments(
-      Set<DataSegment> segments,
+  SegmentPublishResult publishAnnotatedSegments(
+      @Nullable Set<DataSegment> segmentsToBeOverwritten,
+      @Nullable Set<DataSegment> segmentsToDrop,
+      Set<DataSegment> segmentsToPublish,
       @Nullable Object commitMetadata
   ) throws IOException;
+
+  default SegmentPublishResult publishSegments(
+      @Nullable Set<DataSegment> segmentsToBeOverwritten,
+      @Nullable Set<DataSegment> segmentsToDrop,
+      Set<DataSegment> segmentsToPublish,
+      Function<Set<DataSegment>, Set<DataSegment>> outputSegmentsAnnotateFunction,
+      @Nullable Object commitMetadata
+  ) throws IOException
+  {
+    final Function<Set<DataSegment>, Set<DataSegment>> annotateFunction = outputSegmentsAnnotateFunction
+        .andThen(SegmentPublisherHelper::annotateShardSpec);
+    return publishAnnotatedSegments(
+        segmentsToBeOverwritten,
+        segmentsToDrop,
+        annotateFunction.apply(segmentsToPublish),
+        commitMetadata
+    );
+  }
+
+  /**
+   * @return true if this publisher has action to take when publishing with an empty segment set.
+   *         The publisher used by the seekable stream tasks is an example where this is true.
+   */
+  default boolean supportsEmptyPublish()
+  {
+    return false;
+  }
 }

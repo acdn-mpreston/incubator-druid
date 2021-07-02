@@ -20,51 +20,55 @@
 package org.apache.druid.query.topn;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
+import org.apache.druid.math.expr.ExprMacroTable;
 import org.apache.druid.query.Query;
+import org.apache.druid.query.QueryRunnerTestHelper;
 import org.apache.druid.query.aggregation.DoubleMaxAggregatorFactory;
 import org.apache.druid.query.aggregation.DoubleMinAggregatorFactory;
+import org.apache.druid.query.aggregation.LongSumAggregatorFactory;
+import org.apache.druid.query.aggregation.post.FieldAccessPostAggregator;
+import org.apache.druid.query.dimension.DefaultDimensionSpec;
 import org.apache.druid.query.dimension.ExtractionDimensionSpec;
 import org.apache.druid.query.dimension.LegacyDimensionSpec;
 import org.apache.druid.query.extraction.MapLookupExtractor;
 import org.apache.druid.query.lookup.LookupExtractionFn;
 import org.apache.druid.query.ordering.StringComparators;
 import org.apache.druid.segment.TestHelper;
+import org.apache.druid.segment.column.ValueType;
+import org.apache.druid.segment.virtual.ExpressionVirtualColumn;
 import org.junit.Assert;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.ExpectedException;
 
 import java.io.IOException;
-import java.util.Collections;
-
-import static org.apache.druid.query.QueryRunnerTestHelper.addRowsIndexConstant;
-import static org.apache.druid.query.QueryRunnerTestHelper.allGran;
-import static org.apache.druid.query.QueryRunnerTestHelper.commonDoubleAggregators;
-import static org.apache.druid.query.QueryRunnerTestHelper.dataSource;
-import static org.apache.druid.query.QueryRunnerTestHelper.fullOnIntervalSpec;
-import static org.apache.druid.query.QueryRunnerTestHelper.indexMetric;
-import static org.apache.druid.query.QueryRunnerTestHelper.marketDimension;
-import static org.apache.druid.query.QueryRunnerTestHelper.rowsCount;
 
 public class TopNQueryTest
 {
-  private static final ObjectMapper jsonMapper = TestHelper.makeJsonMapper();
+  @Rule
+  public ExpectedException expectedException = ExpectedException.none();
+
+  private static final ObjectMapper JSON_MAPPER = TestHelper.makeJsonMapper();
 
   @Test
   public void testQuerySerialization() throws IOException
   {
     Query query = new TopNQueryBuilder()
-        .dataSource(dataSource)
-        .granularity(allGran)
-        .dimension(marketDimension)
-        .metric(indexMetric)
+        .dataSource(QueryRunnerTestHelper.DATA_SOURCE)
+        .granularity(QueryRunnerTestHelper.ALL_GRAN)
+        .dimension(QueryRunnerTestHelper.MARKET_DIMENSION)
+        .metric(QueryRunnerTestHelper.INDEX_METRIC)
         .threshold(4)
-        .intervals(fullOnIntervalSpec)
+        .intervals(QueryRunnerTestHelper.FULL_ON_INTERVAL_SPEC)
         .aggregators(
             Lists.newArrayList(
                 Iterables.concat(
-                    commonDoubleAggregators,
+                    QueryRunnerTestHelper.COMMON_DOUBLE_AGGREGATORS,
                     Lists.newArrayList(
                         new DoubleMaxAggregatorFactory("maxIndex", "index"),
                         new DoubleMinAggregatorFactory("minIndex", "index")
@@ -72,11 +76,11 @@ public class TopNQueryTest
                 )
             )
         )
-        .postAggregators(Collections.singletonList(addRowsIndexConstant))
+        .postAggregators(QueryRunnerTestHelper.ADD_ROWS_INDEX_CONSTANT)
         .build();
 
-    String json = jsonMapper.writeValueAsString(query);
-    Query serdeQuery = jsonMapper.readValue(json, Query.class);
+    String json = JSON_MAPPER.writeValueAsString(query);
+    Query serdeQuery = JSON_MAPPER.readValue(json, Query.class);
 
     Assert.assertEquals(query, serdeQuery);
   }
@@ -86,22 +90,22 @@ public class TopNQueryTest
   public void testQuerySerdeWithLookupExtractionFn() throws IOException
   {
     final TopNQuery expectedQuery = new TopNQueryBuilder()
-        .dataSource(dataSource)
-        .granularity(allGran)
+        .dataSource(QueryRunnerTestHelper.DATA_SOURCE)
+        .granularity(QueryRunnerTestHelper.ALL_GRAN)
         .dimension(
             new ExtractionDimensionSpec(
-                marketDimension,
-                marketDimension,
+                QueryRunnerTestHelper.MARKET_DIMENSION,
+                QueryRunnerTestHelper.MARKET_DIMENSION,
                 new LookupExtractionFn(new MapLookupExtractor(ImmutableMap.of("foo", "bar"), false), true, null, false, false)
             )
         )
-        .metric(new NumericTopNMetricSpec(indexMetric))
+        .metric(new NumericTopNMetricSpec(QueryRunnerTestHelper.INDEX_METRIC))
         .threshold(2)
-        .intervals(fullOnIntervalSpec.getIntervals())
+        .intervals(QueryRunnerTestHelper.FULL_ON_INTERVAL_SPEC.getIntervals())
         .aggregators(
             Lists.newArrayList(
                 Iterables.concat(
-                    commonDoubleAggregators,
+                    QueryRunnerTestHelper.COMMON_DOUBLE_AGGREGATORS,
                     Lists.newArrayList(
                         new DoubleMaxAggregatorFactory("maxIndex", "index"),
                         new DoubleMinAggregatorFactory("minIndex", "index")
@@ -110,21 +114,21 @@ public class TopNQueryTest
             )
         )
         .build();
-    final String str = jsonMapper.writeValueAsString(expectedQuery);
-    Assert.assertEquals(expectedQuery, jsonMapper.readValue(str, TopNQuery.class));
+    final String str = JSON_MAPPER.writeValueAsString(expectedQuery);
+    Assert.assertEquals(expectedQuery, JSON_MAPPER.readValue(str, TopNQuery.class));
   }
 
   @Test
   public void testQuerySerdeWithAlphaNumericTopNMetricSpec() throws IOException
   {
     TopNQuery expectedQuery = new TopNQueryBuilder()
-        .dataSource(dataSource)
-        .granularity(allGran)
-        .dimension(new LegacyDimensionSpec(marketDimension))
+        .dataSource(QueryRunnerTestHelper.DATA_SOURCE)
+        .granularity(QueryRunnerTestHelper.ALL_GRAN)
+        .dimension(new LegacyDimensionSpec(QueryRunnerTestHelper.MARKET_DIMENSION))
         .metric(new DimensionTopNMetricSpec(null, StringComparators.ALPHANUMERIC))
         .threshold(2)
-        .intervals(fullOnIntervalSpec.getIntervals())
-        .aggregators(Collections.singletonList(rowsCount))
+        .intervals(QueryRunnerTestHelper.FULL_ON_INTERVAL_SPEC.getIntervals())
+        .aggregators(QueryRunnerTestHelper.ROWS_COUNT)
         .build();
     String jsonQuery = "{\n"
                        + "  \"queryType\": \"topN\",\n"
@@ -146,9 +150,9 @@ public class TopNQueryTest
                        + "    \"1970-01-01T00:00:00.000Z/2020-01-01T00:00:00.000Z\"\n"
                        + "  ]\n"
                        + "}";
-    TopNQuery actualQuery = jsonMapper.readValue(
-        jsonMapper.writeValueAsString(
-            jsonMapper.readValue(
+    TopNQuery actualQuery = JSON_MAPPER.readValue(
+        JSON_MAPPER.writeValueAsString(
+            JSON_MAPPER.readValue(
                 jsonQuery,
                 TopNQuery.class
             )
@@ -157,4 +161,109 @@ public class TopNQueryTest
     Assert.assertEquals(expectedQuery, actualQuery);
   }
 
+  @Test
+  public void testQueryNullDimensionSpec() throws IOException
+  {
+    expectedException.expectMessage("dimensionSpec can't be null");
+
+    Query query = new TopNQueryBuilder()
+        .dataSource(QueryRunnerTestHelper.DATA_SOURCE)
+        .granularity(QueryRunnerTestHelper.ALL_GRAN)
+        .metric(QueryRunnerTestHelper.INDEX_METRIC)
+        .threshold(4)
+        .intervals(QueryRunnerTestHelper.FULL_ON_INTERVAL_SPEC)
+        .aggregators(
+            Lists.newArrayList(
+                Iterables.concat(
+                    QueryRunnerTestHelper.COMMON_DOUBLE_AGGREGATORS,
+                    Lists.newArrayList(
+                        new DoubleMaxAggregatorFactory("maxIndex", "index"),
+                        new DoubleMinAggregatorFactory("minIndex", "index")
+                    )
+                )
+            )
+        )
+        .postAggregators(QueryRunnerTestHelper.ADD_ROWS_INDEX_CONSTANT)
+        .build();
+
+    String json = JSON_MAPPER.writeValueAsString(query);
+    JSON_MAPPER.readValue(json, Query.class);
+  }
+
+  @Test
+  public void testQueryZeroThreshold() throws IOException
+  {
+    expectedException.expectMessage("Threshold cannot be equal to 0.");
+
+    Query query = new TopNQueryBuilder()
+        .dataSource(QueryRunnerTestHelper.DATA_SOURCE)
+        .granularity(QueryRunnerTestHelper.ALL_GRAN)
+        .metric(QueryRunnerTestHelper.INDEX_METRIC)
+        .dimension(new LegacyDimensionSpec(QueryRunnerTestHelper.MARKET_DIMENSION))
+        .threshold(0)
+        .intervals(QueryRunnerTestHelper.FULL_ON_INTERVAL_SPEC)
+        .aggregators(
+            Lists.newArrayList(
+                Iterables.concat(
+                    QueryRunnerTestHelper.COMMON_DOUBLE_AGGREGATORS,
+                    Lists.newArrayList(
+                        new DoubleMaxAggregatorFactory("maxIndex", "index"),
+                        new DoubleMinAggregatorFactory("minIndex", "index")
+                    )
+                )
+            )
+        )
+        .postAggregators(QueryRunnerTestHelper.ADD_ROWS_INDEX_CONSTANT)
+        .build();
+
+    String json = JSON_MAPPER.writeValueAsString(query);
+    JSON_MAPPER.readValue(json, Query.class);
+  }
+
+  @Test
+  public void testQueryNullMetric() throws IOException
+  {
+    expectedException.expectMessage("must specify a metric");
+
+    Query query = new TopNQueryBuilder()
+        .dataSource(QueryRunnerTestHelper.DATA_SOURCE)
+        .granularity(QueryRunnerTestHelper.ALL_GRAN)
+        .dimension(new LegacyDimensionSpec(QueryRunnerTestHelper.MARKET_DIMENSION))
+        .threshold(2)
+        .intervals(QueryRunnerTestHelper.FULL_ON_INTERVAL_SPEC)
+        .aggregators(
+            Lists.newArrayList(
+                Iterables.concat(
+                    QueryRunnerTestHelper.COMMON_DOUBLE_AGGREGATORS,
+                    Lists.newArrayList(
+                        new DoubleMaxAggregatorFactory("maxIndex", "index"),
+                        new DoubleMinAggregatorFactory("minIndex", "index")
+                    )
+                )
+            )
+        )
+        .postAggregators(QueryRunnerTestHelper.ADD_ROWS_INDEX_CONSTANT)
+        .build();
+
+    String json = JSON_MAPPER.writeValueAsString(query);
+    JSON_MAPPER.readValue(json, Query.class);
+  }
+
+  @Test
+  public void testGetRequiredColumns()
+  {
+    final TopNQuery query = new TopNQueryBuilder()
+        .dataSource(QueryRunnerTestHelper.DATA_SOURCE)
+        .intervals(QueryRunnerTestHelper.FIRST_TO_THIRD)
+        .virtualColumns(new ExpressionVirtualColumn("v", "\"other\"", ValueType.STRING, ExprMacroTable.nil()))
+        .dimension(DefaultDimensionSpec.of("v"))
+        .aggregators(QueryRunnerTestHelper.ROWS_COUNT, new LongSumAggregatorFactory("idx", "index"))
+        .granularity(QueryRunnerTestHelper.DAY_GRAN)
+        .postAggregators(ImmutableList.of(new FieldAccessPostAggregator("x", "idx")))
+        .metric(new NumericTopNMetricSpec("idx"))
+        .threshold(100)
+        .build();
+
+    Assert.assertEquals(ImmutableSet.of("__time", "other", "index"), query.getRequiredColumns());
+  }
 }

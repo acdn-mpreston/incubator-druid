@@ -20,10 +20,8 @@
 package org.apache.druid.query.groupby;
 
 import com.google.common.base.Function;
-import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
 import org.apache.druid.collections.NonBlockingPool;
-import org.apache.druid.common.guava.GuavaUtils;
 import org.apache.druid.data.input.MapBasedInputRow;
 import org.apache.druid.data.input.MapBasedRow;
 import org.apache.druid.data.input.Row;
@@ -32,7 +30,6 @@ import org.apache.druid.data.input.impl.DimensionsSpec;
 import org.apache.druid.data.input.impl.StringDimensionSchema;
 import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.Pair;
-import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.java.util.common.granularity.Granularities;
 import org.apache.druid.java.util.common.granularity.Granularity;
 import org.apache.druid.java.util.common.guava.Accumulator;
@@ -40,17 +37,19 @@ import org.apache.druid.java.util.common.guava.Sequence;
 import org.apache.druid.java.util.common.guava.Sequences;
 import org.apache.druid.query.ResourceLimitExceededException;
 import org.apache.druid.query.aggregation.AggregatorFactory;
+import org.apache.druid.query.aggregation.PostAggregator;
 import org.apache.druid.query.dimension.DimensionSpec;
-import org.apache.druid.segment.column.ValueType;
+import org.apache.druid.segment.incremental.AppendableIndexBuilder;
 import org.apache.druid.segment.incremental.IncrementalIndex;
 import org.apache.druid.segment.incremental.IncrementalIndexSchema;
 import org.apache.druid.segment.incremental.IndexSizeExceededException;
-import org.joda.time.DateTime;
+import org.apache.druid.segment.incremental.OffheapIncrementalIndex;
+import org.apache.druid.segment.incremental.OnheapIncrementalIndex;
 
+import javax.annotation.Nullable;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 
@@ -60,16 +59,17 @@ public class GroupByQueryHelper
 
   public static <T> Pair<IncrementalIndex, Accumulator<IncrementalIndex, T>> createIndexAccumulatorPair(
       final GroupByQuery query,
+      @Nullable final GroupByQuery subquery,
       final GroupByQueryConfig config,
-      NonBlockingPool<ByteBuffer> bufferPool,
-      final boolean combine
+      NonBlockingPool<ByteBuffer> bufferPool
   )
   {
     final GroupByQueryConfig querySpecificConfig = config.withOverrides(query);
     final Granularity gran = query.getGranularity();
-    final DateTime timeStart = query.getIntervals().get(0).getStart();
+    final long timeStart = query.getIntervals().get(0).getStartMillis();
+    final boolean combine = subquery == null;
 
-    DateTime granTimeStart = timeStart;
+    long granTimeStart = timeStart;
     if (!(Granularities.ALL.equals(gran))) {
       granTimeStart = gran.bucketStart(timeStart);
     }
@@ -116,49 +116,54 @@ public class GroupByQueryHelper
         .withDimensionsSpec(new DimensionsSpec(dimensionSchemas, null, null))
         .withMetrics(aggs.toArray(new AggregatorFactory[0]))
         .withQueryGranularity(gran)
-        .withMinTimestamp(granTimeStart.getMillis())
+        .withMinTimestamp(granTimeStart)
         .build();
 
+
+    final AppendableIndexBuilder indexBuilder;
+
     if (query.getContextValue("useOffheap", false)) {
-      index = new IncrementalIndex.Builder()
-          .setIndexSchema(indexSchema)
-          .setDeserializeComplexMetrics(false)
-          .setConcurrentEventAdd(true)
-          .setSortFacts(sortResults)
-          .setMaxRowCount(querySpecificConfig.getMaxResults())
-          .buildOffheap(bufferPool);
+      indexBuilder = new OffheapIncrementalIndex.Builder()
+          .setBufferPool(bufferPool);
     } else {
-      index = new IncrementalIndex.Builder()
-          .setIndexSchema(indexSchema)
-          .setDeserializeComplexMetrics(false)
-          .setConcurrentEventAdd(true)
-          .setSortFacts(sortResults)
-          .setMaxRowCount(querySpecificConfig.getMaxResults())
-          .buildOnheap();
+      indexBuilder = new OnheapIncrementalIndex.Builder();
     }
+
+    index = indexBuilder
+        .setIndexSchema(indexSchema)
+        .setDeserializeComplexMetrics(false)
+        .setConcurrentEventAdd(true)
+        .setSortFacts(sortResults)
+        .setMaxRowCount(querySpecificConfig.getMaxResults())
+        .build();
 
     Accumulator<IncrementalIndex, T> accumulator = new Accumulator<IncrementalIndex, T>()
     {
       @Override
       public IncrementalIndex accumulate(IncrementalIndex accumulated, T in)
       {
+        final MapBasedRow mapBasedRow;
 
         if (in instanceof MapBasedRow) {
-          try {
-            MapBasedRow row = (MapBasedRow) in;
-            accumulated.add(
-                new MapBasedInputRow(
-                    row.getTimestamp(),
-                    dimensions,
-                    row.getEvent()
-                )
-            );
-          }
-          catch (IndexSizeExceededException e) {
-            throw new ResourceLimitExceededException(e.getMessage());
-          }
+          mapBasedRow = (MapBasedRow) in;
+        } else if (in instanceof ResultRow) {
+          final ResultRow row = (ResultRow) in;
+          mapBasedRow = row.toMapBasedRow(combine ? query : subquery);
         } else {
           throw new ISE("Unable to accumulate something of type [%s]", in.getClass());
+        }
+
+        try {
+          accumulated.add(
+              new MapBasedInputRow(
+                  mapBasedRow.getTimestamp(),
+                  dimensions,
+                  mapBasedRow.getEvent()
+              )
+          );
+        }
+        catch (IndexSizeExceededException e) {
+          throw new ResourceLimitExceededException(e.getMessage());
         }
 
         return accumulated;
@@ -189,73 +194,56 @@ public class GroupByQueryHelper
   // Used by GroupByStrategyV1
   public static IncrementalIndex makeIncrementalIndex(
       GroupByQuery query,
+      @Nullable GroupByQuery subquery,
       GroupByQueryConfig config,
       NonBlockingPool<ByteBuffer> bufferPool,
-      Sequence<Row> rows,
-      boolean combine
+      Sequence<ResultRow> rows
   )
   {
-    Pair<IncrementalIndex, Accumulator<IncrementalIndex, Row>> indexAccumulatorPair = GroupByQueryHelper.createIndexAccumulatorPair(
-        query,
-        config,
-        bufferPool,
-        combine
-    );
+    final Pair<IncrementalIndex, Accumulator<IncrementalIndex, ResultRow>> indexAccumulatorPair =
+        GroupByQueryHelper.createIndexAccumulatorPair(query, subquery, config, bufferPool);
 
     return rows.accumulate(indexAccumulatorPair.lhs, indexAccumulatorPair.rhs);
   }
 
   // Used by GroupByStrategyV1
-  public static Sequence<Row> postAggregate(final GroupByQuery query, IncrementalIndex index)
+  public static Sequence<ResultRow> postAggregate(final GroupByQuery query, IncrementalIndex<?> index)
   {
     return Sequences.map(
         Sequences.simple(index.iterableWithPostAggregations(query.getPostAggregatorSpecs(), query.isDescending())),
-        new Function<Row, Row>()
-        {
-          @Override
-          public Row apply(Row input)
-          {
-            final MapBasedRow row = (MapBasedRow) input;
-            return new MapBasedRow(
-                query.getGranularity()
-                     .toDateTime(row.getTimestampFromEpoch()),
-                row.getEvent()
-            );
+        input -> {
+          final ResultRow resultRow = toResultRow(query, input);
+
+          if (query.getResultRowHasTimestamp()) {
+            resultRow.set(0, query.getGranularity().toDateTime(resultRow.getLong(0)).getMillis());
           }
+
+          return resultRow;
         }
     );
   }
 
-  /**
-   * Returns types for fields that will appear in the Rows output from "query". Useful for feeding them into
-   * {@link RowBasedColumnSelectorFactory}.
-   *
-   * @param query groupBy query
-   *
-   * @return row types
-   */
-  public static Map<String, ValueType> rowSignatureFor(final GroupByQuery query)
+  public static ResultRow toResultRow(final GroupByQuery query, final Row row)
   {
-    final ImmutableMap.Builder<String, ValueType> types = ImmutableMap.builder();
+    final ResultRow resultRow = ResultRow.create(query.getResultRowSizeWithPostAggregators());
+    int i = 0;
+
+    if (query.getResultRowHasTimestamp()) {
+      resultRow.set(i++, row.getTimestampFromEpoch());
+    }
 
     for (DimensionSpec dimensionSpec : query.getDimensions()) {
-      types.put(dimensionSpec.getOutputName(), dimensionSpec.getOutputType());
+      resultRow.set(i++, row.getRaw(dimensionSpec.getOutputName()));
     }
 
     for (AggregatorFactory aggregatorFactory : query.getAggregatorSpecs()) {
-      final String typeName = aggregatorFactory.getTypeName();
-      final ValueType valueType;
-      if (typeName != null) {
-        valueType = GuavaUtils.getEnumIfPresent(ValueType.class, StringUtils.toUpperCase(typeName));
-      } else {
-        valueType = null;
-      }
-      if (valueType != null) {
-        types.put(aggregatorFactory.getName(), valueType);
-      }
+      resultRow.set(i++, row.getRaw(aggregatorFactory.getName()));
     }
 
-    // Don't include post-aggregators since we don't know what types they are.
-    return types.build();
+    for (PostAggregator postAggregator : query.getPostAggregatorSpecs()) {
+      resultRow.set(i++, row.getRaw(postAggregator.getName()));
+    }
+
+    return resultRow;
   }
 }

@@ -32,6 +32,8 @@ import org.apache.druid.indexing.overlord.supervisor.Supervisor;
 import org.apache.druid.indexing.overlord.supervisor.SupervisorManager;
 import org.apache.druid.indexing.overlord.supervisor.SupervisorResource;
 import org.apache.druid.indexing.overlord.supervisor.SupervisorSpec;
+import org.apache.druid.indexing.overlord.supervisor.autoscaler.SupervisorTaskAutoScaler;
+import org.apache.druid.indexing.seekablestream.supervisor.autoscaler.NoopTaskAutoScaler;
 import org.apache.druid.indexing.worker.http.WorkerResource;
 import org.apache.druid.server.http.security.ResourceFilterTestHelper;
 import org.apache.druid.server.security.AuthorizerMapper;
@@ -78,7 +80,7 @@ public class OverlordSecurityResourceFilterTest extends ResourceFilterTestHelper
   private final String requestMethod;
   private final ResourceFilter resourceFilter;
   private final Injector injector;
-  private final Task noopTask = new NoopTask(null, null, 0, 0, null, null, null);
+  private final Task noopTask = NoopTask.create();
 
   private static boolean mockedOnceTsqa;
   private static boolean mockedOnceSM;
@@ -127,6 +129,12 @@ public class OverlordSecurityResourceFilterTest extends ResourceFilterTestHelper
         }
 
         @Override
+        public SupervisorTaskAutoScaler createAutoscaler(Supervisor supervisor)
+        {
+          return new NoopTaskAutoScaler();
+        }
+
+        @Override
         public List<String> getDataSources()
         {
           return ImmutableList.of("test");
@@ -148,6 +156,18 @@ public class OverlordSecurityResourceFilterTest extends ResourceFilterTestHelper
         public boolean isSuspended()
         {
           return false;
+        }
+
+        @Override
+        public String getType()
+        {
+          return null;
+        }
+
+        @Override
+        public String getSource()
+        {
+          return null;
         }
       };
       EasyMock.expect(supervisorManager.getSupervisorSpec(EasyMock.anyString()))

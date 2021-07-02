@@ -19,6 +19,7 @@
 
 package org.apache.druid.query.expression;
 
+import com.google.common.base.Preconditions;
 import org.apache.druid.common.config.NullHandling;
 import org.apache.druid.java.util.common.DateTimes;
 import org.apache.druid.java.util.common.IAE;
@@ -41,7 +42,7 @@ public class ExprUtils
     return NIL_BINDINGS;
   }
 
-  public static DateTimeZone toTimeZone(final Expr timeZoneArg)
+  static DateTimeZone toTimeZone(final Expr timeZoneArg)
   {
     if (!timeZoneArg.isLiteral()) {
       throw new IAE("Time zone must be a literal");
@@ -51,7 +52,7 @@ public class ExprUtils
     return literalValue == null ? DateTimeZone.UTC : DateTimes.inferTzFromString((String) literalValue);
   }
 
-  public static PeriodGranularity toPeriodGranularity(
+  static PeriodGranularity toPeriodGranularity(
       final Expr periodArg,
       @Nullable final Expr originArg,
       @Nullable final Expr timeZoneArg,
@@ -87,4 +88,41 @@ public class ExprUtils
     return new PeriodGranularity(period, origin, timeZone);
   }
 
+  static String createErrMsg(String functionName, String msg)
+  {
+    String prefix = "Function[" + functionName + "] ";
+    return prefix + msg;
+  }
+
+  static void checkLiteralArgument(String functionName, Expr arg, String argName)
+  {
+    Preconditions.checkArgument(arg.isLiteral(), createErrMsg(functionName, argName + " arg must be a literal"));
+  }
+
+  /**
+   * True if Expr is a string literal.
+   *
+   * In non-SQL-compliant null handling mode, this method will return true for null literals as well (because they are
+   * treated equivalently to empty strings, and we cannot tell the difference.)
+   *
+   * In SQL-compliant null handling mode, this method will return true for actual strings only, not nulls.
+   */
+  static boolean isStringLiteral(final Expr expr)
+  {
+    return (expr.isLiteral() && expr.getLiteralValue() instanceof String)
+           || (NullHandling.replaceWithDefault() && isNullLiteral(expr));
+  }
+
+  /**
+   * True if Expr is a null literal.
+   *
+   * In non-SQL-compliant null handling mode, this method will return true for either a null literal or an empty string
+   * literal (they are treated equivalently and we cannot tell the difference).
+   *
+   * In SQL-compliant null handling mode, this method will only return true for an actual null literal.
+   */
+  static boolean isNullLiteral(final Expr expr)
+  {
+    return expr.isLiteral() && expr.getLiteralValue() == null;
+  }
 }

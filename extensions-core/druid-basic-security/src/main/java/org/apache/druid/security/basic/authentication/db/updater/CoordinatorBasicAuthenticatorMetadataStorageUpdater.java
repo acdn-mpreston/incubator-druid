@@ -119,46 +119,50 @@ public class CoordinatorBasicAuthenticatorMetadataStorageUpdater implements Basi
 
     try {
       LOG.info("Starting CoordinatorBasicAuthenticatorMetadataStorageUpdater.");
-      for (Map.Entry<String, Authenticator> entry : authenticatorMapper.getAuthenticatorMap().entrySet()) {
-        Authenticator authenticator = entry.getValue();
-        if (authenticator instanceof BasicHTTPAuthenticator) {
-          String authenticatorName = entry.getKey();
-          authenticatorPrefixes.add(authenticatorName);
-          BasicHTTPAuthenticator basicHTTPAuthenticator = (BasicHTTPAuthenticator) authenticator;
-          BasicAuthDBConfig dbConfig = basicHTTPAuthenticator.getDbConfig();
-          byte[] userMapBytes = getCurrentUserMapBytes(authenticatorName);
-          Map<String, BasicAuthenticatorUser> userMap = BasicAuthUtils.deserializeAuthenticatorUserMap(
-              objectMapper,
-              userMapBytes
-          );
-          cachedUserMaps.put(authenticatorName, new BasicAuthenticatorUserMapBundle(userMap, userMapBytes));
+      BasicAuthUtils.maybeInitialize(
+          () -> {
+            for (Map.Entry<String, Authenticator> entry : authenticatorMapper.getAuthenticatorMap().entrySet()) {
+              Authenticator authenticator = entry.getValue();
+              if (authenticator instanceof BasicHTTPAuthenticator) {
+                String authenticatorName = entry.getKey();
+                authenticatorPrefixes.add(authenticatorName);
+                BasicHTTPAuthenticator basicHTTPAuthenticator = (BasicHTTPAuthenticator) authenticator;
+                BasicAuthDBConfig dbConfig = basicHTTPAuthenticator.getDbConfig();
+                byte[] userMapBytes = getCurrentUserMapBytes(authenticatorName);
+                Map<String, BasicAuthenticatorUser> userMap = BasicAuthUtils.deserializeAuthenticatorUserMap(
+                    objectMapper,
+                    userMapBytes
+                );
+                cachedUserMaps.put(authenticatorName, new BasicAuthenticatorUserMapBundle(userMap, userMapBytes));
 
-          if (dbConfig.getInitialAdminPassword() != null && !userMap.containsKey(BasicAuthUtils.ADMIN_NAME)) {
-            createUserInternal(authenticatorName, BasicAuthUtils.ADMIN_NAME);
-            setUserCredentialsInternal(
-                authenticatorName,
-                BasicAuthUtils.ADMIN_NAME,
-                new BasicAuthenticatorCredentialUpdate(
-                    dbConfig.getInitialAdminPassword().getPassword(),
-                    BasicAuthUtils.DEFAULT_KEY_ITERATIONS
-                )
-            );
-          }
+                if (dbConfig.getInitialAdminPassword() != null && !userMap.containsKey(BasicAuthUtils.ADMIN_NAME)) {
+                  createUserInternal(authenticatorName, BasicAuthUtils.ADMIN_NAME);
+                  setUserCredentialsInternal(
+                      authenticatorName,
+                      BasicAuthUtils.ADMIN_NAME,
+                      new BasicAuthenticatorCredentialUpdate(
+                          dbConfig.getInitialAdminPassword().getPassword(),
+                          BasicAuthUtils.DEFAULT_KEY_ITERATIONS
+                      )
+                  );
+                }
 
-          if (dbConfig.getInitialInternalClientPassword() != null
-              && !userMap.containsKey(BasicAuthUtils.INTERNAL_USER_NAME)) {
-            createUserInternal(authenticatorName, BasicAuthUtils.INTERNAL_USER_NAME);
-            setUserCredentialsInternal(
-                authenticatorName,
-                BasicAuthUtils.INTERNAL_USER_NAME,
-                new BasicAuthenticatorCredentialUpdate(
-                    dbConfig.getInitialInternalClientPassword().getPassword(),
-                    BasicAuthUtils.DEFAULT_KEY_ITERATIONS
-                )
-            );
-          }
-        }
-      }
+                if (dbConfig.getInitialInternalClientPassword() != null
+                    && !userMap.containsKey(BasicAuthUtils.INTERNAL_USER_NAME)) {
+                  createUserInternal(authenticatorName, BasicAuthUtils.INTERNAL_USER_NAME);
+                  setUserCredentialsInternal(
+                      authenticatorName,
+                      BasicAuthUtils.INTERNAL_USER_NAME,
+                      new BasicAuthenticatorCredentialUpdate(
+                          dbConfig.getInitialInternalClientPassword().getPassword(),
+                          BasicAuthUtils.DEFAULT_KEY_ITERATIONS
+                      )
+                  );
+                }
+              }
+            }
+            return true;
+          });
 
       ScheduledExecutors.scheduleWithFixedDelay(
           exec,
@@ -173,7 +177,7 @@ public class CoordinatorBasicAuthenticatorMetadataStorageUpdater implements Basi
                 return ScheduledExecutors.Signal.STOP;
               }
               try {
-                LOG.debug("Scheduled db poll is running");
+                LOG.debug("Scheduled db userMap poll is running");
                 for (String authenticatorPrefix : authenticatorPrefixes) {
 
                   byte[] userMapBytes = getCurrentUserMapBytes(authenticatorPrefix);
@@ -185,7 +189,7 @@ public class CoordinatorBasicAuthenticatorMetadataStorageUpdater implements Basi
                     cachedUserMaps.put(authenticatorPrefix, new BasicAuthenticatorUserMapBundle(userMap, userMapBytes));
                   }
                 }
-                LOG.debug("Scheduled db poll is done");
+                LOG.debug("Scheduled db userMap poll is done");
               }
               catch (Throwable t) {
                 LOG.makeAlert(t, "Error occured while polling for cachedUserMaps.").emit();
@@ -277,7 +281,7 @@ public class CoordinatorBasicAuthenticatorMetadataStorageUpdater implements Basi
   {
     cachedUserMaps.forEach(
         (authenticatorName, userMapBundle) -> {
-          cacheNotifier.addUpdate(authenticatorName, userMapBundle.getSerializedUserMap());
+          cacheNotifier.addUserUpdate(authenticatorName, userMapBundle.getSerializedUserMap());
         }
     );
   }
@@ -285,40 +289,6 @@ public class CoordinatorBasicAuthenticatorMetadataStorageUpdater implements Basi
   private static String getPrefixedKeyColumn(String keyPrefix, String keyName)
   {
     return StringUtils.format("basic_authentication_%s_%s", keyPrefix, keyName);
-  }
-
-  private boolean tryUpdateUserMap(
-      String prefix,
-      Map<String, BasicAuthenticatorUser> userMap,
-      byte[] oldValue,
-      byte[] newValue
-  )
-  {
-    try {
-      MetadataCASUpdate update = new MetadataCASUpdate(
-          connectorConfig.getConfigTable(),
-          MetadataStorageConnector.CONFIG_TABLE_KEY_COLUMN,
-          MetadataStorageConnector.CONFIG_TABLE_VALUE_COLUMN,
-          getPrefixedKeyColumn(prefix, USERS),
-          oldValue,
-          newValue
-      );
-
-      boolean succeeded = connector.compareAndSwap(
-          Collections.singletonList(update)
-      );
-
-      if (succeeded) {
-        cachedUserMaps.put(prefix, new BasicAuthenticatorUserMapBundle(userMap, newValue));
-        cacheNotifier.addUpdate(prefix, newValue);
-        return true;
-      } else {
-        return false;
-      }
-    }
-    catch (Exception e) {
-      throw new RuntimeException(e);
-    }
   }
 
   private void createUserInternal(String prefix, String userName)
@@ -330,12 +300,7 @@ public class CoordinatorBasicAuthenticatorMetadataStorageUpdater implements Basi
       } else {
         attempts++;
       }
-      try {
-        Thread.sleep(ThreadLocalRandom.current().nextLong(UPDATE_RETRY_DELAY));
-      }
-      catch (InterruptedException ie) {
-        throw new RuntimeException(ie);
-      }
+      updateRetryDelay();
     }
     throw new ISE("Could not create user[%s] due to concurrent update contention.", userName);
   }
@@ -349,14 +314,19 @@ public class CoordinatorBasicAuthenticatorMetadataStorageUpdater implements Basi
       } else {
         attempts++;
       }
-      try {
-        Thread.sleep(ThreadLocalRandom.current().nextLong(UPDATE_RETRY_DELAY));
-      }
-      catch (InterruptedException ie) {
-        throw new RuntimeException(ie);
-      }
+      updateRetryDelay();
     }
     throw new ISE("Could not delete user[%s] due to concurrent update contention.", userName);
+  }
+
+  private void updateRetryDelay()
+  {
+    try {
+      Thread.sleep(ThreadLocalRandom.current().nextLong(UPDATE_RETRY_DELAY));
+    }
+    catch (InterruptedException ie) {
+      throw new RuntimeException(ie);
+    }
   }
 
   private void setUserCredentialsInternal(String prefix, String userName, BasicAuthenticatorCredentialUpdate update)
@@ -371,7 +341,7 @@ public class CoordinatorBasicAuthenticatorMetadataStorageUpdater implements Basi
       credentials = new BasicAuthenticatorCredentials(
           new BasicAuthenticatorCredentialUpdate(
               update.getPassword(),
-              authenticator.getDbConfig().getIterations()
+              authenticator.getDbConfig().getCredentialIterations()
           )
       );
     } else {
@@ -441,5 +411,39 @@ public class CoordinatorBasicAuthenticatorMetadataStorageUpdater implements Basi
     }
     byte[] newValue = BasicAuthUtils.serializeAuthenticatorUserMap(objectMapper, userMap);
     return tryUpdateUserMap(prefix, userMap, oldValue, newValue);
+  }
+
+  private boolean tryUpdateUserMap(
+      String prefix,
+      Map<String, BasicAuthenticatorUser> userMap,
+      byte[] oldValue,
+      byte[] newValue
+  )
+  {
+    try {
+      MetadataCASUpdate update = new MetadataCASUpdate(
+          connectorConfig.getConfigTable(),
+          MetadataStorageConnector.CONFIG_TABLE_KEY_COLUMN,
+          MetadataStorageConnector.CONFIG_TABLE_VALUE_COLUMN,
+          getPrefixedKeyColumn(prefix, USERS),
+          oldValue,
+          newValue
+      );
+
+      boolean succeeded = connector.compareAndSwap(
+          Collections.singletonList(update)
+      );
+
+      if (succeeded) {
+        cachedUserMaps.put(prefix, new BasicAuthenticatorUserMapBundle(userMap, newValue));
+        cacheNotifier.addUserUpdate(prefix, newValue);
+        return true;
+      } else {
+        return false;
+      }
+    }
+    catch (Exception e) {
+      throw new RuntimeException(e);
+    }
   }
 }

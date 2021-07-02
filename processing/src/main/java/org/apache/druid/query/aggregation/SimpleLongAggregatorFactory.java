@@ -23,12 +23,17 @@ package org.apache.druid.query.aggregation;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Supplier;
-import com.google.common.base.Suppliers;
 import org.apache.druid.math.expr.Expr;
 import org.apache.druid.math.expr.ExprMacroTable;
 import org.apache.druid.math.expr.Parser;
 import org.apache.druid.segment.BaseLongColumnValueSelector;
+import org.apache.druid.segment.ColumnInspector;
 import org.apache.druid.segment.ColumnSelectorFactory;
+import org.apache.druid.segment.ColumnValueSelector;
+import org.apache.druid.segment.column.ColumnCapabilities;
+import org.apache.druid.segment.column.ValueType;
+import org.apache.druid.segment.vector.VectorColumnSelectorFactory;
+import org.apache.druid.segment.vector.VectorValueSelector;
 
 import javax.annotation.Nullable;
 import java.util.Collections;
@@ -36,7 +41,13 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
 
-public abstract class SimpleLongAggregatorFactory extends NullableAggregatorFactory<BaseLongColumnValueSelector>
+/**
+ * This is an abstract class inherited by various {@link AggregatorFactory} implementations that consume long input
+ * and produce long output on aggregation.
+ * It extends "NullableAggregatorFactory<ColumnValueSelector>" instead of "NullableAggregatorFactory<BaseLongColumnValueSelector>"
+ * to additionally support aggregation on single/multi value string column types.
+ */
+public abstract class SimpleLongAggregatorFactory extends NullableNumericAggregatorFactory<ColumnValueSelector>
 {
   protected final String name;
   @Nullable
@@ -57,7 +68,7 @@ public abstract class SimpleLongAggregatorFactory extends NullableAggregatorFact
     this.name = name;
     this.fieldName = fieldName;
     this.expression = expression;
-    this.fieldExpression = Suppliers.memoize(() -> expression == null ? null : Parser.parse(expression, macroTable));
+    this.fieldExpression = Parser.lazyParse(expression, macroTable);
     Preconditions.checkNotNull(name, "Must have a valid, non-null aggregator name");
     Preconditions.checkArgument(
         fieldName == null ^ expression == null,
@@ -65,14 +76,52 @@ public abstract class SimpleLongAggregatorFactory extends NullableAggregatorFact
     );
   }
 
-  BaseLongColumnValueSelector getLongColumnSelector(ColumnSelectorFactory metricFactory, long nullValue)
+  @Override
+  protected Aggregator factorize(ColumnSelectorFactory metricFactory, ColumnValueSelector selector)
+  {
+    if (shouldUseStringColumnAggregatorWrapper(metricFactory)) {
+      return new StringColumnLongAggregatorWrapper(
+          selector,
+          SimpleLongAggregatorFactory.this::buildAggregator,
+          nullValue()
+      );
+    } else {
+      return buildAggregator(selector);
+    }
+  }
+
+  @Override
+  protected BufferAggregator factorizeBuffered(
+      ColumnSelectorFactory metricFactory,
+      ColumnValueSelector selector
+  )
+  {
+    if (shouldUseStringColumnAggregatorWrapper(metricFactory)) {
+      return new StringColumnLongBufferAggregatorWrapper(
+          selector,
+          SimpleLongAggregatorFactory.this::buildBufferAggregator,
+          nullValue()
+      );
+    } else {
+      return buildBufferAggregator(selector);
+    }
+  }
+
+  @Override
+  protected ColumnValueSelector selector(ColumnSelectorFactory metricFactory)
   {
     return AggregatorUtil.makeColumnValueSelectorWithLongDefault(
         metricFactory,
         fieldName,
         fieldExpression.get(),
-        nullValue
+        nullValue()
     );
+  }
+
+  @Override
+  protected VectorValueSelector vectorSelector(VectorColumnSelectorFactory columnSelectorFactory)
+  {
+    return AggregatorUtil.makeVectorValueSelector(columnSelectorFactory, fieldName, expression, fieldExpression);
   }
 
   @Override
@@ -81,10 +130,11 @@ public abstract class SimpleLongAggregatorFactory extends NullableAggregatorFact
     return object;
   }
 
+
   @Override
-  public String getTypeName()
+  public ValueType getType()
   {
-    return "long";
+    return ValueType.LONG;
   }
 
   @Override
@@ -111,7 +161,7 @@ public abstract class SimpleLongAggregatorFactory extends NullableAggregatorFact
   {
     return fieldName != null
            ? Collections.singletonList(fieldName)
-           : fieldExpression.get().analyzeInputs().getRequiredColumns();
+           : fieldExpression.get().analyzeInputs().getRequiredBindingsList();
   }
 
   @Override
@@ -174,4 +224,25 @@ public abstract class SimpleLongAggregatorFactory extends NullableAggregatorFact
   {
     return expression;
   }
+
+  @Override
+  public boolean canVectorize(ColumnInspector columnInspector)
+  {
+    return AggregatorUtil.canVectorize(columnInspector, fieldName, expression, fieldExpression);
+  }
+
+  private boolean shouldUseStringColumnAggregatorWrapper(ColumnSelectorFactory columnSelectorFactory)
+  {
+    if (fieldName != null) {
+      ColumnCapabilities capabilities = columnSelectorFactory.getColumnCapabilities(fieldName);
+      return capabilities != null && capabilities.getType() == ValueType.STRING;
+    }
+    return false;
+  }
+
+  protected abstract long nullValue();
+
+  protected abstract Aggregator buildAggregator(BaseLongColumnValueSelector selector);
+
+  protected abstract BufferAggregator buildBufferAggregator(BaseLongColumnValueSelector selector);
 }

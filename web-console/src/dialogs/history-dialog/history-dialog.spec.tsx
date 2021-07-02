@@ -16,8 +16,9 @@
  * limitations under the License.
  */
 
+import { render } from '@testing-library/react';
+import * as JSONBig from 'json-bigint-native';
 import React from 'react';
-import { render } from 'react-testing-library';
 
 import { HistoryDialog } from './history-dialog';
 
@@ -26,10 +27,9 @@ describe('history dialog', () => {
     const historyDialog = (
       <HistoryDialog
         historyRecords={[
-          { auditTime: 'test', auditInfo: 'test', payload: JSON.stringify({ name: 'test' }) },
-          { auditTime: 'test', auditInfo: 'test', payload: JSON.stringify({ name: 'test' }) },
+          { auditTime: 'test', auditInfo: 'test', payload: JSONBig.stringify({ name: 'test' }) },
+          { auditTime: 'test', auditInfo: 'test', payload: JSONBig.stringify({ name: 'test' }) },
         ]}
-        isOpen
       />
     );
     render(historyDialog);

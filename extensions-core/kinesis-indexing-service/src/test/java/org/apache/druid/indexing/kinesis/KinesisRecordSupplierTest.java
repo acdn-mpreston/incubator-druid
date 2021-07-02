@@ -19,6 +19,8 @@
 
 package org.apache.druid.indexing.kinesis;
 
+import com.amazonaws.AmazonClientException;
+import com.amazonaws.AmazonServiceException;
 import com.amazonaws.services.kinesis.AmazonKinesis;
 import com.amazonaws.services.kinesis.AmazonKinesisClient;
 import com.amazonaws.services.kinesis.model.DescribeStreamRequest;
@@ -28,56 +30,60 @@ import com.amazonaws.services.kinesis.model.GetRecordsResult;
 import com.amazonaws.services.kinesis.model.GetShardIteratorResult;
 import com.amazonaws.services.kinesis.model.Record;
 import com.amazonaws.services.kinesis.model.Shard;
+import com.amazonaws.services.kinesis.model.ShardIteratorType;
 import com.amazonaws.services.kinesis.model.StreamDescription;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import org.apache.druid.data.input.impl.ByteEntity;
 import org.apache.druid.indexing.seekablestream.common.OrderedPartitionableRecord;
 import org.apache.druid.indexing.seekablestream.common.StreamPartition;
 import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.StringUtils;
 import org.easymock.Capture;
+import org.easymock.EasyMock;
 import org.easymock.EasyMockSupport;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 
+import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
-import static org.easymock.EasyMock.anyObject;
-import static org.easymock.EasyMock.anyString;
-import static org.easymock.EasyMock.capture;
-import static org.easymock.EasyMock.eq;
-import static org.easymock.EasyMock.expect;
+import static org.apache.druid.indexing.kinesis.KinesisSequenceNumber.END_OF_SHARD_MARKER;
+import static org.apache.druid.indexing.kinesis.KinesisSequenceNumber.EXPIRED_MARKER;
+import static org.apache.druid.indexing.kinesis.KinesisSequenceNumber.NO_END_SEQUENCE_NUMBER;
 
 public class KinesisRecordSupplierTest extends EasyMockSupport
 {
-  private static final String stream = "stream";
-  private static long poll_timeout_millis = 2000;
-  private static int recordsPerFetch;
-  private static String shardId1 = "1";
-  private static String shardId0 = "0";
-  private static String shard1Iterator = "1";
-  private static String shard0Iterator = "0";
-  private static AmazonKinesis kinesis;
-  private static DescribeStreamResult describeStreamResult0;
-  private static DescribeStreamResult describeStreamResult1;
-  private static GetShardIteratorResult getShardIteratorResult0;
-  private static GetShardIteratorResult getShardIteratorResult1;
-  private static GetRecordsResult getRecordsResult0;
-  private static GetRecordsResult getRecordsResult1;
-  private static StreamDescription streamDescription0;
-  private static StreamDescription streamDescription1;
-  private static Shard shard0;
-  private static Shard shard1;
-  private static KinesisRecordSupplier recordSupplier;
-  private static List<Record> shard1Records = ImmutableList.of(
+  private static final String STREAM = "stream";
+  private static final long POLL_TIMEOUT_MILLIS = 2000;
+  private static final String SHARD_ID1 = "1";
+  private static final String SHARD_ID0 = "0";
+  private static final String SHARD1_ITERATOR = "1";
+  private static final String SHARD0_ITERATOR = "0";
+
+  private static final Long SHARD0_LAG_MILLIS = 100L;
+  private static final Long SHARD1_LAG_MILLIS = 200L;
+  private static final Long SHARD1_LAG_MILLIS_EMPTY = 0L;
+  private static Map<String, Long> SHARDS_LAG_MILLIS =
+      ImmutableMap.of(SHARD_ID0, SHARD0_LAG_MILLIS, SHARD_ID1, SHARD1_LAG_MILLIS);
+  private static Map<String, Long> SHARDS_LAG_MILLIS_EMPTY =
+          ImmutableMap.of(SHARD_ID0, SHARD0_LAG_MILLIS, SHARD_ID1, SHARD1_LAG_MILLIS_EMPTY);
+  private static final List<Record> SHARD0_RECORDS = ImmutableList.of(
+      new Record().withData(jb("2008", "a", "y", "10", "20.0", "1.0")).withSequenceNumber("0"),
+      new Record().withData(jb("2009", "b", "y", "10", "20.0", "1.0")).withSequenceNumber("1")
+  );
+  private static final List<Record> SHARD1_RECORDS_EMPTY = ImmutableList.of();
+  private static final List<Record> SHARD1_RECORDS = ImmutableList.of(
       new Record().withData(jb("2011", "d", "y", "10", "20.0", "1.0")).withSequenceNumber("0"),
       new Record().withData(jb("2011", "e", "y", "10", "20.0", "1.0")).withSequenceNumber("1"),
       new Record().withData(jb("246140482-04-24T15:36:27.903Z", "x", "z", "10", "20.0", "1.0")).withSequenceNumber("2"),
@@ -89,38 +95,35 @@ public class KinesisRecordSupplierTest extends EasyMockSupport
       new Record().withData(jb("2012", "g", "y", "10", "20.0", "1.0")).withSequenceNumber("8"),
       new Record().withData(jb("2011", "h", "y", "10", "20.0", "1.0")).withSequenceNumber("9")
   );
-  private static List<Record> shard0Records = ImmutableList.of(
-      new Record().withData(jb("2008", "a", "y", "10", "20.0", "1.0")).withSequenceNumber("0"),
-      new Record().withData(jb("2009", "b", "y", "10", "20.0", "1.0")).withSequenceNumber("1")
-  );
-  private static List<Object> allRecords = ImmutableList.builder()
-                                                        .addAll(shard0Records.stream()
-                                                                             .map(x -> new OrderedPartitionableRecord<>(
-                                                                                 stream,
-                                                                                 shardId0,
-                                                                                 x.getSequenceNumber(),
-                                                                                 Collections
-                                                                                     .singletonList(
-                                                                                         toByteArray(
-                                                                                             x.getData()))
-                                                                             ))
-                                                                             .collect(
-                                                                                 Collectors
-                                                                                     .toList()))
-                                                        .addAll(shard1Records.stream()
-                                                                             .map(x -> new OrderedPartitionableRecord<>(
-                                                                                 stream,
-                                                                                 shardId1,
-                                                                                 x.getSequenceNumber(),
-                                                                                 Collections
-                                                                                     .singletonList(
-                                                                                         toByteArray(
-                                                                                             x.getData()))
-                                                                             ))
-                                                                             .collect(
-                                                                                 Collectors
-                                                                                     .toList()))
-                                                        .build();
+  private static final List<OrderedPartitionableRecord<String, String, ByteEntity>> ALL_RECORDS = ImmutableList.<OrderedPartitionableRecord<String, String, ByteEntity>>builder()
+                                                               .addAll(SHARD0_RECORDS.stream()
+                                                                                     .map(x -> new OrderedPartitionableRecord<>(
+                                                                                         STREAM,
+                                                                                         SHARD_ID0,
+                                                                                         x.getSequenceNumber(),
+                                                                                         Collections
+                                                                                             .singletonList(
+                                                                                                 new ByteEntity(
+                                                                                                     x.getData()))
+                                                                                     ))
+                                                                                     .collect(
+                                                                                         Collectors
+                                                                                             .toList()))
+                                                               .addAll(SHARD1_RECORDS.stream()
+                                                                                     .map(x -> new OrderedPartitionableRecord<>(
+                                                                                         STREAM,
+                                                                                         SHARD_ID1,
+                                                                                         x.getSequenceNumber(),
+                                                                                         Collections
+                                                                                             .singletonList(
+                                                                                                 new ByteEntity(
+                                                                                                     x.getData()))
+                                                                                     ))
+                                                                                     .collect(
+                                                                                         Collectors
+                                                                                             .toList()))
+                                                               .build();
+
 
   private static ByteBuffer jb(String timestamp, String dim1, String dim2, String dimLong, String dimFloat, String met1)
   {
@@ -140,6 +143,20 @@ public class KinesisRecordSupplierTest extends EasyMockSupport
       throw new RuntimeException(e);
     }
   }
+
+  private static int recordsPerFetch;
+  private static AmazonKinesis kinesis;
+  private static DescribeStreamResult describeStreamResult0;
+  private static DescribeStreamResult describeStreamResult1;
+  private static GetShardIteratorResult getShardIteratorResult0;
+  private static GetShardIteratorResult getShardIteratorResult1;
+  private static GetRecordsResult getRecordsResult0;
+  private static GetRecordsResult getRecordsResult1;
+  private static StreamDescription streamDescription0;
+  private static StreamDescription streamDescription1;
+  private static Shard shard0;
+  private static Shard shard1;
+  private static KinesisRecordSupplier recordSupplier;
 
   @Before
   public void setupTest()
@@ -161,7 +178,9 @@ public class KinesisRecordSupplierTest extends EasyMockSupport
   @After
   public void tearDownTest()
   {
-    recordSupplier.close();
+    if (null != recordSupplier) {
+      recordSupplier.close();
+    }
     recordSupplier = null;
   }
 
@@ -170,22 +189,24 @@ public class KinesisRecordSupplierTest extends EasyMockSupport
   {
     final Capture<DescribeStreamRequest> capturedRequest = Capture.newInstance();
 
-    expect(kinesis.describeStream(capture(capturedRequest))).andReturn(describeStreamResult0).once();
-    expect(describeStreamResult0.getStreamDescription()).andReturn(streamDescription0).once();
-    expect(streamDescription0.getShards()).andReturn(ImmutableList.of(shard0)).once();
-    expect(streamDescription0.isHasMoreShards()).andReturn(true).once();
-    expect(shard0.getShardId()).andReturn(shardId0).times(2);
-    expect(kinesis.describeStream(anyObject(DescribeStreamRequest.class))).andReturn(describeStreamResult1).once();
-    expect(describeStreamResult1.getStreamDescription()).andReturn(streamDescription1).once();
-    expect(streamDescription1.getShards()).andReturn(ImmutableList.of(shard1)).once();
-    expect(streamDescription1.isHasMoreShards()).andReturn(false).once();
-    expect(shard1.getShardId()).andReturn(shardId1).once();
+    EasyMock.expect(kinesis.describeStream(EasyMock.capture(capturedRequest))).andReturn(describeStreamResult0).once();
+    EasyMock.expect(describeStreamResult0.getStreamDescription()).andReturn(streamDescription0).once();
+    EasyMock.expect(streamDescription0.getShards()).andReturn(ImmutableList.of(shard0)).once();
+    EasyMock.expect(streamDescription0.isHasMoreShards()).andReturn(true).once();
+    EasyMock.expect(shard0.getShardId()).andReturn(SHARD_ID0).times(2);
+    EasyMock.expect(kinesis.describeStream(EasyMock.anyObject(DescribeStreamRequest.class)))
+            .andReturn(describeStreamResult1)
+            .once();
+    EasyMock.expect(describeStreamResult1.getStreamDescription()).andReturn(streamDescription1).once();
+    EasyMock.expect(streamDescription1.getShards()).andReturn(ImmutableList.of(shard1)).once();
+    EasyMock.expect(streamDescription1.isHasMoreShards()).andReturn(false).once();
+    EasyMock.expect(shard1.getShardId()).andReturn(SHARD_ID1).once();
 
     replayAll();
 
     Set<StreamPartition<String>> partitions = ImmutableSet.of(
-        StreamPartition.of(stream, shardId0),
-        StreamPartition.of(stream, shardId1)
+        StreamPartition.of(STREAM, SHARD_ID0),
+        StreamPartition.of(STREAM, SHARD_ID1)
     );
 
     recordSupplier = new KinesisRecordSupplier(
@@ -198,7 +219,8 @@ public class KinesisRecordSupplierTest extends EasyMockSupport
         5000,
         5000,
         60000,
-        5
+        5,
+        true
     );
 
     Assert.assertTrue(recordSupplier.getAssignment().isEmpty());
@@ -206,13 +228,16 @@ public class KinesisRecordSupplierTest extends EasyMockSupport
     recordSupplier.assign(partitions);
 
     Assert.assertEquals(partitions, recordSupplier.getAssignment());
-    Assert.assertEquals(ImmutableSet.of(shardId1, shardId0), recordSupplier.getPartitionIds(stream));
+    Assert.assertEquals(ImmutableSet.of(SHARD_ID1, SHARD_ID0), recordSupplier.getPartitionIds(STREAM));
+
+    // calling poll would start background fetch if seek was called, but will instead be skipped and the results
+    // empty
     Assert.assertEquals(Collections.emptyList(), recordSupplier.poll(100));
 
     verifyAll();
 
     final DescribeStreamRequest expectedRequest = new DescribeStreamRequest();
-    expectedRequest.setStreamName(stream);
+    expectedRequest.setStreamName(STREAM);
     expectedRequest.setExclusiveStartShardId("0");
     Assert.assertEquals(expectedRequest, capturedRequest.getValue());
   }
@@ -223,11 +248,11 @@ public class KinesisRecordSupplierTest extends EasyMockSupport
   }
 
   // filter out EOS markers
-  private static List<OrderedPartitionableRecord<String, String>> cleanRecords(List<OrderedPartitionableRecord<String, String>> records)
+  private static List<OrderedPartitionableRecord<String, String, ByteEntity>> cleanRecords(List<OrderedPartitionableRecord<String, String, ByteEntity>> records)
   {
     return records.stream()
                   .filter(x -> !x.getSequenceNumber()
-                                 .equals(KinesisSequenceNumber.END_OF_SHARD_MARKER))
+                                 .equals(END_OF_SHARD_MARKER))
                   .collect(Collectors.toList());
   }
 
@@ -236,38 +261,42 @@ public class KinesisRecordSupplierTest extends EasyMockSupport
   {
     recordsPerFetch = 100;
 
-    expect(kinesis.getShardIterator(
-        anyObject(),
-        eq(shardId0),
-        anyString(),
-        anyString()
+    EasyMock.expect(kinesis.getShardIterator(
+        EasyMock.anyObject(),
+        EasyMock.eq(SHARD_ID0),
+        EasyMock.anyString(),
+        EasyMock.anyString()
     )).andReturn(
         getShardIteratorResult0).anyTimes();
 
-    expect(kinesis.getShardIterator(
-        anyObject(),
-        eq(shardId1),
-        anyString(),
-        anyString()
+    EasyMock.expect(kinesis.getShardIterator(
+        EasyMock.anyObject(),
+        EasyMock.eq(SHARD_ID1),
+        EasyMock.anyString(),
+        EasyMock.anyString()
     )).andReturn(
         getShardIteratorResult1).anyTimes();
 
-    expect(getShardIteratorResult0.getShardIterator()).andReturn(shard0Iterator).anyTimes();
-    expect(getShardIteratorResult1.getShardIterator()).andReturn(shard1Iterator).anyTimes();
-    expect(kinesis.getRecords(generateGetRecordsReq(shard0Iterator, recordsPerFetch))).andReturn(getRecordsResult0)
-                                                                                      .anyTimes();
-    expect(kinesis.getRecords(generateGetRecordsReq(shard1Iterator, recordsPerFetch))).andReturn(getRecordsResult1)
-                                                                                      .anyTimes();
-    expect(getRecordsResult0.getRecords()).andReturn(shard0Records).once();
-    expect(getRecordsResult1.getRecords()).andReturn(shard1Records).once();
-    expect(getRecordsResult0.getNextShardIterator()).andReturn(null).anyTimes();
-    expect(getRecordsResult1.getNextShardIterator()).andReturn(null).anyTimes();
+    EasyMock.expect(getShardIteratorResult0.getShardIterator()).andReturn(SHARD0_ITERATOR).anyTimes();
+    EasyMock.expect(getShardIteratorResult1.getShardIterator()).andReturn(SHARD1_ITERATOR).anyTimes();
+    EasyMock.expect(kinesis.getRecords(generateGetRecordsReq(SHARD0_ITERATOR, recordsPerFetch)))
+            .andReturn(getRecordsResult0)
+            .anyTimes();
+    EasyMock.expect(kinesis.getRecords(generateGetRecordsReq(SHARD1_ITERATOR, recordsPerFetch)))
+            .andReturn(getRecordsResult1)
+            .anyTimes();
+    EasyMock.expect(getRecordsResult0.getRecords()).andReturn(SHARD0_RECORDS).once();
+    EasyMock.expect(getRecordsResult1.getRecords()).andReturn(SHARD1_RECORDS).once();
+    EasyMock.expect(getRecordsResult0.getNextShardIterator()).andReturn(null).anyTimes();
+    EasyMock.expect(getRecordsResult1.getNextShardIterator()).andReturn(null).anyTimes();
+    EasyMock.expect(getRecordsResult0.getMillisBehindLatest()).andReturn(SHARD0_LAG_MILLIS).once();
+    EasyMock.expect(getRecordsResult1.getMillisBehindLatest()).andReturn(SHARD1_LAG_MILLIS).once();
 
     replayAll();
 
     Set<StreamPartition<String>> partitions = ImmutableSet.of(
-        StreamPartition.of(stream, shardId0),
-        StreamPartition.of(stream, shardId1)
+        StreamPartition.of(STREAM, SHARD_ID0),
+        StreamPartition.of(STREAM, SHARD_ID1)
     );
 
 
@@ -281,7 +310,8 @@ public class KinesisRecordSupplierTest extends EasyMockSupport
         5000,
         5000,
         60000,
-        100
+        100,
+        true
     );
 
     recordSupplier.assign(partitions);
@@ -292,13 +322,164 @@ public class KinesisRecordSupplierTest extends EasyMockSupport
       Thread.sleep(100);
     }
 
-    List<OrderedPartitionableRecord<String, String>> polledRecords = cleanRecords(recordSupplier.poll(
-        poll_timeout_millis));
+    List<OrderedPartitionableRecord<String, String, ByteEntity>> polledRecords = cleanRecords(recordSupplier.poll(
+        POLL_TIMEOUT_MILLIS));
 
     verifyAll();
 
     Assert.assertEquals(partitions, recordSupplier.getAssignment());
-    Assert.assertTrue(polledRecords.containsAll(allRecords));
+    Assert.assertTrue(polledRecords.containsAll(ALL_RECORDS));
+    Assert.assertEquals(SHARDS_LAG_MILLIS, recordSupplier.getPartitionResourcesTimeLag());
+  }
+
+  @Test
+  public void testPollWithKinesisInternalFailure() throws InterruptedException
+  {
+    recordsPerFetch = 100;
+
+    EasyMock.expect(kinesis.getShardIterator(
+            EasyMock.anyObject(),
+            EasyMock.eq(SHARD_ID0),
+            EasyMock.anyString(),
+            EasyMock.anyString()
+    )).andReturn(
+            getShardIteratorResult0).anyTimes();
+
+    EasyMock.expect(kinesis.getShardIterator(
+            EasyMock.anyObject(),
+            EasyMock.eq(SHARD_ID1),
+            EasyMock.anyString(),
+            EasyMock.anyString()
+    )).andReturn(
+            getShardIteratorResult1).anyTimes();
+
+    EasyMock.expect(getShardIteratorResult0.getShardIterator()).andReturn(SHARD0_ITERATOR).anyTimes();
+    EasyMock.expect(getShardIteratorResult1.getShardIterator()).andReturn(SHARD1_ITERATOR).anyTimes();
+    EasyMock.expect(kinesis.getRecords(generateGetRecordsReq(SHARD0_ITERATOR, recordsPerFetch)))
+            .andReturn(getRecordsResult0)
+            .anyTimes();
+    EasyMock.expect(kinesis.getRecords(generateGetRecordsReq(SHARD1_ITERATOR, recordsPerFetch)))
+            .andReturn(getRecordsResult1)
+            .anyTimes();
+    AmazonServiceException getException = new AmazonServiceException("InternalFailure");
+    getException.setErrorCode("InternalFailure");
+    getException.setStatusCode(500);
+    getException.setServiceName("AmazonKinesis");
+    EasyMock.expect(getRecordsResult0.getRecords()).andThrow(getException).once();
+    EasyMock.expect(getRecordsResult0.getRecords()).andReturn(SHARD0_RECORDS).once();
+    AmazonServiceException getException2 = new AmazonServiceException("InternalFailure");
+    getException2.setErrorCode("InternalFailure");
+    getException2.setStatusCode(503);
+    getException2.setServiceName("AmazonKinesis");
+    EasyMock.expect(getRecordsResult1.getRecords()).andThrow(getException2).once();
+    EasyMock.expect(getRecordsResult1.getRecords()).andReturn(SHARD1_RECORDS).once();
+    EasyMock.expect(getRecordsResult0.getNextShardIterator()).andReturn(null).anyTimes();
+    EasyMock.expect(getRecordsResult1.getNextShardIterator()).andReturn(null).anyTimes();
+    EasyMock.expect(getRecordsResult0.getMillisBehindLatest()).andReturn(SHARD0_LAG_MILLIS).once();
+    EasyMock.expect(getRecordsResult0.getMillisBehindLatest()).andReturn(SHARD0_LAG_MILLIS).once();
+    EasyMock.expect(getRecordsResult1.getMillisBehindLatest()).andReturn(SHARD1_LAG_MILLIS).once();
+    EasyMock.expect(getRecordsResult1.getMillisBehindLatest()).andReturn(SHARD1_LAG_MILLIS).once();
+
+    replayAll();
+
+    Set<StreamPartition<String>> partitions = ImmutableSet.of(
+            StreamPartition.of(STREAM, SHARD_ID0),
+            StreamPartition.of(STREAM, SHARD_ID1)
+    );
+
+
+    recordSupplier = new KinesisRecordSupplier(
+            kinesis,
+            recordsPerFetch,
+            0,
+            2,
+            false,
+            100,
+            5000,
+            5000,
+            60000,
+            100,
+            true
+    );
+
+    recordSupplier.assign(partitions);
+    recordSupplier.seekToEarliest(partitions);
+    recordSupplier.start();
+
+    while (recordSupplier.bufferSize() < 14) {
+      Thread.sleep(100);
+    }
+
+    List<OrderedPartitionableRecord<String, String, ByteEntity>> polledRecords = cleanRecords(recordSupplier.poll(
+            POLL_TIMEOUT_MILLIS));
+
+    verifyAll();
+
+    Assert.assertEquals(partitions, recordSupplier.getAssignment());
+    Assert.assertTrue(polledRecords.containsAll(ALL_RECORDS));
+    Assert.assertEquals(SHARDS_LAG_MILLIS, recordSupplier.getPartitionResourcesTimeLag());
+  }
+
+  @Test
+  public void testPollWithKinesisNonRetryableFailure() throws InterruptedException
+  {
+    recordsPerFetch = 100;
+
+    EasyMock.expect(kinesis.getShardIterator(
+        EasyMock.anyObject(),
+        EasyMock.eq(SHARD_ID0),
+        EasyMock.anyString(),
+        EasyMock.anyString()
+    )).andReturn(
+        getShardIteratorResult0).anyTimes();
+
+    AmazonServiceException getException = new AmazonServiceException("BadRequest");
+    getException.setErrorCode("BadRequest");
+    getException.setStatusCode(400);
+    getException.setServiceName("AmazonKinesis");
+    EasyMock.expect(getShardIteratorResult0.getShardIterator()).andReturn(SHARD0_ITERATOR).anyTimes();
+    EasyMock.expect(kinesis.getRecords(generateGetRecordsReq(SHARD0_ITERATOR, recordsPerFetch)))
+            .andThrow(getException)
+            .once();
+
+    replayAll();
+
+    Set<StreamPartition<String>> partitions = ImmutableSet.of(
+        StreamPartition.of(STREAM, SHARD_ID0)
+    );
+
+
+    recordSupplier = new KinesisRecordSupplier(
+        kinesis,
+        recordsPerFetch,
+        0,
+        1,
+        false,
+        100,
+        5000,
+        5000,
+        60000,
+        100,
+        true
+    );
+
+    recordSupplier.assign(partitions);
+    recordSupplier.seekToEarliest(partitions);
+    recordSupplier.start();
+
+    int count = 0;
+    while (recordSupplier.isAnyFetchActive() && count++ < 10) {
+      Thread.sleep(100);
+    }
+    Assert.assertFalse(recordSupplier.isAnyFetchActive());
+
+    List<OrderedPartitionableRecord<String, String, ByteEntity>> polledRecords = cleanRecords(recordSupplier.poll(
+        POLL_TIMEOUT_MILLIS));
+
+    verifyAll();
+
+    Assert.assertEquals(partitions, recordSupplier.getAssignment());
+    Assert.assertEquals(0, polledRecords.size());
   }
 
   @Test
@@ -307,37 +488,41 @@ public class KinesisRecordSupplierTest extends EasyMockSupport
   {
     recordsPerFetch = 100;
 
-    expect(kinesis.getShardIterator(
-        anyObject(),
-        eq(shardId0),
-        anyString(),
-        anyString()
+    EasyMock.expect(kinesis.getShardIterator(
+        EasyMock.anyObject(),
+        EasyMock.eq(SHARD_ID0),
+        EasyMock.anyString(),
+        EasyMock.anyString()
     )).andReturn(
         getShardIteratorResult0).anyTimes();
 
-    expect(kinesis.getShardIterator(
-        anyObject(),
-        eq(shardId1),
-        anyString(),
-        anyString()
+    EasyMock.expect(kinesis.getShardIterator(
+        EasyMock.anyObject(),
+        EasyMock.eq(SHARD_ID1),
+        EasyMock.anyString(),
+        EasyMock.anyString()
     )).andReturn(
         getShardIteratorResult1).anyTimes();
 
-    expect(getShardIteratorResult0.getShardIterator()).andReturn(shard0Iterator).anyTimes();
-    expect(getShardIteratorResult1.getShardIterator()).andReturn(shard1Iterator).anyTimes();
-    expect(kinesis.getRecords(generateGetRecordsReq(shard0Iterator, recordsPerFetch))).andReturn(getRecordsResult0)
-                                                                                      .anyTimes();
-    expect(kinesis.getRecords(generateGetRecordsReq(shard1Iterator, recordsPerFetch))).andReturn(getRecordsResult1)
-                                                                                      .anyTimes();
-    expect(getRecordsResult0.getRecords()).andReturn(shard0Records.subList(1, shard0Records.size())).once();
-    expect(getRecordsResult1.getRecords()).andReturn(shard1Records.subList(2, shard1Records.size())).once();
-    expect(getRecordsResult0.getNextShardIterator()).andReturn(null).anyTimes();
-    expect(getRecordsResult1.getNextShardIterator()).andReturn(null).anyTimes();
+    EasyMock.expect(getShardIteratorResult0.getShardIterator()).andReturn(SHARD0_ITERATOR).anyTimes();
+    EasyMock.expect(getShardIteratorResult1.getShardIterator()).andReturn(SHARD1_ITERATOR).anyTimes();
+    EasyMock.expect(kinesis.getRecords(generateGetRecordsReq(SHARD0_ITERATOR, recordsPerFetch)))
+            .andReturn(getRecordsResult0)
+            .anyTimes();
+    EasyMock.expect(kinesis.getRecords(generateGetRecordsReq(SHARD1_ITERATOR, recordsPerFetch)))
+            .andReturn(getRecordsResult1)
+            .anyTimes();
+    EasyMock.expect(getRecordsResult0.getRecords()).andReturn(SHARD0_RECORDS.subList(1, SHARD0_RECORDS.size())).once();
+    EasyMock.expect(getRecordsResult1.getRecords()).andReturn(SHARD1_RECORDS.subList(2, SHARD1_RECORDS.size())).once();
+    EasyMock.expect(getRecordsResult0.getNextShardIterator()).andReturn(null).anyTimes();
+    EasyMock.expect(getRecordsResult1.getNextShardIterator()).andReturn(null).anyTimes();
+    EasyMock.expect(getRecordsResult0.getMillisBehindLatest()).andReturn(SHARD0_LAG_MILLIS).once();
+    EasyMock.expect(getRecordsResult1.getMillisBehindLatest()).andReturn(SHARD1_LAG_MILLIS).once();
 
     replayAll();
 
-    StreamPartition<String> shard0Partition = StreamPartition.of(stream, shardId0);
-    StreamPartition<String> shard1Partition = StreamPartition.of(stream, shardId1);
+    StreamPartition<String> shard0Partition = StreamPartition.of(STREAM, SHARD_ID0);
+    StreamPartition<String> shard1Partition = StreamPartition.of(STREAM, SHARD_ID1);
     Set<StreamPartition<String>> partitions = ImmutableSet.of(
         shard0Partition,
         shard1Partition
@@ -353,26 +538,27 @@ public class KinesisRecordSupplierTest extends EasyMockSupport
         5000,
         5000,
         60000,
-        100
+        100,
+        true
     );
 
     recordSupplier.assign(partitions);
-    recordSupplier.seek(shard1Partition, shard1Records.get(2).getSequenceNumber());
-    recordSupplier.seek(shard0Partition, shard0Records.get(1).getSequenceNumber());
+    recordSupplier.seek(shard1Partition, SHARD1_RECORDS.get(2).getSequenceNumber());
+    recordSupplier.seek(shard0Partition, SHARD0_RECORDS.get(1).getSequenceNumber());
     recordSupplier.start();
 
     for (int i = 0; i < 10 && recordSupplier.bufferSize() < 9; i++) {
       Thread.sleep(100);
     }
 
-    List<OrderedPartitionableRecord<String, String>> polledRecords = cleanRecords(recordSupplier.poll(
-        poll_timeout_millis));
+    List<OrderedPartitionableRecord<String, String, ByteEntity>> polledRecords = cleanRecords(recordSupplier.poll(
+        POLL_TIMEOUT_MILLIS));
 
     verifyAll();
     Assert.assertEquals(9, polledRecords.size());
-    Assert.assertTrue(polledRecords.containsAll(allRecords.subList(4, 12)));
-    Assert.assertTrue(polledRecords.containsAll(allRecords.subList(1, 2)));
-
+    Assert.assertTrue(polledRecords.containsAll(ALL_RECORDS.subList(4, 12)));
+    Assert.assertTrue(polledRecords.containsAll(ALL_RECORDS.subList(1, 2)));
+    Assert.assertEquals(SHARDS_LAG_MILLIS, recordSupplier.getPartitionResourcesTimeLag());
   }
 
 
@@ -382,29 +568,29 @@ public class KinesisRecordSupplierTest extends EasyMockSupport
   {
     recordsPerFetch = 100;
 
-    expect(kinesis.getShardIterator(
-        anyObject(),
-        eq(shardId0),
-        anyString(),
-        anyString()
+    EasyMock.expect(kinesis.getShardIterator(
+        EasyMock.anyObject(),
+        EasyMock.eq(SHARD_ID0),
+        EasyMock.anyString(),
+        EasyMock.anyString()
     )).andReturn(
         getShardIteratorResult0).anyTimes();
 
-    expect(kinesis.getShardIterator(
-        anyObject(),
-        eq(shardId1),
-        anyString(),
-        anyString()
+    EasyMock.expect(kinesis.getShardIterator(
+        EasyMock.anyObject(),
+        EasyMock.eq(SHARD_ID1),
+        EasyMock.anyString(),
+        EasyMock.anyString()
     )).andReturn(
         getShardIteratorResult1).anyTimes();
 
-    expect(getShardIteratorResult0.getShardIterator()).andReturn(null).once();
-    expect(getShardIteratorResult1.getShardIterator()).andReturn(null).once();
+    EasyMock.expect(getShardIteratorResult0.getShardIterator()).andReturn(null).once();
+    EasyMock.expect(getShardIteratorResult1.getShardIterator()).andReturn(null).once();
 
     replayAll();
 
-    StreamPartition<String> shard0 = StreamPartition.of(stream, shardId0);
-    StreamPartition<String> shard1 = StreamPartition.of(stream, shardId1);
+    StreamPartition<String> shard0 = StreamPartition.of(STREAM, SHARD_ID0);
+    StreamPartition<String> shard1 = StreamPartition.of(STREAM, SHARD_ID1);
     Set<StreamPartition<String>> partitions = ImmutableSet.of(
         shard0,
         shard1
@@ -420,7 +606,8 @@ public class KinesisRecordSupplierTest extends EasyMockSupport
         5000,
         5000,
         60000,
-        100
+        100,
+        true
     );
 
     recordSupplier.assign(partitions);
@@ -430,7 +617,7 @@ public class KinesisRecordSupplierTest extends EasyMockSupport
     for (int i = 0; i < 10 && recordSupplier.bufferSize() < 2; i++) {
       Thread.sleep(100);
     }
-    Assert.assertEquals(Collections.emptyList(), cleanRecords(recordSupplier.poll(poll_timeout_millis)));
+    Assert.assertEquals(Collections.emptyList(), cleanRecords(recordSupplier.poll(POLL_TIMEOUT_MILLIS)));
 
     verifyAll();
   }
@@ -438,8 +625,8 @@ public class KinesisRecordSupplierTest extends EasyMockSupport
   @Test(expected = ISE.class)
   public void testSeekUnassigned() throws InterruptedException
   {
-    StreamPartition<String> shard0 = StreamPartition.of(stream, shardId0);
-    StreamPartition<String> shard1 = StreamPartition.of(stream, shardId1);
+    StreamPartition<String> shard0 = StreamPartition.of(STREAM, SHARD_ID0);
+    StreamPartition<String> shard1 = StreamPartition.of(STREAM, SHARD_ID1);
     Set<StreamPartition<String>> partitions = ImmutableSet.of(
         shard1
     );
@@ -454,7 +641,8 @@ public class KinesisRecordSupplierTest extends EasyMockSupport
         5000,
         5000,
         60000,
-        5
+        5,
+        true
     );
 
     recordSupplier.assign(partitions);
@@ -469,32 +657,41 @@ public class KinesisRecordSupplierTest extends EasyMockSupport
     // tests that after doing a seek, the now invalid records in buffer is cleaned up properly
     recordsPerFetch = 100;
 
-    expect(kinesis.getShardIterator(
-        anyObject(),
-        eq(shardId1),
-        anyString(),
-        eq("5")
+    EasyMock.expect(kinesis.getShardIterator(
+        EasyMock.anyObject(),
+        EasyMock.eq(SHARD_ID1),
+        EasyMock.anyString(),
+        EasyMock.eq("5")
     )).andReturn(
         getShardIteratorResult1).once();
 
-    expect(kinesis.getShardIterator(anyObject(), eq(shardId1), anyString(), eq("7"))).andReturn(getShardIteratorResult0)
-                                                                                     .once();
+    EasyMock.expect(kinesis.getShardIterator(
+        EasyMock.anyObject(),
+        EasyMock.eq(SHARD_ID1),
+        EasyMock.anyString(),
+        EasyMock.eq("7")
+    )).andReturn(getShardIteratorResult0)
+            .once();
 
-    expect(getShardIteratorResult1.getShardIterator()).andReturn(shard1Iterator).once();
-    expect(getShardIteratorResult0.getShardIterator()).andReturn(shard0Iterator).once();
-    expect(kinesis.getRecords(generateGetRecordsReq(shard1Iterator, recordsPerFetch))).andReturn(getRecordsResult1)
-                                                                                      .once();
-    expect(kinesis.getRecords(generateGetRecordsReq(shard0Iterator, recordsPerFetch))).andReturn(getRecordsResult0)
-                                                                                      .once();
-    expect(getRecordsResult1.getRecords()).andReturn(shard1Records.subList(5, shard1Records.size())).once();
-    expect(getRecordsResult0.getRecords()).andReturn(shard1Records.subList(7, shard1Records.size())).once();
-    expect(getRecordsResult1.getNextShardIterator()).andReturn(null).anyTimes();
-    expect(getRecordsResult0.getNextShardIterator()).andReturn(null).anyTimes();
+    EasyMock.expect(getShardIteratorResult1.getShardIterator()).andReturn(SHARD1_ITERATOR).once();
+    EasyMock.expect(getShardIteratorResult0.getShardIterator()).andReturn(SHARD0_ITERATOR).once();
+    EasyMock.expect(kinesis.getRecords(generateGetRecordsReq(SHARD1_ITERATOR, recordsPerFetch)))
+            .andReturn(getRecordsResult1)
+            .once();
+    EasyMock.expect(kinesis.getRecords(generateGetRecordsReq(SHARD0_ITERATOR, recordsPerFetch)))
+            .andReturn(getRecordsResult0)
+            .once();
+    EasyMock.expect(getRecordsResult1.getRecords()).andReturn(SHARD1_RECORDS.subList(5, SHARD1_RECORDS.size())).once();
+    EasyMock.expect(getRecordsResult0.getRecords()).andReturn(SHARD1_RECORDS.subList(7, SHARD1_RECORDS.size())).once();
+    EasyMock.expect(getRecordsResult1.getNextShardIterator()).andReturn(null).anyTimes();
+    EasyMock.expect(getRecordsResult0.getNextShardIterator()).andReturn(null).anyTimes();
+    EasyMock.expect(getRecordsResult0.getMillisBehindLatest()).andReturn(SHARD0_LAG_MILLIS).once();
+    EasyMock.expect(getRecordsResult1.getMillisBehindLatest()).andReturn(SHARD1_LAG_MILLIS).once();
 
     replayAll();
 
     Set<StreamPartition<String>> partitions = ImmutableSet.of(
-        StreamPartition.of(stream, shardId1)
+        StreamPartition.of(STREAM, SHARD_ID1)
     );
 
     recordSupplier = new KinesisRecordSupplier(
@@ -507,34 +704,41 @@ public class KinesisRecordSupplierTest extends EasyMockSupport
         5000,
         5000,
         60000,
-        1
+        1,
+        true
     );
 
     recordSupplier.assign(partitions);
-    recordSupplier.seek(StreamPartition.of(stream, shardId1), "5");
+    recordSupplier.seek(StreamPartition.of(STREAM, SHARD_ID1), "5");
     recordSupplier.start();
 
     for (int i = 0; i < 10 && recordSupplier.bufferSize() < 6; i++) {
       Thread.sleep(100);
     }
 
-    OrderedPartitionableRecord<String, String> firstRecord = recordSupplier.poll(poll_timeout_millis).get(0);
+    OrderedPartitionableRecord<String, String, ByteEntity> firstRecord = recordSupplier.poll(POLL_TIMEOUT_MILLIS).get(0);
 
     Assert.assertEquals(
-        allRecords.get(7),
+        ALL_RECORDS.get(7),
         firstRecord
     );
 
-    recordSupplier.seek(StreamPartition.of(stream, shardId1), "7");
+    // only one partition in this test. first results come from getRecordsResult1, which has SHARD1_LAG_MILLIS
+    Assert.assertEquals(ImmutableMap.of(SHARD_ID1, SHARD1_LAG_MILLIS), recordSupplier.getPartitionResourcesTimeLag());
+
+    recordSupplier.seek(StreamPartition.of(STREAM, SHARD_ID1), "7");
     recordSupplier.start();
 
     while (recordSupplier.bufferSize() < 4) {
       Thread.sleep(100);
     }
 
-    OrderedPartitionableRecord<String, String> record2 = recordSupplier.poll(poll_timeout_millis).get(0);
 
-    Assert.assertEquals(allRecords.get(9), record2);
+    OrderedPartitionableRecord<String, String, ByteEntity> record2 = recordSupplier.poll(POLL_TIMEOUT_MILLIS).get(0);
+
+    Assert.assertEquals(ALL_RECORDS.get(9), record2);
+    // only one partition in this test. second results come from getRecordsResult0, which has SHARD0_LAG_MILLIS
+    Assert.assertEquals(ImmutableMap.of(SHARD_ID1, SHARD0_LAG_MILLIS), recordSupplier.getPartitionResourcesTimeLag());
     verifyAll();
   }
 
@@ -544,38 +748,42 @@ public class KinesisRecordSupplierTest extends EasyMockSupport
   {
     recordsPerFetch = 100;
 
-    expect(kinesis.getShardIterator(
-        anyObject(),
-        eq(shardId0),
-        anyString(),
-        anyString()
+    EasyMock.expect(kinesis.getShardIterator(
+        EasyMock.anyObject(),
+        EasyMock.eq(SHARD_ID0),
+        EasyMock.anyString(),
+        EasyMock.anyString()
     )).andReturn(
         getShardIteratorResult0).anyTimes();
 
-    expect(kinesis.getShardIterator(
-        anyObject(),
-        eq(shardId1),
-        anyString(),
-        anyString()
+    EasyMock.expect(kinesis.getShardIterator(
+        EasyMock.anyObject(),
+        EasyMock.eq(SHARD_ID1),
+        EasyMock.anyString(),
+        EasyMock.anyString()
     )).andReturn(
         getShardIteratorResult1).anyTimes();
 
-    expect(getShardIteratorResult0.getShardIterator()).andReturn(shard0Iterator).anyTimes();
-    expect(getShardIteratorResult1.getShardIterator()).andReturn(shard1Iterator).anyTimes();
-    expect(kinesis.getRecords(generateGetRecordsReq(shard0Iterator, recordsPerFetch))).andReturn(getRecordsResult0)
-                                                                                      .anyTimes();
-    expect(kinesis.getRecords(generateGetRecordsReq(shard1Iterator, recordsPerFetch))).andReturn(getRecordsResult1)
-                                                                                      .anyTimes();
-    expect(getRecordsResult0.getRecords()).andReturn(shard0Records).once();
-    expect(getRecordsResult1.getRecords()).andReturn(shard1Records).once();
-    expect(getRecordsResult0.getNextShardIterator()).andReturn(null).anyTimes();
-    expect(getRecordsResult1.getNextShardIterator()).andReturn(null).anyTimes();
+    EasyMock.expect(getShardIteratorResult0.getShardIterator()).andReturn(SHARD0_ITERATOR).anyTimes();
+    EasyMock.expect(getShardIteratorResult1.getShardIterator()).andReturn(SHARD1_ITERATOR).anyTimes();
+    EasyMock.expect(kinesis.getRecords(generateGetRecordsReq(SHARD0_ITERATOR, recordsPerFetch)))
+            .andReturn(getRecordsResult0)
+            .anyTimes();
+    EasyMock.expect(kinesis.getRecords(generateGetRecordsReq(SHARD1_ITERATOR, recordsPerFetch)))
+            .andReturn(getRecordsResult1)
+            .anyTimes();
+    EasyMock.expect(getRecordsResult0.getRecords()).andReturn(SHARD0_RECORDS).once();
+    EasyMock.expect(getRecordsResult1.getRecords()).andReturn(SHARD1_RECORDS).once();
+    EasyMock.expect(getRecordsResult0.getNextShardIterator()).andReturn(null).anyTimes();
+    EasyMock.expect(getRecordsResult1.getNextShardIterator()).andReturn(null).anyTimes();
+    EasyMock.expect(getRecordsResult0.getMillisBehindLatest()).andReturn(SHARD0_LAG_MILLIS).once();
+    EasyMock.expect(getRecordsResult1.getMillisBehindLatest()).andReturn(SHARD1_LAG_MILLIS).once();
 
     replayAll();
 
     Set<StreamPartition<String>> partitions = ImmutableSet.of(
-        StreamPartition.of(stream, shardId0),
-        StreamPartition.of(stream, shardId1)
+        StreamPartition.of(STREAM, SHARD_ID0),
+        StreamPartition.of(STREAM, SHARD_ID1)
     );
 
 
@@ -589,7 +797,8 @@ public class KinesisRecordSupplierTest extends EasyMockSupport
         5000,
         5000,
         60000,
-        100
+        100,
+        true
     );
 
     recordSupplier.assign(partitions);
@@ -600,30 +809,222 @@ public class KinesisRecordSupplierTest extends EasyMockSupport
       Thread.sleep(100);
     }
 
-    List<OrderedPartitionableRecord<String, String>> polledRecords = cleanRecords(recordSupplier.poll(
-        poll_timeout_millis));
+    List<OrderedPartitionableRecord<String, String, ByteEntity>> polledRecords = cleanRecords(recordSupplier.poll(
+        POLL_TIMEOUT_MILLIS));
 
     verifyAll();
 
     Assert.assertEquals(partitions, recordSupplier.getAssignment());
-    Assert.assertTrue(polledRecords.containsAll(allRecords));
+    Assert.assertTrue(polledRecords.containsAll(ALL_RECORDS));
+    Assert.assertEquals(SHARDS_LAG_MILLIS, recordSupplier.getPartitionResourcesTimeLag());
   }
 
-  /**
-   * Returns an array with the content between the position and limit of "buffer". This may be the buffer's backing
-   * array itself. Does not modify position or limit of the buffer.
-   */
-  private static byte[] toByteArray(final ByteBuffer buffer)
+  @Test
+  public void getLatestSequenceNumberWhenShardIsEmptyShouldReturnsNull()
   {
-    if (buffer.hasArray()
-        && buffer.arrayOffset() == 0
-        && buffer.position() == 0
-        && buffer.array().length == buffer.limit()) {
-      return buffer.array();
-    } else {
-      final byte[] retVal = new byte[buffer.remaining()];
-      buffer.duplicate().get(retVal);
-      return retVal;
+
+    KinesisRecordSupplier recordSupplier = getSequenceNumberWhenShardIsEmptyShouldReturnsNullHelper();
+    Assert.assertNull(recordSupplier.getLatestSequenceNumber(StreamPartition.of(STREAM, SHARD_ID0)));
+    verifyAll();
+  }
+
+  @Test
+  public void getEarliestSequenceNumberWhenShardIsEmptyShouldReturnsNull()
+  {
+
+    KinesisRecordSupplier recordSupplier = getSequenceNumberWhenShardIsEmptyShouldReturnsNullHelper();
+    Assert.assertNull(recordSupplier.getEarliestSequenceNumber(StreamPartition.of(STREAM, SHARD_ID0)));
+    verifyAll();
+  }
+
+  @Test
+  public void getLatestSequenceNumberWhenKinesisRetryableException()
+  {
+    EasyMock.expect(kinesis.getShardIterator(
+        EasyMock.eq(STREAM),
+        EasyMock.eq(SHARD_ID0),
+        EasyMock.eq(ShardIteratorType.LATEST.toString())
+    )).andReturn(
+        getShardIteratorResult0).once();
+
+    EasyMock.expect(getShardIteratorResult0.getShardIterator()).andReturn(SHARD0_ITERATOR).once();
+
+    AmazonClientException ex = new AmazonClientException(new IOException());
+    EasyMock.expect(kinesis.getRecords(generateGetRecordsReq(SHARD0_ITERATOR, 1000)))
+            .andThrow(ex)
+            .andReturn(getRecordsResult0)
+            .once();
+
+    EasyMock.expect(getRecordsResult0.getRecords()).andReturn(SHARD0_RECORDS).once();
+    EasyMock.expect(getRecordsResult0.getNextShardIterator()).andReturn(null).once();
+    EasyMock.expect(getRecordsResult0.getMillisBehindLatest()).andReturn(0L).once();
+
+    replayAll();
+
+    recordSupplier = new KinesisRecordSupplier(
+        kinesis,
+        recordsPerFetch,
+        0,
+        2,
+        true,
+        100,
+        5000,
+        5000,
+        1000,
+        100,
+        true
+    );
+
+    Assert.assertEquals("0", recordSupplier.getLatestSequenceNumber(StreamPartition.of(STREAM, SHARD_ID0)));
+  }
+
+  private KinesisRecordSupplier getSequenceNumberWhenShardIsEmptyShouldReturnsNullHelper()
+  {
+    EasyMock.expect(kinesis.getShardIterator(
+        EasyMock.eq(STREAM),
+        EasyMock.eq(SHARD_ID0),
+        EasyMock.anyString()
+    )).andReturn(
+        getShardIteratorResult0).anyTimes();
+
+    EasyMock.expect(getShardIteratorResult0.getShardIterator()).andReturn(SHARD0_ITERATOR).anyTimes();
+
+    EasyMock.expect(kinesis.getRecords(generateGetRecordsReq(SHARD0_ITERATOR, 1000)))
+            .andReturn(getRecordsResult0)
+            .times(1, Integer.MAX_VALUE);
+
+    EasyMock.expect(getRecordsResult0.getRecords()).andReturn(Collections.emptyList()).times(1, Integer.MAX_VALUE);
+    EasyMock.expect(getRecordsResult0.getNextShardIterator()).andReturn(SHARD0_ITERATOR).times(1, Integer.MAX_VALUE);
+    EasyMock.expect(getRecordsResult0.getMillisBehindLatest()).andReturn(0L).once();
+
+    replayAll();
+
+    recordSupplier = new KinesisRecordSupplier(
+        kinesis,
+        recordsPerFetch,
+        0,
+        2,
+        true,
+        100,
+        5000,
+        5000,
+        1000,
+        100,
+        true
+    );
+    return recordSupplier;
+  }
+
+  @Test
+  public void getPartitionTimeLag() throws InterruptedException
+  {
+    EasyMock.expect(kinesis.getShardIterator(
+        EasyMock.anyObject(),
+        EasyMock.eq(SHARD_ID0),
+            EasyMock.eq(ShardIteratorType.TRIM_HORIZON.toString()),
+            EasyMock.or(EasyMock.matches("\\d+"), EasyMock.isNull())
+    )).andReturn(getShardIteratorResult0).anyTimes();
+
+    EasyMock.expect(kinesis.getShardIterator(
+            EasyMock.anyObject(),
+            EasyMock.eq(SHARD_ID0),
+            EasyMock.eq(ShardIteratorType.AT_SEQUENCE_NUMBER.toString()),
+            EasyMock.matches("\\d+")
+    )).andReturn(getShardIteratorResult0).anyTimes();
+
+    EasyMock.expect(kinesis.getShardIterator(
+            EasyMock.anyObject(),
+            EasyMock.eq(SHARD_ID0),
+            EasyMock.eq(ShardIteratorType.AFTER_SEQUENCE_NUMBER.toString()),
+            EasyMock.matches("\\d+")
+    )).andReturn(getShardIteratorResult0).anyTimes();
+
+    EasyMock.expect(kinesis.getShardIterator(
+            EasyMock.anyObject(),
+            EasyMock.eq(SHARD_ID1),
+            EasyMock.eq(ShardIteratorType.TRIM_HORIZON.toString()),
+            EasyMock.or(EasyMock.matches("\\d+"), EasyMock.isNull())
+    )).andReturn(getShardIteratorResult1).anyTimes();
+
+    EasyMock.expect(kinesis.getShardIterator(
+            EasyMock.anyObject(),
+            EasyMock.eq(SHARD_ID1),
+            EasyMock.eq(ShardIteratorType.AT_SEQUENCE_NUMBER.toString()),
+            EasyMock.matches("\\d+")
+    )).andReturn(getShardIteratorResult1).anyTimes();
+
+    EasyMock.expect(kinesis.getShardIterator(
+            EasyMock.anyObject(),
+            EasyMock.eq(SHARD_ID1),
+            EasyMock.eq(ShardIteratorType.AFTER_SEQUENCE_NUMBER.toString()),
+            EasyMock.matches("\\d+")
+    )).andReturn(getShardIteratorResult1).anyTimes();
+
+    EasyMock.expect(getShardIteratorResult0.getShardIterator()).andReturn(SHARD0_ITERATOR).anyTimes();
+    EasyMock.expect(getShardIteratorResult1.getShardIterator()).andReturn(SHARD1_ITERATOR).anyTimes();
+    EasyMock.expect(kinesis.getRecords(generateGetRecordsReq(SHARD0_ITERATOR, recordsPerFetch)))
+            .andReturn(getRecordsResult0)
+            .anyTimes();
+    EasyMock.expect(kinesis.getRecords(generateGetRecordsReq(SHARD1_ITERATOR, recordsPerFetch)))
+            .andReturn(getRecordsResult1)
+            .anyTimes();
+    EasyMock.expect(getRecordsResult0.getRecords()).andReturn(SHARD0_RECORDS).times(2);
+    EasyMock.expect(getRecordsResult1.getRecords()).andReturn(SHARD1_RECORDS_EMPTY).times(2);
+    EasyMock.expect(getRecordsResult0.getNextShardIterator()).andReturn(null).anyTimes();
+    EasyMock.expect(getRecordsResult1.getNextShardIterator()).andReturn(null).anyTimes();
+    EasyMock.expect(getRecordsResult0.getMillisBehindLatest()).andReturn(SHARD0_LAG_MILLIS).times(2);
+    EasyMock.expect(getRecordsResult1.getMillisBehindLatest()).andReturn(SHARD1_LAG_MILLIS_EMPTY).once();
+
+    replayAll();
+
+    Set<StreamPartition<String>> partitions = ImmutableSet.of(
+        StreamPartition.of(STREAM, SHARD_ID0),
+        StreamPartition.of(STREAM, SHARD_ID1)
+    );
+
+    recordSupplier = new KinesisRecordSupplier(
+        kinesis,
+        recordsPerFetch,
+        0,
+        2,
+        true,
+        100,
+        5000,
+        5000,
+        60000,
+        100,
+        true
+    );
+
+    recordSupplier.assign(partitions);
+    recordSupplier.seekToEarliest(partitions);
+    recordSupplier.start();
+
+    for (int i = 0; i < 10 && recordSupplier.bufferSize() < 12; i++) {
+      Thread.sleep(100);
     }
+
+    Map<String, Long> timeLag = recordSupplier.getPartitionResourcesTimeLag();
+
+
+    Assert.assertEquals(partitions, recordSupplier.getAssignment());
+    Assert.assertEquals(SHARDS_LAG_MILLIS_EMPTY, timeLag);
+
+    Map<String, String> offsets = ImmutableMap.of(
+        SHARD_ID1, SHARD1_RECORDS.get(0).getSequenceNumber(),
+        SHARD_ID0, SHARD0_RECORDS.get(0).getSequenceNumber()
+    );
+    Map<String, Long> independentTimeLag = recordSupplier.getPartitionsTimeLag(STREAM, offsets);
+    Assert.assertEquals(SHARDS_LAG_MILLIS_EMPTY, independentTimeLag);
+
+    // Verify that kinesis apis are not called for custom sequence numbers
+    for (String sequenceNum : Arrays.asList(NO_END_SEQUENCE_NUMBER, END_OF_SHARD_MARKER, EXPIRED_MARKER)) {
+      offsets = ImmutableMap.of(
+          SHARD_ID1, sequenceNum,
+          SHARD_ID0, sequenceNum
+      );
+      Assert.assertEquals(Collections.emptyMap(), recordSupplier.getPartitionsTimeLag(STREAM, offsets));
+    }
+    verifyAll();
   }
 }

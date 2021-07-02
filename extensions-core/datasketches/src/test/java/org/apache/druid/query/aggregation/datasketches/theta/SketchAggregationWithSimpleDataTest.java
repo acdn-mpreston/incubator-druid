@@ -24,18 +24,21 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
 import com.google.common.io.Files;
 import org.apache.druid.data.input.MapBasedRow;
-import org.apache.druid.data.input.Row;
 import org.apache.druid.java.util.common.DateTimes;
 import org.apache.druid.java.util.common.granularity.Granularities;
 import org.apache.druid.java.util.common.guava.Sequence;
+import org.apache.druid.query.Query;
+import org.apache.druid.query.QueryContexts;
 import org.apache.druid.query.Result;
 import org.apache.druid.query.aggregation.AggregationTestHelper;
+import org.apache.druid.query.groupby.GroupByQuery;
 import org.apache.druid.query.groupby.GroupByQueryConfig;
 import org.apache.druid.query.groupby.GroupByQueryRunnerTest;
-import org.apache.druid.query.select.SelectResultValue;
+import org.apache.druid.query.groupby.ResultRow;
 import org.apache.druid.query.timeseries.TimeseriesResultValue;
 import org.apache.druid.query.topn.DimensionAndMetricValueExtractor;
 import org.apache.druid.query.topn.TopNResultValue;
+import org.apache.druid.testing.InitializedNullHandlingTest;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Rule;
@@ -46,36 +49,41 @@ import org.junit.runners.Parameterized;
 
 import java.io.File;
 import java.io.IOException;
-import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 
 /**
+ *
  */
 @RunWith(Parameterized.class)
-public class SketchAggregationWithSimpleDataTest
+public class SketchAggregationWithSimpleDataTest extends InitializedNullHandlingTest
 {
   @Rule
   public final TemporaryFolder tempFolder = new TemporaryFolder();
 
   private final GroupByQueryConfig config;
+  private final QueryContexts.Vectorize vectorize;
 
   private SketchModule sm;
   private File s1;
   private File s2;
 
-  public SketchAggregationWithSimpleDataTest(GroupByQueryConfig config)
+  public SketchAggregationWithSimpleDataTest(GroupByQueryConfig config, String vectorize)
   {
     this.config = config;
+    this.vectorize = QueryContexts.Vectorize.fromString(vectorize);
   }
 
-  @Parameterized.Parameters(name = "{0}")
+  @Parameterized.Parameters(name = "config = {0}, vectorize = {1}")
   public static Collection<?> constructorFeeder()
   {
     final List<Object[]> constructors = new ArrayList<>();
     for (GroupByQueryConfig config : GroupByQueryRunnerTest.testConfigs()) {
-      constructors.add(new Object[]{config});
+      for (String vectorize : new String[]{"false", "force"}) {
+        constructors.add(new Object[]{config, vectorize});
+      }
     }
     return constructors;
   }
@@ -127,13 +135,18 @@ public class SketchAggregationWithSimpleDataTest
             tempFolder
         )
     ) {
-
-      Sequence seq = gpByQueryAggregationTestHelper.runQueryOnSegments(
-          ImmutableList.of(s1, s2),
-          readFileFromClasspathAsString("simple_test_data_group_by_query.json")
+      final GroupByQuery groupByQuery = SketchAggregationTest.readQueryFromClasspath(
+          "simple_test_data_group_by_query.json",
+          gpByQueryAggregationTestHelper.getObjectMapper(),
+          vectorize
       );
 
-      List<Row> results = seq.toList();
+      Sequence<ResultRow> seq = gpByQueryAggregationTestHelper.runQueryOnSegments(
+          ImmutableList.of(s1, s2),
+          groupByQuery
+      );
+
+      List<MapBasedRow> results = seq.map(row -> row.toMapBasedRow(groupByQuery)).toList();
       Assert.assertEquals(5, results.size());
       Assert.assertEquals(
           ImmutableList.of(
@@ -218,7 +231,11 @@ public class SketchAggregationWithSimpleDataTest
 
     Sequence seq = timeseriesQueryAggregationTestHelper.runQueryOnSegments(
         ImmutableList.of(s1, s2),
-        readFileFromClasspathAsString("timeseries_query.json")
+        (Query) SketchAggregationTest.readQueryFromClasspath(
+            "timeseries_query.json",
+            timeseriesQueryAggregationTestHelper.getObjectMapper(),
+            vectorize
+        )
     );
 
     Result<TimeseriesResultValue> result = (Result<TimeseriesResultValue>) Iterables.getOnlyElement(seq.toList());
@@ -244,7 +261,11 @@ public class SketchAggregationWithSimpleDataTest
 
     Sequence seq = topNQueryAggregationTestHelper.runQueryOnSegments(
         ImmutableList.of(s1, s2),
-        readFileFromClasspathAsString("topn_query.json")
+        (Query) SketchAggregationTest.readQueryFromClasspath(
+            "topn_query.json",
+            topNQueryAggregationTestHelper.getObjectMapper(),
+            vectorize
+        )
     );
 
     Result<TopNResultValue> result = (Result<TopNResultValue>) Iterables.getOnlyElement(seq.toList());
@@ -262,27 +283,6 @@ public class SketchAggregationWithSimpleDataTest
   }
 
   @Test
-  public void testSimpleDataIngestAndSelectQuery() throws Exception
-  {
-    SketchModule.registerSerde();
-    SketchModule sm = new SketchModule();
-    AggregationTestHelper selectQueryAggregationTestHelper = AggregationTestHelper.createSelectQueryAggregationTestHelper(
-        sm.getJacksonModules(),
-        tempFolder
-    );
-
-    Sequence seq = selectQueryAggregationTestHelper.runQueryOnSegments(
-        ImmutableList.of(s1, s2),
-        readFileFromClasspathAsString("select_query.json")
-    );
-
-    Result<SelectResultValue> result = (Result<SelectResultValue>) Iterables.getOnlyElement(seq.toList());
-    Assert.assertEquals(DateTimes.of("2014-10-20T00:00:00.000Z"), result.getTimestamp());
-    Assert.assertEquals(100, result.getValue().getEvents().size());
-    Assert.assertEquals("AgMDAAAazJMCAAAAAACAPzz9j7pWTMdROWGf15uY1nI=", result.getValue().getEvents().get(0).getEvent().get("pty_country"));
-  }
-  
-  @Test
   public void testTopNQueryWithSketchConstant() throws Exception
   {
     AggregationTestHelper topNQueryAggregationTestHelper = AggregationTestHelper.createTopNQueryAggregationTestHelper(
@@ -292,11 +292,15 @@ public class SketchAggregationWithSimpleDataTest
 
     Sequence seq = topNQueryAggregationTestHelper.runQueryOnSegments(
         ImmutableList.of(s1, s2),
-        readFileFromClasspathAsString("topn_query_sketch_const.json")
+        (Query) SketchAggregationTest.readQueryFromClasspath(
+            "topn_query_sketch_const.json",
+            topNQueryAggregationTestHelper.getObjectMapper(),
+            vectorize
+        )
     );
-    
+
     Result<TopNResultValue> result = (Result<TopNResultValue>) Iterables.getOnlyElement(seq.toList());
-    
+
     Assert.assertEquals(DateTimes.of("2014-10-20T00:00:00.000Z"), result.getTimestamp());
 
     DimensionAndMetricValueExtractor value1 = Iterables.get(result.getValue().getValue(), 0);
@@ -307,7 +311,7 @@ public class SketchAggregationWithSimpleDataTest
     Assert.assertEquals(1.0, value1.getDoubleMetric("sketchIntersectionPostAggEstimate"), 0.01);
     Assert.assertEquals(37.0, value1.getDoubleMetric("sketchAnotBPostAggEstimate"), 0.01);
     Assert.assertEquals("product_3", value1.getDimensionValue("product"));
-    
+
     DimensionAndMetricValueExtractor value2 = Iterables.get(result.getValue().getValue(), 1);
     Assert.assertEquals(42.0, value2.getDoubleMetric("sketch_count"), 0.01);
     Assert.assertEquals(42.0, value2.getDoubleMetric("sketchEstimatePostAgg"), 0.01);
@@ -316,7 +320,7 @@ public class SketchAggregationWithSimpleDataTest
     Assert.assertEquals(2.0, value2.getDoubleMetric("sketchIntersectionPostAggEstimate"), 0.01);
     Assert.assertEquals(40.0, value2.getDoubleMetric("sketchAnotBPostAggEstimate"), 0.01);
     Assert.assertEquals("product_1", value2.getDimensionValue("product"));
-    
+
     DimensionAndMetricValueExtractor value3 = Iterables.get(result.getValue().getValue(), 2);
     Assert.assertEquals(42.0, value3.getDoubleMetric("sketch_count"), 0.01);
     Assert.assertEquals(42.0, value3.getDoubleMetric("sketchEstimatePostAgg"), 0.01);
@@ -327,11 +331,11 @@ public class SketchAggregationWithSimpleDataTest
     Assert.assertEquals("product_2", value3.getDimensionValue("product"));
   }
 
-  public static final String readFileFromClasspathAsString(String fileName) throws IOException
+  public static String readFileFromClasspathAsString(String fileName) throws IOException
   {
     return Files.asCharSource(
         new File(SketchAggregationTest.class.getClassLoader().getResource(fileName).getFile()),
-        Charset.forName("UTF-8")
+        StandardCharsets.UTF_8
     ).read();
   }
 }

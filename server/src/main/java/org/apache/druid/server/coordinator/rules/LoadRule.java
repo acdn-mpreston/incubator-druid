@@ -21,6 +21,8 @@ package org.apache.druid.server.coordinator.rules;
 
 import it.unimi.dsi.fastutil.objects.Object2IntMap;
 import it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap;
+import it.unimi.dsi.fastutil.objects.Object2LongMap;
+import it.unimi.dsi.fastutil.objects.Object2LongOpenHashMap;
 import org.apache.druid.java.util.common.IAE;
 import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.java.util.emitter.EmittingLogger;
@@ -30,6 +32,7 @@ import org.apache.druid.server.coordinator.DruidCluster;
 import org.apache.druid.server.coordinator.DruidCoordinator;
 import org.apache.druid.server.coordinator.DruidCoordinatorRuntimeParams;
 import org.apache.druid.server.coordinator.ReplicationThrottler;
+import org.apache.druid.server.coordinator.SegmentReplicantLookup;
 import org.apache.druid.server.coordinator.ServerHolder;
 import org.apache.druid.timeline.DataSegment;
 import org.apache.druid.timeline.SegmentId;
@@ -54,6 +57,8 @@ public abstract class LoadRule implements Rule
   private static final EmittingLogger log = new EmittingLogger(LoadRule.class);
   static final String ASSIGNED_COUNT = "assignedCount";
   static final String DROPPED_COUNT = "droppedCount";
+  public final String NON_PRIMARY_ASSIGNED_COUNT = "totalNonPrimaryReplicantsLoaded";
+  public static final String REQUIRED_CAPACITY = "requiredCapacity";
 
   private final Object2IntMap<String> targetReplicants = new Object2IntOpenHashMap<>();
   private final Object2IntMap<String> currentReplicants = new Object2IntOpenHashMap<>();
@@ -77,7 +82,9 @@ public abstract class LoadRule implements Rule
       assign(params, segment, stats);
 
       drop(params, segment, stats);
-
+      for (String tier : targetReplicants.keySet()) {
+        stats.addToTieredStat(REQUIRED_CAPACITY, tier, segment.getSize() * targetReplicants.getInt(tier));
+      }
       return stats;
     }
     finally {
@@ -85,6 +92,60 @@ public abstract class LoadRule implements Rule
       currentReplicants.clear();
       strategyCache.clear();
     }
+  }
+
+  @Override
+  public boolean canLoadSegments()
+  {
+    return true;
+  }
+
+  @Override
+  public void updateUnderReplicated(
+      Map<String, Object2LongMap<String>> underReplicatedPerTier,
+      SegmentReplicantLookup segmentReplicantLookup,
+      DataSegment segment
+  )
+  {
+    getTieredReplicants().forEach((final String tier, final Integer ruleReplicants) -> {
+      int currentReplicants = segmentReplicantLookup.getLoadedReplicants(segment.getId(), tier);
+      Object2LongMap<String> underReplicationPerDataSource = underReplicatedPerTier.computeIfAbsent(
+          tier,
+          ignored -> new Object2LongOpenHashMap<>()
+      );
+      ((Object2LongOpenHashMap<String>) underReplicationPerDataSource).addTo(
+          segment.getDataSource(),
+          Math.max(ruleReplicants - currentReplicants, 0)
+      );
+    });
+  }
+
+  @Override
+  public void updateUnderReplicatedWithClusterView(
+      Map<String, Object2LongMap<String>> underReplicatedPerTier,
+      SegmentReplicantLookup segmentReplicantLookup,
+      DruidCluster cluster,
+      DataSegment segment
+  )
+  {
+    getTieredReplicants().forEach((final String tier, final Integer ruleReplicants) -> {
+      int currentReplicants = segmentReplicantLookup.getLoadedReplicants(segment.getId(), tier);
+      Object2LongMap<String> underReplicationPerDataSource = underReplicatedPerTier.computeIfAbsent(
+          tier,
+          ignored -> new Object2LongOpenHashMap<>()
+      );
+      int possibleReplicants = Math.min(ruleReplicants, cluster.getHistoricals().get(tier).size());
+      log.debug(
+          "ruleReplicants: [%d], possibleReplicants: [%d], currentReplicants: [%d]",
+          ruleReplicants,
+          possibleReplicants,
+          currentReplicants
+      );
+      ((Object2LongOpenHashMap<String>) underReplicationPerDataSource).addTo(
+          segment.getDataSource(),
+          Math.max(possibleReplicants - currentReplicants, 0)
+      );
+    });
   }
 
   /**
@@ -120,6 +181,10 @@ public abstract class LoadRule implements Rule
           createLoadQueueSizeLimitingPredicate(params).and(holder -> !holder.equals(primaryHolderToLoad)),
           segment
       );
+
+      // numAssigned - 1 because we don't want to count the primary assignment
+      stats.addToGlobalStat(NON_PRIMARY_ASSIGNED_COUNT, numAssigned - 1);
+
       stats.addToTieredStat(ASSIGNED_COUNT, tier, numAssigned);
 
       // do assign replicas for the other tiers.
@@ -245,6 +310,7 @@ public abstract class LoadRule implements Rule
           createLoadQueueSizeLimitingPredicate(params),
           segment
       );
+      stats.addToGlobalStat(NON_PRIMARY_ASSIGNED_COUNT, numAssigned);
       stats.addToTieredStat(ASSIGNED_COUNT, tier, numAssigned);
     }
   }
@@ -392,7 +458,7 @@ public abstract class LoadRule implements Rule
       left = dropSegmentFromServers(balancerStrategy, segment, activeServers, left);
     }
     if (left != 0) {
-      log.warn("Wtf, holder was null?  I have no servers serving [%s]?", segment.getId());
+      log.warn("I have no servers serving [%s]?", segment.getId());
     }
     return numToDrop - left;
   }

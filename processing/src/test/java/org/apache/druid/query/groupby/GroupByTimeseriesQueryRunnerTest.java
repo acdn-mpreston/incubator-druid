@@ -21,14 +21,13 @@ package org.apache.druid.query.groupby;
 
 import com.google.common.base.Function;
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.Lists;
 import org.apache.druid.data.input.MapBasedRow;
-import org.apache.druid.data.input.Row;
 import org.apache.druid.java.util.common.DateTimes;
 import org.apache.druid.java.util.common.Pair;
 import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.java.util.common.concurrent.Execs;
 import org.apache.druid.java.util.common.granularity.Granularities;
+import org.apache.druid.java.util.common.granularity.PeriodGranularity;
 import org.apache.druid.java.util.common.guava.Sequence;
 import org.apache.druid.java.util.common.guava.Sequences;
 import org.apache.druid.java.util.common.io.Closer;
@@ -41,9 +40,16 @@ import org.apache.druid.query.QueryToolChest;
 import org.apache.druid.query.Result;
 import org.apache.druid.query.aggregation.DoubleMaxAggregatorFactory;
 import org.apache.druid.query.aggregation.DoubleMinAggregatorFactory;
+import org.apache.druid.query.context.ResponseContext;
+import org.apache.druid.query.dimension.DefaultDimensionSpec;
+import org.apache.druid.query.expression.TestExprMacroTable;
 import org.apache.druid.query.timeseries.TimeseriesQuery;
 import org.apache.druid.query.timeseries.TimeseriesQueryRunnerTest;
 import org.apache.druid.query.timeseries.TimeseriesResultValue;
+import org.apache.druid.segment.VirtualColumn;
+import org.apache.druid.segment.VirtualColumns;
+import org.apache.druid.segment.column.ValueType;
+import org.apache.druid.segment.virtual.ExpressionVirtualColumn;
 import org.joda.time.DateTime;
 import org.junit.AfterClass;
 import org.junit.Assert;
@@ -52,24 +58,26 @@ import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 
 import java.io.IOException;
-import java.util.Map;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 
 /**
- *
+ * This class is for testing both timeseries and groupBy queries with the same set of queries.
  */
 @RunWith(Parameterized.class)
 public class GroupByTimeseriesQueryRunnerTest extends TimeseriesQueryRunnerTest
 {
-  private static final Closer resourceCloser = Closer.create();
+  private static final Closer RESOURCE_CLOSER = Closer.create();
 
   @AfterClass
   public static void teardown() throws IOException
   {
-    resourceCloser.close();
+    RESOURCE_CLOSER.close();
   }
 
   @SuppressWarnings("unchecked")
-  @Parameterized.Parameters(name = "{0}")
+  @Parameterized.Parameters(name = "{0}, vectorize = {1}")
   public static Iterable<Object[]> constructorFeeder()
   {
     GroupByQueryConfig config = new GroupByQueryConfig();
@@ -78,75 +86,99 @@ public class GroupByTimeseriesQueryRunnerTest extends TimeseriesQueryRunnerTest
         config
     );
     final GroupByQueryRunnerFactory factory = factoryAndCloser.lhs;
-    resourceCloser.register(factoryAndCloser.rhs);
-    return QueryRunnerTestHelper.transformToConstructionFeeder(
-        Lists.transform(
-            QueryRunnerTestHelper.makeQueryRunners(factory),
-            new Function<QueryRunner<Row>, Object>()
-            {
-              @Override
-              public Object apply(final QueryRunner<Row> input)
+    RESOURCE_CLOSER.register(factoryAndCloser.rhs);
+
+    final List<Object[]> constructors = new ArrayList<>();
+
+    for (QueryRunner<ResultRow> runner : QueryRunnerTestHelper.makeQueryRunners(factory)) {
+      final QueryRunner modifiedRunner = new QueryRunner()
+      {
+        @Override
+        public Sequence run(QueryPlus queryPlus, ResponseContext responseContext)
+        {
+          TimeseriesQuery tsQuery = (TimeseriesQuery) queryPlus.getQuery();
+          QueryRunner<ResultRow> newRunner = factory.mergeRunners(
+              Execs.directExecutor(), ImmutableList.of(runner)
+          );
+          QueryToolChest toolChest = factory.getToolchest();
+
+          newRunner = new FinalizeResultsQueryRunner<>(
+              toolChest.mergeResults(toolChest.preMergeQueryDecoration(newRunner)),
+              toolChest
+          );
+
+          final String timeDimension = tsQuery.getTimestampResultField();
+          final List<VirtualColumn> virtualColumns = new ArrayList<>(
+              Arrays.asList(tsQuery.getVirtualColumns().getVirtualColumns())
+          );
+          if (timeDimension != null) {
+            final PeriodGranularity granularity = (PeriodGranularity) tsQuery.getGranularity();
+            virtualColumns.add(
+                new ExpressionVirtualColumn(
+                    "v0",
+                    StringUtils.format("timestamp_floor(__time, '%s')", granularity.getPeriod()),
+                    ValueType.LONG,
+                    TestExprMacroTable.INSTANCE
+                )
+            );
+          }
+
+          GroupByQuery newQuery = GroupByQuery
+              .builder()
+              .setDataSource(tsQuery.getDataSource())
+              .setQuerySegmentSpec(tsQuery.getQuerySegmentSpec())
+              .setGranularity(tsQuery.getGranularity())
+              .setDimFilter(tsQuery.getDimensionsFilter())
+              .setDimensions(
+                  timeDimension == null
+                  ? ImmutableList.of()
+                  : ImmutableList.of(new DefaultDimensionSpec("v0", timeDimension, ValueType.LONG))
+              )
+              .setAggregatorSpecs(tsQuery.getAggregatorSpecs())
+              .setPostAggregatorSpecs(tsQuery.getPostAggregatorSpecs())
+              .setVirtualColumns(VirtualColumns.create(virtualColumns))
+              .setContext(tsQuery.getContext())
+              .build();
+
+          return Sequences.map(
+              newRunner.run(queryPlus.withQuery(newQuery), responseContext),
+              new Function<ResultRow, Result<TimeseriesResultValue>>()
               {
-                return new QueryRunner()
+                @Override
+                public Result<TimeseriesResultValue> apply(final ResultRow input)
                 {
-                  @Override
-                  public Sequence run(QueryPlus queryPlus, Map responseContext)
-                  {
-                    TimeseriesQuery tsQuery = (TimeseriesQuery) queryPlus.getQuery();
-                    QueryRunner<Row> newRunner = factory.mergeRunners(
-                        Execs.directExecutor(), ImmutableList.of(input)
-                    );
-                    QueryToolChest toolChest = factory.getToolchest();
+                  final MapBasedRow mapBasedRow = input.toMapBasedRow(newQuery);
 
-                    newRunner = new FinalizeResultsQueryRunner<>(
-                        toolChest.mergeResults(toolChest.preMergeQueryDecoration(newRunner)),
-                        toolChest
-                    );
-
-                    GroupByQuery newQuery = GroupByQuery
-                        .builder()
-                        .setDataSource(tsQuery.getDataSource())
-                        .setQuerySegmentSpec(tsQuery.getQuerySegmentSpec())
-                        .setGranularity(tsQuery.getGranularity())
-                        .setDimFilter(tsQuery.getDimensionsFilter())
-                        .setAggregatorSpecs(tsQuery.getAggregatorSpecs())
-                        .setPostAggregatorSpecs(tsQuery.getPostAggregatorSpecs())
-                        .setVirtualColumns(tsQuery.getVirtualColumns())
-                        .setContext(tsQuery.getContext())
-                        .build();
-
-                    return Sequences.map(
-                        newRunner.run(queryPlus.withQuery(newQuery), responseContext),
-                        new Function<Row, Result<TimeseriesResultValue>>()
-                        {
-                          @Override
-                          public Result<TimeseriesResultValue> apply(final Row input)
-                          {
-                            MapBasedRow row = (MapBasedRow) input;
-
-                            return new Result<>(
-                                row.getTimestamp(), new TimeseriesResultValue(row.getEvent())
-                            );
-                          }
-                        }
-                    );
-                  }
-
-                  @Override
-                  public String toString()
-                  {
-                    return input.toString();
-                  }
-                };
+                  return new Result<>(
+                      mapBasedRow.getTimestamp(),
+                      new TimeseriesResultValue(mapBasedRow.getEvent())
+                  );
+                }
               }
-            }
-        )
-    );
+          );
+        }
+
+        @Override
+        public String toString()
+        {
+          return runner.toString();
+        }
+      };
+
+      for (boolean vectorize : ImmutableList.of(false, true)) {
+        // Add vectorization tests for any indexes that support it.
+        if (!vectorize || QueryRunnerTestHelper.isTestRunnerVectorizable(runner)) {
+          constructors.add(new Object[]{modifiedRunner, vectorize});
+        }
+      }
+    }
+
+    return constructors;
   }
 
-  public GroupByTimeseriesQueryRunnerTest(QueryRunner runner)
+  public GroupByTimeseriesQueryRunnerTest(QueryRunner runner, boolean vectorize)
   {
-    super(runner, false, QueryRunnerTestHelper.commonDoubleAggregators);
+    super(runner, false, vectorize, QueryRunnerTestHelper.COMMON_DOUBLE_AGGREGATORS);
   }
 
   // GroupBy handles timestamps differently when granularity is ALL
@@ -155,9 +187,9 @@ public class GroupByTimeseriesQueryRunnerTest extends TimeseriesQueryRunnerTest
   public void testFullOnTimeseriesMaxMin()
   {
     TimeseriesQuery query = Druids.newTimeseriesQueryBuilder()
-                                  .dataSource(QueryRunnerTestHelper.dataSource)
+                                  .dataSource(QueryRunnerTestHelper.DATA_SOURCE)
                                   .granularity(Granularities.ALL)
-                                  .intervals(QueryRunnerTestHelper.fullOnIntervalSpec)
+                                  .intervals(QueryRunnerTestHelper.FULL_ON_INTERVAL_SPEC)
                                   .aggregators(
                                       new DoubleMaxAggregatorFactory("maxIndex", "index"),
                                       new DoubleMinAggregatorFactory("minIndex", "index")
@@ -168,7 +200,7 @@ public class GroupByTimeseriesQueryRunnerTest extends TimeseriesQueryRunnerTest
     DateTime expectedEarliest = DateTimes.of("1970-01-01");
     DateTime expectedLast = DateTimes.of("2011-04-15");
 
-    Iterable<Result<TimeseriesResultValue>> results = runner.run(QueryPlus.wrap(query), CONTEXT).toList();
+    Iterable<Result<TimeseriesResultValue>> results = runner.run(QueryPlus.wrap(query)).toList();
     Result<TimeseriesResultValue> result = results.iterator().next();
 
     Assert.assertEquals(expectedEarliest, result.getTimestamp());
@@ -183,6 +215,45 @@ public class GroupByTimeseriesQueryRunnerTest extends TimeseriesQueryRunnerTest
     Assert.assertEquals(result.toString(), 59.021022, value.getDoubleMetric("minIndex"), 59.021022 * 1e-6);
   }
 
+  // GroupBy handles timestamps differently when granularity is ALL
+  @Override
+  @Test
+  public void testFullOnTimeseriesMinMaxAggregators()
+  {
+    TimeseriesQuery query = Druids.newTimeseriesQueryBuilder()
+                                  .dataSource(QueryRunnerTestHelper.DATA_SOURCE)
+                                  .granularity(Granularities.ALL)
+                                  .intervals(QueryRunnerTestHelper.FULL_ON_INTERVAL_SPEC)
+                                  .aggregators(
+                                      QueryRunnerTestHelper.INDEX_LONG_MIN,
+                                      QueryRunnerTestHelper.INDEX_LONG_MAX,
+                                      QueryRunnerTestHelper.INDEX_DOUBLE_MIN,
+                                      QueryRunnerTestHelper.INDEX_DOUBLE_MAX,
+                                      QueryRunnerTestHelper.INDEX_FLOAT_MIN,
+                                      QueryRunnerTestHelper.INDEX_FLOAT_MAX
+                                  )
+                                  .descending(descending)
+                                  .build();
+
+    DateTime expectedEarliest = DateTimes.of("1970-01-01");
+    DateTime expectedLast = DateTimes.of("2011-04-15");
+
+
+    Iterable<Result<TimeseriesResultValue>> results = runner.run(QueryPlus.wrap(query)).toList();
+    Result<TimeseriesResultValue> result = results.iterator().next();
+
+    Assert.assertEquals(expectedEarliest, result.getTimestamp());
+    Assert.assertFalse(
+        StringUtils.format("Timestamp[%s] > expectedLast[%s]", result.getTimestamp(), expectedLast),
+        result.getTimestamp().isAfter(expectedLast)
+    );
+    Assert.assertEquals(59L, (long) result.getValue().getLongMetric(QueryRunnerTestHelper.LONG_MIN_INDEX_METRIC));
+    Assert.assertEquals(1870, (long) result.getValue().getLongMetric(QueryRunnerTestHelper.LONG_MAX_INDEX_METRIC));
+    Assert.assertEquals(59.021022D, result.getValue().getDoubleMetric(QueryRunnerTestHelper.DOUBLE_MIN_INDEX_METRIC), 0);
+    Assert.assertEquals(1870.061029D, result.getValue().getDoubleMetric(QueryRunnerTestHelper.DOUBLE_MAX_INDEX_METRIC), 0);
+    Assert.assertEquals(59.021023F, result.getValue().getFloatMetric(QueryRunnerTestHelper.FLOAT_MIN_INDEX_METRIC), 0);
+    Assert.assertEquals(1870.061F, result.getValue().getFloatMetric(QueryRunnerTestHelper.FLOAT_MAX_INDEX_METRIC), 0);
+  }
 
   @Override
   public void testEmptyTimeseries()

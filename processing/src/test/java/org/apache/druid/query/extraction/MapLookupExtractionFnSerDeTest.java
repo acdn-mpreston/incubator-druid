@@ -21,11 +21,9 @@ package org.apache.druid.query.extraction;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableMap;
-import com.google.inject.Injector;
-import com.google.inject.Key;
-import org.apache.druid.guice.GuiceInjectors;
-import org.apache.druid.guice.annotations.Json;
+import org.apache.druid.common.config.NullHandling;
 import org.apache.druid.java.util.common.StringUtils;
+import org.apache.druid.segment.TestHelper;
 import org.junit.Assert;
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -40,29 +38,30 @@ import java.util.UUID;
 public class MapLookupExtractionFnSerDeTest
 {
   private static ObjectMapper mapper;
-  private static final Map<String, String> renames = ImmutableMap.of(
+  private static final Map<String, String> RENAMES = ImmutableMap.of(
       "foo", "bar",
-      "bar", "baz"
+      "bar", "baz",
+      "", "empty"
   );
 
   @BeforeClass
   public static void setup()
   {
-    Injector defaultInjector = GuiceInjectors.makeStartupInjector();
-    mapper = defaultInjector.getInstance(Key.get(ObjectMapper.class, Json.class));
+    mapper = TestHelper.makeJsonMapper();
   }
 
   @Test
   public void testDeserialization() throws IOException
   {
+    NullHandling.initializeForTests();
     final DimExtractionFn fn = mapper.readerFor(DimExtractionFn.class).readValue(
         StringUtils.format(
             "{\"type\":\"lookup\",\"lookup\":{\"type\":\"map\", \"map\":%s}}",
-            mapper.writeValueAsString(renames)
+            mapper.writeValueAsString(RENAMES)
         )
     );
-    for (String key : renames.keySet()) {
-      Assert.assertEquals(renames.get(key), fn.apply(key));
+    for (String key : RENAMES.keySet()) {
+      Assert.assertEquals(RENAMES.get(key), fn.apply(key));
     }
     final String crazyString = UUID.randomUUID().toString();
     Assert.assertEquals(null, fn.apply(crazyString));
@@ -74,7 +73,7 @@ public class MapLookupExtractionFnSerDeTest
             .<DimExtractionFn>readValue(
                 StringUtils.format(
                     "{\"type\":\"lookup\",\"lookup\":{\"type\":\"map\", \"map\":%s}, \"retainMissingValue\":true}",
-                    mapper.writeValueAsString(renames)
+                    mapper.writeValueAsString(RENAMES)
                 )
             )
             .apply(crazyString)

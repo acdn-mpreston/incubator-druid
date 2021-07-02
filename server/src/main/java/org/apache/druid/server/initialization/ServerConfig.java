@@ -20,26 +20,75 @@
 package org.apache.druid.server.initialization;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.google.common.collect.ImmutableList;
+import org.apache.druid.java.util.common.HumanReadableBytes;
+import org.apache.druid.java.util.common.HumanReadableBytesRange;
 import org.apache.druid.utils.JvmUtils;
 import org.joda.time.Period;
 
 import javax.validation.constraints.Max;
 import javax.validation.constraints.Min;
 import javax.validation.constraints.NotNull;
+import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 import java.util.zip.Deflater;
 
 /**
+ *
  */
 public class ServerConfig
 {
-
   public static final int DEFAULT_GZIP_INFLATE_BUFFER_SIZE = 4096;
+
+  /**
+   * The ServerConfig is normally created using {@link org.apache.druid.guice.JsonConfigProvider} binding.
+   *
+   * This constructor is provided for callers that need to create a ServerConfig object with specific field values.
+   */
+  public ServerConfig(
+      int numThreads,
+      int queueSize,
+      boolean enableRequestLimit,
+      @NotNull Period maxIdleTime,
+      long defaultQueryTimeout,
+      long maxScatterGatherBytes,
+      int maxSubqueryRows,
+      long maxQueryTimeout,
+      int maxRequestHeaderSize,
+      @NotNull Period gracefulShutdownTimeout,
+      @NotNull Period unannouncePropagationDelay,
+      int inflateBufferSize,
+      int compressionLevel,
+      boolean enableForwardedRequestCustomizer,
+      @NotNull List<String> allowedHttpMethods
+  )
+  {
+    this.numThreads = numThreads;
+    this.queueSize = queueSize;
+    this.enableRequestLimit = enableRequestLimit;
+    this.maxIdleTime = maxIdleTime;
+    this.defaultQueryTimeout = defaultQueryTimeout;
+    this.maxScatterGatherBytes = HumanReadableBytes.valueOf(maxScatterGatherBytes);
+    this.maxSubqueryRows = maxSubqueryRows;
+    this.maxQueryTimeout = maxQueryTimeout;
+    this.maxRequestHeaderSize = maxRequestHeaderSize;
+    this.gracefulShutdownTimeout = gracefulShutdownTimeout;
+    this.unannouncePropagationDelay = unannouncePropagationDelay;
+    this.inflateBufferSize = inflateBufferSize;
+    this.compressionLevel = compressionLevel;
+    this.enableForwardedRequestCustomizer = enableForwardedRequestCustomizer;
+    this.allowedHttpMethods = allowedHttpMethods;
+  }
+
+  public ServerConfig()
+  {
+
+  }
 
   @JsonProperty
   @Min(1)
-  private int numThreads = Math.max(10, (JvmUtils.getRuntimeInfo().getAvailableProcessors() * 17) / 16 + 2) + 30;
+  private int numThreads = getDefaultNumThreads();
 
   @JsonProperty
   @Min(1)
@@ -57,8 +106,13 @@ public class ServerConfig
   private long defaultQueryTimeout = TimeUnit.MINUTES.toMillis(5);
 
   @JsonProperty
+  @NotNull
+  @HumanReadableBytesRange(min = 1)
+  private HumanReadableBytes maxScatterGatherBytes = HumanReadableBytes.valueOf(Long.MAX_VALUE);
+
+  @JsonProperty
   @Min(1)
-  private long maxScatterGatherBytes = Long.MAX_VALUE;
+  private int maxSubqueryRows = 100000;
 
   @JsonProperty
   @Min(1)
@@ -83,6 +137,13 @@ public class ServerConfig
   @Min(-1)
   @Max(9)
   private int compressionLevel = Deflater.DEFAULT_COMPRESSION;
+
+  @JsonProperty
+  private boolean enableForwardedRequestCustomizer = false;
+
+  @JsonProperty
+  @NotNull
+  private List<String> allowedHttpMethods = ImmutableList.of();
 
   public int getNumThreads()
   {
@@ -111,7 +172,12 @@ public class ServerConfig
 
   public long getMaxScatterGatherBytes()
   {
-    return maxScatterGatherBytes;
+    return maxScatterGatherBytes.getBytes();
+  }
+
+  public int getMaxSubqueryRows()
+  {
+    return maxSubqueryRows;
   }
 
   public long getMaxQueryTimeout()
@@ -144,6 +210,16 @@ public class ServerConfig
     return compressionLevel;
   }
 
+  public boolean isEnableForwardedRequestCustomizer()
+  {
+    return enableForwardedRequestCustomizer;
+  }
+
+  @NotNull
+  public List<String> getAllowedHttpMethods()
+  {
+    return allowedHttpMethods;
+  }
 
   @Override
   public boolean equals(Object o)
@@ -159,20 +235,22 @@ public class ServerConfig
            queueSize == that.queueSize &&
            enableRequestLimit == that.enableRequestLimit &&
            defaultQueryTimeout == that.defaultQueryTimeout &&
-           maxScatterGatherBytes == that.maxScatterGatherBytes &&
+           maxScatterGatherBytes.equals(that.maxScatterGatherBytes) &&
+           maxSubqueryRows == that.maxSubqueryRows &&
            maxQueryTimeout == that.maxQueryTimeout &&
            maxRequestHeaderSize == that.maxRequestHeaderSize &&
            inflateBufferSize == that.inflateBufferSize &&
            compressionLevel == that.compressionLevel &&
-           Objects.equals(maxIdleTime, that.maxIdleTime) &&
-           Objects.equals(gracefulShutdownTimeout, that.gracefulShutdownTimeout) &&
-           Objects.equals(unannouncePropagationDelay, that.unannouncePropagationDelay);
+           enableForwardedRequestCustomizer == that.enableForwardedRequestCustomizer &&
+           maxIdleTime.equals(that.maxIdleTime) &&
+           gracefulShutdownTimeout.equals(that.gracefulShutdownTimeout) &&
+           unannouncePropagationDelay.equals(that.unannouncePropagationDelay) &&
+           allowedHttpMethods.equals(that.allowedHttpMethods);
   }
 
   @Override
   public int hashCode()
   {
-
     return Objects.hash(
         numThreads,
         queueSize,
@@ -180,12 +258,15 @@ public class ServerConfig
         maxIdleTime,
         defaultQueryTimeout,
         maxScatterGatherBytes,
+        maxSubqueryRows,
         maxQueryTimeout,
         maxRequestHeaderSize,
         gracefulShutdownTimeout,
         unannouncePropagationDelay,
         inflateBufferSize,
-        compressionLevel
+        compressionLevel,
+        enableForwardedRequestCustomizer,
+        allowedHttpMethods
     );
   }
 
@@ -199,12 +280,20 @@ public class ServerConfig
            ", maxIdleTime=" + maxIdleTime +
            ", defaultQueryTimeout=" + defaultQueryTimeout +
            ", maxScatterGatherBytes=" + maxScatterGatherBytes +
+           ", maxSubqueryRows=" + maxSubqueryRows +
            ", maxQueryTimeout=" + maxQueryTimeout +
            ", maxRequestHeaderSize=" + maxRequestHeaderSize +
            ", gracefulShutdownTimeout=" + gracefulShutdownTimeout +
            ", unannouncePropagationDelay=" + unannouncePropagationDelay +
            ", inflateBufferSize=" + inflateBufferSize +
            ", compressionLevel=" + compressionLevel +
+           ", enableForwardedRequestCustomizer=" + enableForwardedRequestCustomizer +
+           ", allowedMethods=" + allowedHttpMethods +
            '}';
+  }
+
+  public static int getDefaultNumThreads()
+  {
+    return Math.max(10, (JvmUtils.getRuntimeInfo().getAvailableProcessors() * 17) / 16 + 2) + 30;
   }
 }

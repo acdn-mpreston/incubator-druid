@@ -20,16 +20,19 @@
 package org.apache.druid.segment.transform;
 
 import org.apache.druid.data.input.InputRow;
+import org.apache.druid.data.input.InputRowListPlusRawValues;
 import org.apache.druid.data.input.Row;
 import org.apache.druid.data.input.Rows;
 import org.apache.druid.java.util.common.DateTimes;
 import org.apache.druid.query.filter.ValueMatcher;
-import org.apache.druid.query.groupby.RowBasedColumnSelectorFactory;
+import org.apache.druid.segment.RowAdapters;
+import org.apache.druid.segment.RowBasedColumnSelectorFactory;
 import org.apache.druid.segment.column.ColumnHolder;
-import org.apache.druid.segment.column.ValueType;
+import org.apache.druid.segment.column.RowSignature;
 import org.joda.time.DateTime;
 
 import javax.annotation.Nullable;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -44,7 +47,7 @@ public class Transformer
   private final ThreadLocal<Row> rowSupplierForValueMatcher = new ThreadLocal<>();
   private final ValueMatcher valueMatcher;
 
-  Transformer(final TransformSpec transformSpec, final Map<String, ValueType> rowSignature)
+  Transformer(final TransformSpec transformSpec)
   {
     for (final Transform transform : transformSpec.getTransforms()) {
       transforms.put(transform.getName(), transform.getRowFunction());
@@ -54,8 +57,10 @@ public class Transformer
       valueMatcher = transformSpec.getFilter().toFilter()
                                   .makeMatcher(
                                       RowBasedColumnSelectorFactory.create(
-                                          rowSupplierForValueMatcher,
-                                          rowSignature
+                                          RowAdapters.standardRow(),
+                                          rowSupplierForValueMatcher::get,
+                                          RowSignature.empty(),
+                                          false
                                       )
                                   );
     } else {
@@ -93,6 +98,49 @@ public class Transformer
     return transformedRow;
   }
 
+  @Nullable
+  public InputRowListPlusRawValues transform(@Nullable final InputRowListPlusRawValues row)
+  {
+    if (row == null) {
+      return null;
+    }
+
+    final InputRowListPlusRawValues inputRowListPlusRawValues;
+
+    if (transforms.isEmpty() || row.getInputRows() == null) {
+      inputRowListPlusRawValues = row;
+    } else {
+      final List<InputRow> originalRows = row.getInputRows();
+      final List<InputRow> transformedRows = new ArrayList<>(originalRows.size());
+      for (InputRow originalRow : originalRows) {
+        transformedRows.add(new TransformedInputRow(originalRow, transforms));
+      }
+      inputRowListPlusRawValues = InputRowListPlusRawValues.ofList(row.getRawValuesList(), transformedRows);
+    }
+
+    if (valueMatcher != null) {
+      if (inputRowListPlusRawValues.getInputRows() != null) {
+        // size of inputRows and rawValues are the same
+        int size = inputRowListPlusRawValues.getInputRows().size();
+        final List<InputRow> matchedRows = new ArrayList<>(size);
+        final List<Map<String, Object>> matchedVals = new ArrayList<>(size);
+
+        final List<InputRow> inputRows = inputRowListPlusRawValues.getInputRows();
+        final List<Map<String, Object>> inputVals = inputRowListPlusRawValues.getRawValuesList();
+        for (int i = 0; i < size; i++) {
+          rowSupplierForValueMatcher.set(inputRows.get(i));
+          if (valueMatcher.matches()) {
+            matchedRows.add(inputRows.get(i));
+            matchedVals.add(inputVals.get(i));
+          }
+        }
+        return InputRowListPlusRawValues.ofList(matchedVals, matchedRows);
+      }
+    }
+
+    return inputRowListPlusRawValues;
+  }
+
   public static class TransformedInputRow implements InputRow
   {
     private final InputRow row;
@@ -115,7 +163,8 @@ public class Transformer
     {
       final RowFunction transform = transforms.get(ColumnHolder.TIME_COLUMN_NAME);
       if (transform != null) {
-        return Rows.objectToNumber(ColumnHolder.TIME_COLUMN_NAME, transform.eval(row)).longValue();
+        //noinspection ConstantConditions time column is never null
+        return Rows.objectToNumber(ColumnHolder.TIME_COLUMN_NAME, transform.eval(row), true).longValue();
       } else {
         return row.getTimestampFromEpoch();
       }
@@ -159,7 +208,7 @@ public class Transformer
     {
       final RowFunction transform = transforms.get(metric);
       if (transform != null) {
-        return Rows.objectToNumber(metric, transform.eval(row));
+        return Rows.objectToNumber(metric, transform.eval(row), true);
       } else {
         return row.getMetric(metric);
       }
@@ -189,6 +238,14 @@ public class Transformer
     public int compareTo(final Row o)
     {
       return row.compareTo(o);
+    }
+
+    @Override
+    public String toString()
+    {
+      return "TransformedInputRow{" +
+             "row=" + row +
+             '}';
     }
   }
 }

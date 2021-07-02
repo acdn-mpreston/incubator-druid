@@ -21,13 +21,16 @@ package org.apache.druid.query.aggregation.datasketches.hll;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
-import com.yahoo.sketches.hll.HllSketch;
-import com.yahoo.sketches.hll.TgtHllType;
+import org.apache.datasketches.hll.HllSketch;
+import org.apache.datasketches.hll.TgtHllType;
 import org.apache.druid.query.aggregation.Aggregator;
 import org.apache.druid.query.aggregation.AggregatorUtil;
 import org.apache.druid.query.aggregation.BufferAggregator;
+import org.apache.druid.query.aggregation.VectorAggregator;
+import org.apache.druid.segment.ColumnInspector;
 import org.apache.druid.segment.ColumnSelectorFactory;
 import org.apache.druid.segment.ColumnValueSelector;
+import org.apache.druid.segment.vector.VectorColumnSelectorFactory;
 
 import javax.annotation.Nullable;
 
@@ -43,13 +46,15 @@ public class HllSketchBuildAggregatorFactory extends HllSketchAggregatorFactory
       @JsonProperty("name") final String name,
       @JsonProperty("fieldName") final String fieldName,
       @JsonProperty("lgK") @Nullable final Integer lgK,
-      @JsonProperty("tgtHllType") @Nullable final String tgtHllType)
+      @JsonProperty("tgtHllType") @Nullable final String tgtHllType,
+      @JsonProperty("round") final boolean round
+  )
   {
-    super(name, fieldName, lgK, tgtHllType);
+    super(name, fieldName, lgK, tgtHllType, round);
   }
 
   @Override
-  public String getTypeName()
+  public String getComplexTypeName()
   {
     return HllSketchModule.BUILD_TYPE_NAME;
   }
@@ -73,6 +78,24 @@ public class HllSketchBuildAggregatorFactory extends HllSketchAggregatorFactory
     final ColumnValueSelector<Object> selector = columnSelectorFactory.makeColumnValueSelector(getFieldName());
     return new HllSketchBuildBufferAggregator(
         selector,
+        getLgK(),
+        TgtHllType.valueOf(getTgtHllType()),
+        getMaxIntermediateSize()
+    );
+  }
+
+  @Override
+  public boolean canVectorize(ColumnInspector columnInspector)
+  {
+    return true;
+  }
+
+  @Override
+  public VectorAggregator factorizeVector(VectorColumnSelectorFactory selectorFactory)
+  {
+    return new HllSketchBuildVectorAggregator(
+        selectorFactory,
+        getFieldName(),
         getLgK(),
         TgtHllType.valueOf(getTgtHllType()),
         getMaxIntermediateSize()

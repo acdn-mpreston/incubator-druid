@@ -20,18 +20,17 @@
 package org.apache.druid.indexing.kafka.test;
 
 import com.google.common.collect.ImmutableMap;
-import com.google.common.io.Files;
 import kafka.server.KafkaConfig;
 import kafka.server.KafkaServer;
-import org.apache.commons.io.FileUtils;
 import org.apache.druid.indexing.kafka.KafkaConsumerConfigs;
+import org.apache.druid.java.util.common.FileUtils;
 import org.apache.druid.java.util.common.StringUtils;
+import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.common.utils.Time;
 import scala.Some;
-import scala.collection.immutable.List$;
 
 import javax.annotation.Nullable;
 import java.io.Closeable;
@@ -62,7 +61,7 @@ public class TestBroker implements Closeable
   )
   {
     this.zookeeperConnect = zookeeperConnect;
-    this.directory = directory == null ? Files.createTempDir() : directory;
+    this.directory = directory == null ? FileUtils.createTempDir() : directory;
     this.directoryCleanup = directory == null;
     this.id = id;
     this.brokerProps = brokerProps == null ? ImmutableMap.of() : brokerProps;
@@ -89,7 +88,7 @@ public class TestBroker implements Closeable
         config,
         Time.SYSTEM,
         Some.apply(StringUtils.format("TestingBroker[%d]-", id)),
-        List$.MODULE$.empty()
+        false
     );
     server.startup();
   }
@@ -101,24 +100,41 @@ public class TestBroker implements Closeable
 
   public KafkaProducer<byte[], byte[]> newProducer()
   {
-    return new KafkaProducer(producerProperties());
+    return new KafkaProducer<>(producerProperties());
+  }
+
+  public Admin newAdminClient()
+  {
+    return Admin.create(adminClientProperties());
+  }
+
+  Map<String, Object> adminClientProperties()
+  {
+    final Map<String, Object> props = new HashMap<>();
+    commonClientProperties(props);
+    return props;
   }
 
   public KafkaConsumer<byte[], byte[]> newConsumer()
   {
-    return new KafkaConsumer(consumerProperties());
+    return new KafkaConsumer<>(consumerProperties());
   }
 
-  public Map<String, String> producerProperties()
+  public Map<String, Object> producerProperties()
   {
-    final Map<String, String> props = new HashMap<>();
-    props.put("bootstrap.servers", StringUtils.format("localhost:%d", getPort()));
+    final Map<String, Object> props = new HashMap<>();
+    commonClientProperties(props);
     props.put("key.serializer", ByteArraySerializer.class.getName());
     props.put("value.serializer", ByteArraySerializer.class.getName());
     props.put("acks", "all");
     props.put("enable.idempotence", "true");
     props.put("transactional.id", String.valueOf(RANDOM.nextInt()));
     return props;
+  }
+
+  void commonClientProperties(Map<String, Object> props)
+  {
+    props.put("bootstrap.servers", StringUtils.format("localhost:%d", getPort()));
   }
 
   public Map<String, Object> consumerProperties()
@@ -136,7 +152,7 @@ public class TestBroker implements Closeable
       server.awaitShutdown();
     }
     if (directoryCleanup) {
-      FileUtils.forceDelete(directory);
+      FileUtils.deleteDirectory(directory);
     }
   }
 }

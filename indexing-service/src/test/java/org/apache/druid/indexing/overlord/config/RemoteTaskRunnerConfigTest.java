@@ -20,19 +20,31 @@
 package org.apache.druid.indexing.overlord.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.collect.ImmutableList;
+import com.google.inject.Injector;
+import com.google.inject.ProvisionException;
+import org.apache.druid.guice.GuiceInjectors;
+import org.apache.druid.guice.IndexingServiceModuleHelper;
+import org.apache.druid.guice.JsonConfigProvider;
 import org.apache.druid.guice.JsonConfigurator;
 import org.apache.druid.jackson.DefaultObjectMapper;
 import org.joda.time.Period;
 import org.junit.Assert;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.ExpectedException;
 
 import java.io.IOException;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Properties;
 
 public class RemoteTaskRunnerConfigTest
 {
-  private static final ObjectMapper mapper = new DefaultObjectMapper();
+  @Rule
+  public ExpectedException expectedException = ExpectedException.none();
+
+  private static final ObjectMapper MAPPER = new DefaultObjectMapper();
   private static final Period DEFAULT_TIMEOUT = Period.ZERO;
   private static final String DEFAULT_VERSION = "";
   private static final long DEFAULT_MAX_ZNODE = 10 * 1024;
@@ -44,7 +56,7 @@ public class RemoteTaskRunnerConfigTest
   @Test
   public void testIsJsonConfiguratable()
   {
-    JsonConfigurator.verifyClazzIsConfigurable(mapper, RemoteTaskRunnerConfig.class, null);
+    JsonConfigurator.verifyClazzIsConfigurable(MAPPER, RemoteTaskRunnerConfig.class, null);
   }
 
   @Test
@@ -793,9 +805,52 @@ public class RemoteTaskRunnerConfigTest
     );
   }
 
+  @Test
+  public void testMaxZnodeBytesLowerThanExpected()
+  {
+    final Injector injector = GuiceInjectors.makeStartupInjectorWithModules(ImmutableList.of(
+        binder -> IndexingServiceModuleHelper.configureTaskRunnerConfigs(binder))
+    );
+
+    this.expectedException.expect(ProvisionException.class);
+    this.expectedException.expectMessage("maxZnodeBytes must be in the range of [10KiB, 2GiB)");
+
+    Properties props = new Properties();
+    props.put(IndexingServiceModuleHelper.INDEXER_RUNNER_PROPERTY_PREFIX + ".maxZnodeBytes", "9KiB");
+
+    JsonConfigProvider<RemoteTaskRunnerConfig> configProvider = JsonConfigProvider.of(
+        IndexingServiceModuleHelper.INDEXER_RUNNER_PROPERTY_PREFIX,
+        RemoteTaskRunnerConfig.class
+    );
+    configProvider.inject(props, injector.getBinding(JsonConfigurator.class).getProvider().get());
+    configProvider.get().get();
+  }
+
+  @Test
+  public void testMaxZnodeBytesGreaterThanExpected()
+  {
+    final Injector injector = GuiceInjectors.makeStartupInjectorWithModules(ImmutableList.of(
+        binder -> IndexingServiceModuleHelper.configureTaskRunnerConfigs(binder))
+    );
+
+    this.expectedException.expect(ProvisionException.class);
+    this.expectedException.expectMessage("maxZnodeBytes must be in the range of [10KiB, 2GiB)");
+
+    Properties props = new Properties();
+    props.put(IndexingServiceModuleHelper.INDEXER_RUNNER_PROPERTY_PREFIX + ".maxZnodeBytes", "2GiB");
+
+    JsonConfigProvider<RemoteTaskRunnerConfig> configProvider = JsonConfigProvider.of(
+        IndexingServiceModuleHelper.INDEXER_RUNNER_PROPERTY_PREFIX,
+        RemoteTaskRunnerConfig.class
+    );
+    configProvider.inject(props, injector.getBinding(JsonConfigurator.class).getProvider().get());
+    configProvider.get().get();
+  }
+
+
   private RemoteTaskRunnerConfig reflect(RemoteTaskRunnerConfig config) throws IOException
   {
-    return mapper.readValue(mapper.writeValueAsString(config), RemoteTaskRunnerConfig.class);
+    return MAPPER.readValue(MAPPER.writeValueAsString(config), RemoteTaskRunnerConfig.class);
   }
 
   private RemoteTaskRunnerConfig generateRemoteTaskRunnerConfig(
@@ -820,6 +875,6 @@ public class RemoteTaskRunnerConfigTest
     objectMap.put("maxRetriesBeforeBlacklist", maxRetriesBeforeBlacklist);
     objectMap.put("workerBlackListBackoffTime", taskBlackListBackoffTime);
     objectMap.put("workerBlackListCleanupPeriod", taskBlackListCleanupPeriod);
-    return mapper.convertValue(objectMap, RemoteTaskRunnerConfig.class);
+    return MAPPER.convertValue(objectMap, RemoteTaskRunnerConfig.class);
   }
 }

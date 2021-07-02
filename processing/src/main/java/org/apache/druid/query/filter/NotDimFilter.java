@@ -27,12 +27,12 @@ import com.google.common.collect.RangeSet;
 import org.apache.druid.segment.filter.NotFilter;
 
 import java.nio.ByteBuffer;
-import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  */
-public class NotDimFilter implements DimFilter
+public class NotDimFilter extends AbstractOptimizableDimFilter implements DimFilter
 {
 
   private final DimFilter field;
@@ -60,10 +60,17 @@ public class NotDimFilter implements DimFilter
     return ByteBuffer.allocate(1 + subKey.length).put(DimFilterUtils.NOT_CACHE_ID).put(subKey).array();
   }
 
+  @SuppressWarnings("ObjectEquality")
   @Override
   public DimFilter optimize()
   {
-    return new NotDimFilter(this.getField().optimize());
+    final DimFilter optimized = this.getField().optimize();
+    if (optimized == FalseDimFilter.instance()) {
+      return TrueDimFilter.instance();
+    } else if (optimized == TrueDimFilter.instance()) {
+      return FalseDimFilter.instance();
+    }
+    return new NotDimFilter(optimized);
   }
 
   @Override
@@ -102,7 +109,7 @@ public class NotDimFilter implements DimFilter
   }
 
   @Override
-  public HashSet<String> getRequiredColumns()
+  public Set<String> getRequiredColumns()
   {
     return field.getRequiredColumns();
   }

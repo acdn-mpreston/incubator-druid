@@ -25,8 +25,6 @@ import com.google.inject.Inject;
 import org.apache.curator.framework.CuratorFramework;
 import org.apache.curator.framework.recipes.cache.ChildData;
 import org.apache.curator.framework.recipes.cache.PathChildrenCache;
-import org.apache.curator.framework.recipes.cache.PathChildrenCacheEvent;
-import org.apache.curator.framework.recipes.cache.PathChildrenCacheListener;
 import org.apache.curator.utils.ZKPaths;
 import org.apache.druid.java.util.common.concurrent.Execs;
 import org.apache.druid.java.util.common.lifecycle.LifecycleStart;
@@ -35,11 +33,15 @@ import org.apache.druid.java.util.emitter.EmittingLogger;
 import org.apache.druid.segment.loading.SegmentLoaderConfig;
 import org.apache.druid.server.initialization.ZkPathsConfig;
 
+import javax.annotation.Nullable;
 import java.io.IOException;
 import java.util.concurrent.ExecutorService;
 
 /**
- * Use {@link org.apache.druid.server.coordinator.HttpLoadQueuePeon} for segment load/drops.
+ * We are gradually migrating to {@link org.apache.druid.server.http.SegmentListerResource} for driving segment
+ * loads/drops on data server processes.
+ *
+ * However, this class is still the default mechanism as of this writing (2020-12-03).
  */
 @Deprecated
 public class ZkCoordinator
@@ -54,6 +56,7 @@ public class ZkCoordinator
   private final DruidServerMetadata me;
   private final CuratorFramework curator;
 
+  @Nullable
   private volatile PathChildrenCache loadQueueCache;
   private volatile boolean started = false;
   private final ExecutorService segmentLoadUnloadService;
@@ -107,22 +110,17 @@ public class ZkCoordinator
         curator.newNamespaceAwareEnsurePath(liveSegmentsLocation).ensure(curator.getZookeeperClient());
 
         loadQueueCache.getListenable().addListener(
-            new PathChildrenCacheListener()
-            {
-              @Override
-              public void childEvent(CuratorFramework client, PathChildrenCacheEvent event)
-              {
-                final ChildData child = event.getData();
-                switch (event.getType()) {
-                  case CHILD_ADDED:
-                    childAdded(child);
-                    break;
-                  case CHILD_REMOVED:
-                    log.info("zNode[%s] was removed", event.getData().getPath());
-                    break;
-                  default:
-                    log.info("Ignoring event[%s]", event);
-                }
+            (client, event) -> {
+              final ChildData child = event.getData();
+              switch (event.getType()) {
+                case CHILD_ADDED:
+                  childAdded(child);
+                  break;
+                case CHILD_REMOVED:
+                  log.info("zNode[%s] was removed", event.getData().getPath());
+                  break;
+                default:
+                  log.info("Ignoring event[%s]", event);
               }
             }
 
@@ -151,25 +149,20 @@ public class ZkCoordinator
 
         finalRequest.go(
             dataSegmentChangeHandler,
-            new DataSegmentChangeCallback()
-            {
-              @Override
-              public void execute()
-              {
+            () -> {
+              try {
+                curator.delete().guaranteed().forPath(path);
+                log.info("Completed request [%s]", finalRequest.asString());
+              }
+              catch (Exception e) {
                 try {
                   curator.delete().guaranteed().forPath(path);
-                  log.info("Completed request [%s]", finalRequest.asString());
                 }
-                catch (Exception e) {
-                  try {
-                    curator.delete().guaranteed().forPath(path);
-                  }
-                  catch (Exception e1) {
-                    log.error(e1, "Failed to delete zNode[%s], but ignoring exception.", path);
-                  }
-                  log.error(e, "Exception while removing zNode[%s]", path);
-                  throw new RuntimeException(e);
+                catch (Exception e1) {
+                  log.error(e1, "Failed to delete zNode[%s], but ignoring exception.", path);
                 }
+                log.error(e, "Exception while removing zNode[%s]", path);
+                throw new RuntimeException(e);
               }
             }
         );

@@ -21,10 +21,9 @@ package org.apache.druid.indexing.kafka.supervisor;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 import org.apache.druid.indexing.kafka.KafkaIndexTaskTuningConfig;
-import org.apache.druid.indexing.seekablestream.SeekableStreamIndexTaskTuningConfig;
 import org.apache.druid.indexing.seekablestream.supervisor.SeekableStreamSupervisorTuningConfig;
 import org.apache.druid.segment.IndexSpec;
-import org.apache.druid.segment.indexing.TuningConfigs;
+import org.apache.druid.segment.incremental.AppendableIndexSpec;
 import org.apache.druid.segment.writeout.SegmentWriteOutMediumFactory;
 import org.joda.time.Duration;
 import org.joda.time.Period;
@@ -35,8 +34,6 @@ import java.io.File;
 public class KafkaSupervisorTuningConfig extends KafkaIndexTaskTuningConfig
     implements SeekableStreamSupervisorTuningConfig
 {
-  private static final String DEFAULT_OFFSET_FETCH_PERIOD = "PT30S";
-
   private final Integer workerThreads;
   private final Integer chatThreads;
   private final Long chatRetries;
@@ -44,17 +41,49 @@ public class KafkaSupervisorTuningConfig extends KafkaIndexTaskTuningConfig
   private final Duration shutdownTimeout;
   private final Duration offsetFetchPeriod;
 
+  public static KafkaSupervisorTuningConfig defaultConfig()
+  {
+    return new KafkaSupervisorTuningConfig(
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+    );
+  }
+
   public KafkaSupervisorTuningConfig(
+      @JsonProperty("appendableIndexSpec") @Nullable AppendableIndexSpec appendableIndexSpec,
       @JsonProperty("maxRowsInMemory") Integer maxRowsInMemory,
       @JsonProperty("maxBytesInMemory") Long maxBytesInMemory,
+      @JsonProperty("skipBytesInMemoryOverheadCheck") @Nullable Boolean skipBytesInMemoryOverheadCheck,
       @JsonProperty("maxRowsPerSegment") Integer maxRowsPerSegment,
       @JsonProperty("maxTotalRows") Long maxTotalRows,
       @JsonProperty("intermediatePersistPeriod") Period intermediatePersistPeriod,
       @JsonProperty("basePersistDirectory") File basePersistDirectory,
       @JsonProperty("maxPendingPersists") Integer maxPendingPersists,
       @JsonProperty("indexSpec") IndexSpec indexSpec,
-      // This parameter is left for compatibility when reading existing configs, to be removed in Druid 0.12.
-      @JsonProperty("buildV9Directly") Boolean buildV9Directly,
+      @JsonProperty("indexSpecForIntermediatePersists") @Nullable IndexSpec indexSpecForIntermediatePersists,
       @JsonProperty("reportParseExceptions") Boolean reportParseExceptions,
       @JsonProperty("handoffConditionTimeout") Long handoffConditionTimeout,
       @JsonProperty("resetOffsetAutomatically") Boolean resetOffsetAutomatically,
@@ -72,15 +101,17 @@ public class KafkaSupervisorTuningConfig extends KafkaIndexTaskTuningConfig
   )
   {
     super(
+        appendableIndexSpec,
         maxRowsInMemory,
         maxBytesInMemory,
+        skipBytesInMemoryOverheadCheck,
         maxRowsPerSegment,
         maxTotalRows,
         intermediatePersistPeriod,
         basePersistDirectory,
         maxPendingPersists,
         indexSpec,
-        true,
+        indexSpecForIntermediatePersists,
         reportParseExceptions,
         handoffConditionTimeout,
         resetOffsetAutomatically,
@@ -139,6 +170,18 @@ public class KafkaSupervisorTuningConfig extends KafkaIndexTaskTuningConfig
     return shutdownTimeout;
   }
 
+  @Override
+  public Duration getRepartitionTransitionDuration()
+  {
+    // Stopping tasks early for Kafka ingestion on partition set change is not supported yet,
+    // just return a default for now.
+    return SeekableStreamSupervisorTuningConfig.defaultDuration(
+        null,
+        SeekableStreamSupervisorTuningConfig.DEFAULT_REPARTITION_TRANSITION_DURATION
+    );
+  }
+
+  @Override
   @JsonProperty
   public Duration getOffsetFetchPeriod()
   {
@@ -152,7 +195,8 @@ public class KafkaSupervisorTuningConfig extends KafkaIndexTaskTuningConfig
            "maxRowsInMemory=" + getMaxRowsInMemory() +
            ", maxRowsPerSegment=" + getMaxRowsPerSegment() +
            ", maxTotalRows=" + getMaxTotalRows() +
-           ", maxBytesInMemory=" + TuningConfigs.getMaxBytesInMemoryOrDefault(getMaxBytesInMemory()) +
+           ", maxBytesInMemory=" + getMaxBytesInMemoryOrDefault() +
+           ", skipBytesInMemoryOverheadCheck=" + isSkipBytesInMemoryOverheadCheck() +
            ", intermediatePersistPeriod=" + getIntermediatePersistPeriod() +
            ", basePersistDirectory=" + getBasePersistDirectory() +
            ", maxPendingPersists=" + getMaxPendingPersists() +
@@ -175,18 +219,20 @@ public class KafkaSupervisorTuningConfig extends KafkaIndexTaskTuningConfig
   }
 
   @Override
-  public SeekableStreamIndexTaskTuningConfig convertToTaskTuningConfig()
+  public KafkaIndexTaskTuningConfig convertToTaskTuningConfig()
   {
     return new KafkaIndexTaskTuningConfig(
+        getAppendableIndexSpec(),
         getMaxRowsInMemory(),
         getMaxBytesInMemory(),
+        isSkipBytesInMemoryOverheadCheck(),
         getMaxRowsPerSegment(),
         getMaxTotalRows(),
         getIntermediatePersistPeriod(),
         getBasePersistDirectory(),
         getMaxPendingPersists(),
         getIndexSpec(),
-        true,
+        getIndexSpecForIntermediatePersists(),
         isReportParseExceptions(),
         getHandoffConditionTimeout(),
         isResetOffsetAutomatically(),

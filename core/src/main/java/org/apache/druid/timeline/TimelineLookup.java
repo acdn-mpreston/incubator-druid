@@ -19,13 +19,14 @@
 
 package org.apache.druid.timeline;
 
-import org.apache.druid.timeline.partition.PartitionHolder;
+import org.apache.druid.timeline.partition.PartitionChunk;
 import org.joda.time.Interval;
 
+import javax.annotation.Nullable;
 import java.util.List;
 
 
-public interface TimelineLookup<VersionType, ObjectType>
+public interface TimelineLookup<VersionType, ObjectType extends Overshadowable<ObjectType>>
 {
 
   /**
@@ -50,5 +51,9 @@ public interface TimelineLookup<VersionType, ObjectType>
    */
   List<TimelineObjectHolder<VersionType, ObjectType>> lookupWithIncompletePartitions(Interval interval);
 
-  PartitionHolder<ObjectType> findEntry(Interval interval, VersionType version);
+  /**
+   * Finds the {@link PartitionChunk} for the given time interval, version and chunk number.
+   */
+  @Nullable
+  PartitionChunk<ObjectType> findChunk(Interval interval, VersionType version, int partitionNum);
 }

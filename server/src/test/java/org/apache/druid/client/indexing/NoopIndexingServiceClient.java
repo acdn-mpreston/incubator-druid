@@ -28,11 +28,12 @@ import javax.annotation.Nullable;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 public class NoopIndexingServiceClient implements IndexingServiceClient
 {
   @Override
-  public void killSegments(String dataSource, Interval interval)
+  public void killUnusedSegments(String idPrefix, String dataSource, Interval interval)
   {
 
   }
@@ -45,10 +46,12 @@ public class NoopIndexingServiceClient implements IndexingServiceClient
 
   @Override
   public String compactSegments(
+      String idPrefix,
       List<DataSegment> segments,
-      @Nullable Long targetCompactionSizeBytes,
       int compactionTaskPriority,
-      @Nullable ClientCompactQueryTuningConfig tuningConfig,
+      @Nullable ClientCompactionTaskQueryTuningConfig tuningConfig,
+      @Nullable ClientCompactionTaskGranularitySpec granularitySpec,
+      @Nullable Boolean dropExisting,
       @Nullable Map<String, Object> context
   )
   {
@@ -62,13 +65,13 @@ public class NoopIndexingServiceClient implements IndexingServiceClient
   }
 
   @Override
-  public String runTask(Object taskObject)
+  public String runTask(String taskId, Object taskObject)
   {
     return null;
   }
 
   @Override
-  public String killTask(String taskId)
+  public String cancelTask(String taskId)
   {
     return null;
   }
@@ -85,6 +88,12 @@ public class NoopIndexingServiceClient implements IndexingServiceClient
     return new TaskStatusResponse(taskId, null);
   }
 
+  @Override
+  public Map<String, TaskStatus> getTaskStatuses(Set<String> taskIds)
+  {
+    return Collections.emptyMap();
+  }
+
   @Nullable
   @Override
   public TaskStatusPlus getLastCompleteTask()
@@ -96,5 +105,17 @@ public class NoopIndexingServiceClient implements IndexingServiceClient
   public TaskPayloadResponse getTaskPayload(String taskId)
   {
     return null;
+  }
+
+  @Override
+  public Map<String, List<Interval>> getLockedIntervals(Map<String, Integer> minTaskPriority)
+  {
+    return Collections.emptyMap();
+  }
+
+  @Override
+  public SamplerResponse sample(SamplerSpec samplerSpec)
+  {
+    return new SamplerResponse(0, 0, Collections.emptyList());
   }
 }

@@ -23,6 +23,7 @@ import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.annotations.VisibleForTesting;
 import org.apache.druid.indexing.overlord.DataSourceMetadata;
+import org.apache.druid.indexing.overlord.supervisor.autoscaler.LagStats;
 
 import javax.annotation.Nullable;
 import java.util.ArrayList;
@@ -48,25 +49,36 @@ public class NoopSupervisorSpec implements SupervisorSpec
   @JsonProperty("suspended")
   private boolean suspended; //ignored
 
+  @JsonProperty("type")
+  private String type; //ignored
+
+  @JsonProperty("source")
+  private String source; //ignored
+
   @VisibleForTesting
   public NoopSupervisorSpec(
       String id,
       List<String> datasources
   )
   {
-    this(id, datasources, null);
+    this(id, datasources, null, null, null);
   }
 
   @JsonCreator
   public NoopSupervisorSpec(
-      @Nullable @JsonProperty("id") String id,
-      @Nullable @JsonProperty("dataSources") List<String> datasources,
-      @Nullable @JsonProperty("suspended") Boolean suspended
+      @JsonProperty("id") @Nullable String id,
+      @JsonProperty("dataSources") @Nullable List<String> datasources,
+      @JsonProperty("suspended") @Nullable Boolean suspended,
+      @JsonProperty("type") @Nullable String type,
+      @JsonProperty("source") @Nullable String source
   )
   {
     this.id = id;
     this.datasources = datasources == null ? new ArrayList<>() : datasources;
-    this.suspended = false; // ignore
+    // these are ignored
+    this.suspended = false;
+    this.type = "noop";
+    this.source = "noop";
   }
 
   @Override
@@ -90,6 +102,20 @@ public class NoopSupervisorSpec implements SupervisorSpec
   public boolean isSuspended()
   {
     return suspended;
+  }
+
+  @Override
+  @JsonProperty("type")
+  public String getType()
+  {
+    return type;
+  }
+
+  @Override
+  @JsonProperty("source")
+  public String getSource()
+  {
+    return source;
   }
 
   @Override
@@ -125,14 +151,21 @@ public class NoopSupervisorSpec implements SupervisorSpec
       }
 
       @Override
-      public void checkpoint(
-          @Nullable Integer taskGroupId,
-          String baseSequenceName,
-          DataSourceMetadata previousCheckPoint,
-          DataSourceMetadata currentCheckPoint
-      )
+      public void checkpoint(int taskGroupId, DataSourceMetadata checkpointMetadata)
       {
 
+      }
+
+      @Override
+      public LagStats computeLagStats()
+      {
+        return new LagStats(0, 0, 0);
+      }
+
+      @Override
+      public int getActiveTaskGroupsCount()
+      {
+        return -1;
       }
     };
   }

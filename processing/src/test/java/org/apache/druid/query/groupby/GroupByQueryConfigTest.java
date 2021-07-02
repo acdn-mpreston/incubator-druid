@@ -56,6 +56,7 @@ public class GroupByQueryConfigTest
     Assert.assertEquals(4, config.getMaxOnDiskStorage());
     Assert.assertEquals(5, config.getMaxMergingDictionarySize());
     Assert.assertEquals(6.0, config.getBufferGrouperMaxLoadFactor(), 0.0);
+    Assert.assertFalse(config.isApplyLimitPushDownToSegment());
   }
 
   @Test
@@ -78,6 +79,7 @@ public class GroupByQueryConfigTest
     Assert.assertEquals(4, config2.getMaxOnDiskStorage());
     Assert.assertEquals(5, config2.getMaxMergingDictionarySize());
     Assert.assertEquals(6.0, config2.getBufferGrouperMaxLoadFactor(), 0.0);
+    Assert.assertFalse(config2.isApplyLimitPushDownToSegment());
   }
 
   @Test
@@ -94,7 +96,8 @@ public class GroupByQueryConfigTest
                             "groupByStrategy", "v1",
                             "maxOnDiskStorage", 0,
                             "maxResults", 2,
-                            "maxMergingDictionarySize", 3
+                            "maxMergingDictionarySize", 3,
+                            "applyLimitPushDownToSegment", true
                         )
                     )
                     .build()
@@ -108,5 +111,6 @@ public class GroupByQueryConfigTest
     Assert.assertEquals(0, config2.getMaxOnDiskStorage());
     Assert.assertEquals(3, config2.getMaxMergingDictionarySize());
     Assert.assertEquals(6.0, config2.getBufferGrouperMaxLoadFactor(), 0.0);
+    Assert.assertTrue(config2.isApplyLimitPushDownToSegment());
   }
 }

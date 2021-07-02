@@ -16,8 +16,12 @@
  * limitations under the License.
  */
 
+@import '../../../blueprint-overrides/common/colors';
+
 .column-tree {
-  background: #27313b;
+  .bp3-dark & {
+    background: $dark-gray3;
+  }
 
   .schema-selector {
     position: absolute;
@@ -39,5 +43,11 @@
     .bp3-tree-node-content-1 {
       padding-left: 0;
     }
+  }
+
+  .bp3-popover2-target {
+    width: 188px;
+    display: inline-block;
+    cursor: pointer;
   }
 }

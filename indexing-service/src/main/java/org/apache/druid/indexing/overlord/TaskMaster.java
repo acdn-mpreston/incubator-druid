@@ -30,6 +30,8 @@ import org.apache.druid.indexing.common.actions.TaskActionClient;
 import org.apache.druid.indexing.common.actions.TaskActionClientFactory;
 import org.apache.druid.indexing.common.task.Task;
 import org.apache.druid.indexing.overlord.autoscaling.ScalingStats;
+import org.apache.druid.indexing.overlord.config.DefaultTaskConfig;
+import org.apache.druid.indexing.overlord.config.TaskLockConfig;
 import org.apache.druid.indexing.overlord.config.TaskQueueConfig;
 import org.apache.druid.indexing.overlord.helpers.OverlordHelperManager;
 import org.apache.druid.indexing.overlord.supervisor.SupervisorManager;
@@ -41,7 +43,9 @@ import org.apache.druid.java.util.emitter.service.ServiceEmitter;
 import org.apache.druid.server.DruidNode;
 import org.apache.druid.server.coordinator.CoordinatorOverlordServiceConfig;
 import org.apache.druid.server.metrics.TaskCountStatsProvider;
+import org.apache.druid.server.metrics.TaskSlotCountStatsProvider;
 
+import javax.annotation.Nullable;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
@@ -49,7 +53,7 @@ import java.util.concurrent.locks.ReentrantLock;
 /**
  * Encapsulates the indexer leadership lifecycle.
  */
-public class TaskMaster implements TaskCountStatsProvider
+public class TaskMaster implements TaskCountStatsProvider, TaskSlotCountStatsProvider
 {
   private static final EmittingLogger log = new EmittingLogger(TaskMaster.class);
 
@@ -74,7 +78,9 @@ public class TaskMaster implements TaskCountStatsProvider
 
   @Inject
   public TaskMaster(
+      final TaskLockConfig taskLockConfig,
       final TaskQueueConfig taskQueueConfig,
+      final DefaultTaskConfig defaultTaskConfig,
       final TaskLockbox taskLockbox,
       final TaskStorage taskStorage,
       final TaskActionClientFactory taskActionClientFactory,
@@ -110,7 +116,9 @@ public class TaskMaster implements TaskCountStatsProvider
           taskLockbox.syncFromStorage();
           taskRunner = runnerFactory.build();
           taskQueue = new TaskQueue(
+              taskLockConfig,
               taskQueueConfig,
+              defaultTaskConfig,
               taskStorage,
               taskRunner,
               taskActionClientFactory,
@@ -333,6 +341,66 @@ public class TaskMaster implements TaskCountStatsProvider
     }
     catch (Exception ex) {
       // fail silently since we are stopping anyway
+    }
+  }
+
+  @Override
+  @Nullable
+  public Long getTotalTaskSlotCount()
+  {
+    Optional<TaskRunner> taskRunner = getTaskRunner();
+    if (taskRunner.isPresent()) {
+      return taskRunner.get().getTotalTaskSlotCount();
+    } else {
+      return null;
+    }
+  }
+
+  @Override
+  @Nullable
+  public Long getIdleTaskSlotCount()
+  {
+    Optional<TaskRunner> taskRunner = getTaskRunner();
+    if (taskRunner.isPresent()) {
+      return taskRunner.get().getIdleTaskSlotCount();
+    } else {
+      return null;
+    }
+  }
+
+  @Override
+  @Nullable
+  public Long getUsedTaskSlotCount()
+  {
+    Optional<TaskRunner> taskRunner = getTaskRunner();
+    if (taskRunner.isPresent()) {
+      return taskRunner.get().getUsedTaskSlotCount();
+    } else {
+      return null;
+    }
+  }
+
+  @Override
+  @Nullable
+  public Long getLazyTaskSlotCount()
+  {
+    Optional<TaskRunner> taskRunner = getTaskRunner();
+    if (taskRunner.isPresent()) {
+      return taskRunner.get().getLazyTaskSlotCount();
+    } else {
+      return null;
+    }
+  }
+
+  @Override
+  @Nullable
+  public Long getBlacklistedTaskSlotCount()
+  {
+    Optional<TaskRunner> taskRunner = getTaskRunner();
+    if (taskRunner.isPresent()) {
+      return taskRunner.get().getBlacklistedTaskSlotCount();
+    } else {
+      return null;
     }
   }
 }

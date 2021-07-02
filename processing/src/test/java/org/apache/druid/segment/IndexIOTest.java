@@ -19,6 +19,7 @@
 
 package org.apache.druid.segment;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.base.Function;
 import com.google.common.collect.Collections2;
 import com.google.common.collect.ImmutableList;
@@ -26,8 +27,10 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
+import org.apache.druid.common.config.NullHandling;
 import org.apache.druid.data.input.MapBasedInputRow;
 import org.apache.druid.data.input.impl.DimensionsSpec;
+import org.apache.druid.jackson.DefaultObjectMapper;
 import org.apache.druid.java.util.common.Intervals;
 import org.apache.druid.java.util.common.UOE;
 import org.apache.druid.query.aggregation.Aggregator;
@@ -39,6 +42,8 @@ import org.apache.druid.segment.incremental.IncrementalIndex;
 import org.apache.druid.segment.incremental.IncrementalIndexAdapter;
 import org.apache.druid.segment.incremental.IncrementalIndexSchema;
 import org.apache.druid.segment.incremental.IndexSizeExceededException;
+import org.apache.druid.segment.incremental.OnheapIncrementalIndex;
+import org.apache.druid.testing.InitializedNullHandlingTest;
 import org.joda.time.Interval;
 import org.junit.Assert;
 import org.junit.Before;
@@ -47,6 +52,7 @@ import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 
 import javax.annotation.Nullable;
+import java.io.File;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.BitSet;
@@ -61,7 +67,7 @@ import java.util.Objects;
  * This is mostly a test of the validator
  */
 @RunWith(Parameterized.class)
-public class IndexIOTest
+public class IndexIOTest extends InitializedNullHandlingTest
 {
   private static Interval DEFAULT_INTERVAL = Intervals.of("1970-01-01/2000-01-01");
   private static final IndexSpec INDEX_SPEC = IndexMergerTestBase.makeIndexSpec(
@@ -70,6 +76,10 @@ public class IndexIOTest
       CompressionStrategy.LZ4,
       CompressionFactory.LongEncodingStrategy.LONGS
   );
+
+  static {
+    NullHandling.initializeForTests();
+  }
 
   private static <T> List<T> filterByBitset(List<T> list, BitSet bitSet)
   {
@@ -85,7 +95,6 @@ public class IndexIOTest
   @Parameterized.Parameters(name = "{0}, {1}")
   public static Iterable<Object[]> constructionFeeder()
   {
-
     final Map<String, Object> map = ImmutableMap.of();
 
     final Map<String, Object> map00 = ImmutableMap.of(
@@ -248,7 +257,7 @@ public class IndexIOTest
     this.exception = exception;
   }
 
-  final IncrementalIndex<Aggregator> incrementalIndex1 = new IncrementalIndex.Builder()
+  final IncrementalIndex<Aggregator> incrementalIndex1 = new OnheapIncrementalIndex.Builder()
       .setIndexSchema(
           new IncrementalIndexSchema.Builder()
               .withMinTimestamp(DEFAULT_INTERVAL.getStart().getMillis())
@@ -263,9 +272,9 @@ public class IndexIOTest
               .build()
       )
       .setMaxRowCount(1000000)
-      .buildOnheap();
+      .build();
 
-  final IncrementalIndex<Aggregator> incrementalIndex2 = new IncrementalIndex.Builder()
+  final IncrementalIndex<Aggregator> incrementalIndex2 = new OnheapIncrementalIndex.Builder()
       .setIndexSchema(
           new IncrementalIndexSchema.Builder()
               .withMinTimestamp(DEFAULT_INTERVAL.getStart().getMillis())
@@ -280,7 +289,7 @@ public class IndexIOTest
               .build()
       )
       .setMaxRowCount(1000000)
-      .buildOnheap();
+      .build();
 
   IndexableAdapter adapter1;
   IndexableAdapter adapter2;
@@ -330,6 +339,68 @@ public class IndexIOTest
       if (ex != null) {
         throw ex;
       }
+    }
+  }
+
+  @Test
+  public void testLoadSegmentDamagedFileWithLazy()
+  {
+    final ObjectMapper mapper = new DefaultObjectMapper();
+    final IndexIO indexIO = new IndexIO(mapper, () -> 0);
+    String path = this.getClass().getClassLoader().getResource("v9SegmentPersistDir/segmentWithDamagedFile/").getPath();
+
+    ForkSegmentLoadDropHandler segmentLoadDropHandler = new ForkSegmentLoadDropHandler();
+    ForkSegment segment = new ForkSegment(true);
+    Assert.assertTrue(segment.getSegmentExist());
+    File inDir = new File(path);
+    Exception e = null;
+
+    try {
+      QueryableIndex queryableIndex = indexIO.loadIndex(inDir, true, () -> segmentLoadDropHandler.removeSegment(segment));
+      Assert.assertNotNull(queryableIndex);
+      queryableIndex.getDimensionHandlers();
+      List<String> columnNames = queryableIndex.getColumnNames();
+      for (String columnName : columnNames) {
+        queryableIndex.getColumnHolder(columnName).toString();
+      }
+    }
+    catch (Exception ex) {
+      // Do nothing. Can ignore exceptions here.
+      e = ex;
+    }
+    Assert.assertNotNull(e);
+    Assert.assertFalse(segment.getSegmentExist());
+
+  }
+
+  private static class ForkSegmentLoadDropHandler
+  {
+    public void addSegment()
+    {
+    }
+    public void removeSegment(ForkSegment segment)
+    {
+      segment.setSegmentExist(false);
+    }
+  }
+
+  private static class ForkSegment
+  {
+    private Boolean segmentExist;
+
+    ForkSegment(Boolean segmentExist)
+    {
+      this.segmentExist = segmentExist;
+    }
+
+    void setSegmentExist(Boolean value)
+    {
+      this.segmentExist = value;
+    }
+
+    Boolean getSegmentExist()
+    {
+      return this.segmentExist;
     }
   }
 }

@@ -19,16 +19,11 @@
 
 package org.apache.druid.segment;
 
+/**
+ * @deprecated use {@link Segment} directly as this does nothing
+ */
+@Deprecated
 public abstract class AbstractSegment implements Segment
 {
-  @Override
-  public <T> T as(Class<T> clazz)
-  {
-    if (clazz.equals(QueryableIndex.class)) {
-      return (T) asQueryableIndex();
-    } else if (clazz.equals(StorageAdapter.class)) {
-      return (T) asStorageAdapter();
-    }
-    return null;
-  }
+  // i used to have a purpose
 }

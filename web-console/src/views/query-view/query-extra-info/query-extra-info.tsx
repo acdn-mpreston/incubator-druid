@@ -16,111 +16,93 @@
  * limitations under the License.
  */
 
-import {
-  Button,
-  Intent,
-  Menu,
-  MenuDivider,
-  MenuItem,
-  Popover,
-  Position,
-  Tooltip,
-} from '@blueprintjs/core';
+import { Button, Intent, Menu, MenuDivider, MenuItem, Position } from '@blueprintjs/core';
 import { IconNames } from '@blueprintjs/icons';
+import { Popover2, Tooltip2 } from '@blueprintjs/popover2';
 import copy from 'copy-to-clipboard';
-import React from 'react';
+import { QueryResult } from 'druid-query-toolkit';
+import React, { MouseEvent } from 'react';
 
-import { AppToaster } from '../../../singletons/toaster';
+import { AppToaster } from '../../../singletons';
 import { pluralIfNeeded } from '../../../utils';
 
 import './query-extra-info.scss';
 
-export interface QueryExtraInfoData {
-  queryId: string | null;
-  sqlQueryId: string | null;
-  startTime: Date;
-  endTime: Date;
-  numResults: number;
-  wrappedLimit?: number;
-}
-
 export interface QueryExtraInfoProps {
-  queryExtraInfo: QueryExtraInfoData;
+  queryResult: QueryResult;
   onDownload: (filename: string, format: string) => void;
+  onLoadMore: () => void;
 }
 
-export class QueryExtraInfo extends React.PureComponent<QueryExtraInfoProps> {
-  render() {
-    const { queryExtraInfo } = this.props;
+export const QueryExtraInfo = React.memo(function QueryExtraInfo(props: QueryExtraInfoProps) {
+  const { queryResult, onDownload, onLoadMore } = props;
+  const wrapQueryLimit = queryResult.getSqlOuterLimit();
+  const hasMoreResults = queryResult.getNumResults() === wrapQueryLimit;
 
-    const downloadMenu = (
-      <Menu className="download-format-menu">
-        <MenuDivider title="Download as:" />
-        <MenuItem text="CSV" onClick={() => this.handleDownload('csv')} />
-        <MenuItem text="TSV" onClick={() => this.handleDownload('tsv')} />
-        <MenuItem text="JSON (new line delimited)" onClick={() => this.handleDownload('json')} />
-      </Menu>
-    );
-
-    let resultCount: string;
-    if (queryExtraInfo.wrappedLimit && queryExtraInfo.numResults === queryExtraInfo.wrappedLimit) {
-      resultCount = `${queryExtraInfo.numResults - 1}+ results`;
+  function handleQueryInfoClick(e: MouseEvent<HTMLDivElement>) {
+    if (e.altKey) {
+      if (hasMoreResults) {
+        onLoadMore();
+      }
     } else {
-      resultCount = pluralIfNeeded(queryExtraInfo.numResults, 'result');
+      const id = queryResult.queryId || queryResult.sqlQueryId;
+      if (!id) return;
+
+      copy(id, { format: 'text/plain' });
+      AppToaster.show({
+        message: 'Query ID copied to clipboard',
+        intent: Intent.SUCCESS,
+      });
     }
-
-    const elapsed = queryExtraInfo.endTime.valueOf() - queryExtraInfo.startTime.valueOf();
-
-    let tooltipContent: JSX.Element | undefined;
-    if (queryExtraInfo.queryId) {
-      tooltipContent = (
-        <>
-          Query ID: <strong>{queryExtraInfo.queryId}</strong> (click to copy)
-        </>
-      );
-    } else if (queryExtraInfo.sqlQueryId) {
-      tooltipContent = (
-        <>
-          SQL query ID: <strong>{queryExtraInfo.sqlQueryId}</strong> (click to copy)
-        </>
-      );
-    }
-
-    return (
-      <div className="query-extra-info">
-        <div className="query-info" onClick={this.handleQueryInfoClick}>
-          <Tooltip content={tooltipContent} hoverOpenDelay={500}>
-            {`${resultCount} in ${(elapsed / 1000).toFixed(2)}s`}
-          </Tooltip>
-        </div>
-        <Popover
-          className="download-button"
-          content={downloadMenu}
-          position={Position.BOTTOM_RIGHT}
-        >
-          <Button icon={IconNames.DOWNLOAD} minimal />
-        </Popover>
-      </div>
-    );
   }
 
-  private handleQueryInfoClick = () => {
-    const { queryExtraInfo } = this.props;
-    const id = queryExtraInfo.queryId || queryExtraInfo.sqlQueryId;
-    if (!id) return;
-
-    copy(id, { format: 'text/plain' });
-    AppToaster.show({
-      message: 'Query ID copied to clipboard',
-      intent: Intent.SUCCESS,
-    });
-  };
-
-  private handleDownload = (format: string) => {
-    const { queryExtraInfo, onDownload } = this.props;
-    const id = queryExtraInfo.queryId || queryExtraInfo.sqlQueryId;
+  function handleDownload(format: string) {
+    const id = queryResult.queryId || queryResult.sqlQueryId;
     if (!id) return;
 
     onDownload(`query-${id}.${format}`, format);
-  };
-}
+  }
+
+  const downloadMenu = (
+    <Menu className="download-format-menu">
+      <MenuDivider title="Download as:" />
+      <MenuItem text="CSV" onClick={() => handleDownload('csv')} />
+      <MenuItem text="TSV" onClick={() => handleDownload('tsv')} />
+      <MenuItem text="JSON (new line delimited)" onClick={() => handleDownload('json')} />
+    </Menu>
+  );
+
+  const resultCount = hasMoreResults
+    ? `${queryResult.getNumResults() - 1}+ results`
+    : pluralIfNeeded(queryResult.getNumResults(), 'result');
+
+  let tooltipContent: JSX.Element | undefined;
+  if (queryResult.queryId) {
+    tooltipContent = (
+      <>
+        Query ID: <strong>{queryResult.queryId}</strong> (click to copy)
+      </>
+    );
+  } else if (queryResult.sqlQueryId) {
+    tooltipContent = (
+      <>
+        SQL query ID: <strong>{queryResult.sqlQueryId}</strong> (click to copy)
+      </>
+    );
+  }
+
+  return (
+    <div className="query-extra-info">
+      {typeof queryResult.queryDuration !== 'undefined' && (
+        <div className="query-info" onClick={handleQueryInfoClick}>
+          <Tooltip2 content={tooltipContent} hoverOpenDelay={500} placement="top-start">
+            {`${resultCount} in ${(queryResult.queryDuration / 1000).toFixed(2)}s`}
+          </Tooltip2>
+        </div>
+      )}
+      <Popover2 className="download-button" content={downloadMenu} position={Position.BOTTOM_RIGHT}>
+        <Button icon={IconNames.DOWNLOAD} minimal />
+      </Popover2>
+    </div>
+  );
+});

@@ -21,10 +21,13 @@ package org.apache.druid.indexing.kafka;
 
 import com.fasterxml.jackson.databind.Module;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import nl.jqno.equalsverifier.EqualsVerifier;
 import org.apache.druid.indexing.kafka.supervisor.KafkaSupervisorTuningConfig;
 import org.apache.druid.indexing.kafka.test.TestModifiedKafkaIndexTaskTuningConfig;
 import org.apache.druid.jackson.DefaultObjectMapper;
 import org.apache.druid.segment.IndexSpec;
+import org.apache.druid.segment.data.CompressionStrategy;
+import org.apache.druid.segment.incremental.OnheapIncrementalIndex;
 import org.apache.druid.segment.indexing.TuningConfig;
 import org.joda.time.Period;
 import org.junit.Assert;
@@ -59,12 +62,14 @@ public class KafkaIndexTaskTuningConfigTest
     );
 
     Assert.assertNotNull(config.getBasePersistDirectory());
+    Assert.assertEquals(new OnheapIncrementalIndex.Spec(), config.getAppendableIndexSpec());
     Assert.assertEquals(1000000, config.getMaxRowsInMemory());
     Assert.assertEquals(5_000_000, config.getMaxRowsPerSegment().intValue());
-    Assert.assertEquals(null, config.getMaxTotalRows());
+    Assert.assertNull(config.getMaxTotalRows());
     Assert.assertEquals(new Period("PT10M"), config.getIntermediatePersistPeriod());
     Assert.assertEquals(0, config.getMaxPendingPersists());
     Assert.assertEquals(new IndexSpec(), config.getIndexSpec());
+    Assert.assertEquals(new IndexSpec(), config.getIndexSpecForIntermediatePersists());
     Assert.assertEquals(false, config.isReportParseExceptions());
     Assert.assertEquals(0, config.getHandoffConditionTimeout());
   }
@@ -81,7 +86,10 @@ public class KafkaIndexTaskTuningConfigTest
                      + "  \"intermediatePersistPeriod\": \"PT1H\",\n"
                      + "  \"maxPendingPersists\": 100,\n"
                      + "  \"reportParseExceptions\": true,\n"
-                     + "  \"handoffConditionTimeout\": 100\n"
+                     + "  \"handoffConditionTimeout\": 100,\n"
+                     + "  \"indexSpec\": { \"metricCompression\" : \"NONE\" },\n"
+                     + "  \"indexSpecForIntermediatePersists\": { \"dimensionCompression\" : \"uncompressed\" },\n"
+                     + "  \"appendableIndexSpec\": { \"type\" : \"onheap\" }\n"
                      + "}";
 
     KafkaIndexTaskTuningConfig config = (KafkaIndexTaskTuningConfig) mapper.readValue(
@@ -95,6 +103,7 @@ public class KafkaIndexTaskTuningConfigTest
     );
 
     Assert.assertEquals(new File("/tmp/xxx"), config.getBasePersistDirectory());
+    Assert.assertEquals(new OnheapIncrementalIndex.Spec(), config.getAppendableIndexSpec());
     Assert.assertEquals(100, config.getMaxRowsInMemory());
     Assert.assertEquals(100, config.getMaxRowsPerSegment().intValue());
     Assert.assertNotEquals(null, config.getMaxTotalRows());
@@ -103,13 +112,17 @@ public class KafkaIndexTaskTuningConfigTest
     Assert.assertEquals(100, config.getMaxPendingPersists());
     Assert.assertEquals(true, config.isReportParseExceptions());
     Assert.assertEquals(100, config.getHandoffConditionTimeout());
+    Assert.assertEquals(new IndexSpec(null, null, CompressionStrategy.NONE, null), config.getIndexSpec());
+    Assert.assertEquals(new IndexSpec(null, CompressionStrategy.UNCOMPRESSED, null, null), config.getIndexSpecForIntermediatePersists());
   }
 
   @Test
   public void testConvert()
   {
     KafkaSupervisorTuningConfig original = new KafkaSupervisorTuningConfig(
+        null,
         1,
+        null,
         null,
         2,
         10L,
@@ -117,7 +130,7 @@ public class KafkaIndexTaskTuningConfigTest
         new File("/tmp/xxx"),
         4,
         new IndexSpec(),
-        true,
+        new IndexSpec(),
         true,
         5L,
         null,
@@ -135,6 +148,7 @@ public class KafkaIndexTaskTuningConfigTest
     );
     KafkaIndexTaskTuningConfig copy = (KafkaIndexTaskTuningConfig) original.convertToTaskTuningConfig();
 
+    Assert.assertEquals(original.getAppendableIndexSpec(), copy.getAppendableIndexSpec());
     Assert.assertEquals(1, copy.getMaxRowsInMemory());
     Assert.assertEquals(2, copy.getMaxRowsPerSegment().intValue());
     Assert.assertNotEquals(null, copy.getMaxTotalRows());
@@ -151,7 +165,9 @@ public class KafkaIndexTaskTuningConfigTest
   public void testSerdeWithModifiedTuningConfigAddedField() throws IOException
   {
     KafkaIndexTaskTuningConfig base = new KafkaIndexTaskTuningConfig(
+        null,
         1,
+        null,
         null,
         2,
         10L,
@@ -159,7 +175,7 @@ public class KafkaIndexTaskTuningConfigTest
         new File("/tmp/xxx"),
         4,
         new IndexSpec(),
-        true,
+        new IndexSpec(),
         true,
         5L,
         null,
@@ -175,6 +191,7 @@ public class KafkaIndexTaskTuningConfigTest
         mapper.readValue(serialized, TestModifiedKafkaIndexTaskTuningConfig.class);
 
     Assert.assertEquals(null, deserialized.getExtra());
+    Assert.assertEquals(base.getAppendableIndexSpec(), deserialized.getAppendableIndexSpec());
     Assert.assertEquals(base.getMaxRowsInMemory(), deserialized.getMaxRowsInMemory());
     Assert.assertEquals(base.getMaxBytesInMemory(), deserialized.getMaxBytesInMemory());
     Assert.assertEquals(base.getMaxRowsPerSegment(), deserialized.getMaxRowsPerSegment());
@@ -183,7 +200,6 @@ public class KafkaIndexTaskTuningConfigTest
     Assert.assertEquals(base.getBasePersistDirectory(), deserialized.getBasePersistDirectory());
     Assert.assertEquals(base.getMaxPendingPersists(), deserialized.getMaxPendingPersists());
     Assert.assertEquals(base.getIndexSpec(), deserialized.getIndexSpec());
-    Assert.assertEquals(base.getBuildV9Directly(), deserialized.getBuildV9Directly());
     Assert.assertEquals(base.isReportParseExceptions(), deserialized.isReportParseExceptions());
     Assert.assertEquals(base.getHandoffConditionTimeout(), deserialized.getHandoffConditionTimeout());
     Assert.assertEquals(base.isResetOffsetAutomatically(), deserialized.isResetOffsetAutomatically());
@@ -198,7 +214,9 @@ public class KafkaIndexTaskTuningConfigTest
   public void testSerdeWithModifiedTuningConfigRemovedField() throws IOException
   {
     TestModifiedKafkaIndexTaskTuningConfig base = new TestModifiedKafkaIndexTaskTuningConfig(
+        null,
         1,
+        null,
         null,
         2,
         10L,
@@ -206,7 +224,7 @@ public class KafkaIndexTaskTuningConfigTest
         new File("/tmp/xxx"),
         4,
         new IndexSpec(),
-        true,
+        new IndexSpec(),
         true,
         5L,
         null,
@@ -222,6 +240,7 @@ public class KafkaIndexTaskTuningConfigTest
     KafkaIndexTaskTuningConfig deserialized =
         mapper.readValue(serialized, KafkaIndexTaskTuningConfig.class);
 
+    Assert.assertEquals(base.getAppendableIndexSpec(), deserialized.getAppendableIndexSpec());
     Assert.assertEquals(base.getMaxRowsInMemory(), deserialized.getMaxRowsInMemory());
     Assert.assertEquals(base.getMaxBytesInMemory(), deserialized.getMaxBytesInMemory());
     Assert.assertEquals(base.getMaxRowsPerSegment(), deserialized.getMaxRowsPerSegment());
@@ -230,7 +249,6 @@ public class KafkaIndexTaskTuningConfigTest
     Assert.assertEquals(base.getBasePersistDirectory(), deserialized.getBasePersistDirectory());
     Assert.assertEquals(base.getMaxPendingPersists(), deserialized.getMaxPendingPersists());
     Assert.assertEquals(base.getIndexSpec(), deserialized.getIndexSpec());
-    Assert.assertEquals(base.getBuildV9Directly(), deserialized.getBuildV9Directly());
     Assert.assertEquals(base.isReportParseExceptions(), deserialized.isReportParseExceptions());
     Assert.assertEquals(base.getHandoffConditionTimeout(), deserialized.getHandoffConditionTimeout());
     Assert.assertEquals(base.isResetOffsetAutomatically(), deserialized.isResetOffsetAutomatically());
@@ -241,26 +259,11 @@ public class KafkaIndexTaskTuningConfigTest
     Assert.assertEquals(base.getMaxSavedParseExceptions(), deserialized.getMaxSavedParseExceptions());
   }
 
-  private static KafkaIndexTaskTuningConfig copy(KafkaIndexTaskTuningConfig config)
+  @Test
+  public void testEqualsAndHashCode()
   {
-    return new KafkaIndexTaskTuningConfig(
-        config.getMaxRowsInMemory(),
-        config.getMaxBytesInMemory(),
-        config.getMaxRowsPerSegment(),
-        config.getMaxTotalRows(),
-        config.getIntermediatePersistPeriod(),
-        config.getBasePersistDirectory(),
-        0,
-        config.getIndexSpec(),
-        true,
-        config.isReportParseExceptions(),
-        config.getHandoffConditionTimeout(),
-        config.isResetOffsetAutomatically(),
-        config.getSegmentWriteOutMediumFactory(),
-        config.getIntermediateHandoffPeriod(),
-        config.isLogParseExceptions(),
-        config.getMaxParseExceptions(),
-        config.getMaxSavedParseExceptions()
-    );
+    EqualsVerifier.forClass(KafkaIndexTaskTuningConfig.class)
+        .usingGetClass()
+        .verify();
   }
 }

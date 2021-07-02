@@ -19,58 +19,67 @@
 
 package org.apache.druid.segment.loading;
 
+import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.google.common.base.Preconditions;
+import org.apache.druid.java.util.common.HumanReadableBytes;
 
-import javax.validation.constraints.Min;
-import javax.validation.constraints.NotNull;
+import javax.annotation.Nullable;
 import java.io.File;
 
 /**
  */
 public class StorageLocationConfig
 {
-  @JsonProperty
-  @NotNull
-  private File path = null;
+  private final File path;
+  private final long maxSize;
+  @Nullable
+  private final Double freeSpacePercent;
+
+  @JsonCreator
+  public StorageLocationConfig(
+      @JsonProperty("path") File path,
+      @JsonProperty("maxSize") @Nullable HumanReadableBytes maxSize,
+      @JsonProperty("freeSpacePercent") @Nullable Double freeSpacePercent
+  )
+  {
+    this(path, maxSize == null ? Long.MAX_VALUE : maxSize.getBytes(), freeSpacePercent);
+  }
+
+  public StorageLocationConfig(
+      File path,
+      long maxSize,
+      Double freeSpacePercent
+  )
+  {
+    this.path = Preconditions.checkNotNull(path, "path");
+    this.maxSize = maxSize;
+    this.freeSpacePercent = freeSpacePercent;
+    Preconditions.checkArgument(this.maxSize > 0, "maxSize[%s] should be positive", this.maxSize);
+    Preconditions.checkArgument(
+        this.freeSpacePercent == null || this.freeSpacePercent >= 0,
+        "freeSpacePercent[%s] should be 0 or a positive double",
+        this.freeSpacePercent
+    );
+  }
 
   @JsonProperty
-  @Min(1)
-  private long maxSize = Long.MAX_VALUE;
-
-  @JsonProperty
-  private Double freeSpacePercent;
-
   public File getPath()
   {
     return path;
   }
 
-  public StorageLocationConfig setPath(File path)
-  {
-    this.path = path;
-    return this;
-  }
-
+  @JsonProperty
   public long getMaxSize()
   {
     return maxSize;
   }
 
-  public StorageLocationConfig setMaxSize(long maxSize)
-  {
-    this.maxSize = maxSize;
-    return this;
-  }
-
+  @JsonProperty
+  @Nullable
   public Double getFreeSpacePercent()
   {
     return freeSpacePercent;
-  }
-
-  public StorageLocationConfig setFreeSpacePercent(Double freeSpacePercent)
-  {
-    this.freeSpacePercent = freeSpacePercent;
-    return this;
   }
 
   @Override
@@ -79,6 +88,7 @@ public class StorageLocationConfig
     return "StorageLocationConfig{" +
            "path=" + path +
            ", maxSize=" + maxSize +
+           ", freeSpacePercent=" + freeSpacePercent +
            '}';
   }
 }

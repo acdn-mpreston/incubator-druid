@@ -5,20 +5,48 @@ exports[`segments-view matches snapshot 1`] = `
   <div
     className="segments-view app-view"
   >
-    <ViewControlBar
+    <Memo(ViewControlBar)
       label="Segments"
     >
-      <RefreshButton
+      <Memo(RefreshButton)
         localStorageKey="segments-refresh-rate"
         onRefresh={[Function]}
       />
-      <Blueprint3.Button
-        disabled={true}
-        icon="application"
-        onClick={[Function]}
-        text="Go to SQL"
+      <Component>
+        Group by
+      </Component>
+      <Blueprint3.ButtonGroup>
+        <Blueprint3.Button
+          active={true}
+          onClick={[Function]}
+        >
+          None
+        </Blueprint3.Button>
+        <Blueprint3.Button
+          active={false}
+          onClick={[Function]}
+        >
+          Interval
+        </Blueprint3.Button>
+      </Blueprint3.ButtonGroup>
+      <Memo(MoreButton)>
+        <Blueprint3.MenuItem
+          disabled={true}
+          icon="application"
+          multiline={false}
+          onClick={[Function]}
+          popoverProps={Object {}}
+          shouldDismissPopover={true}
+          text="View SQL query for table"
+        />
+      </Memo(MoreButton)>
+      <Blueprint3.Switch
+        checked={false}
+        disabled={false}
+        label="Show segment timeline"
+        onChange={[Function]}
       />
-      <TableColumnSelector
+      <Memo(TableColumnSelector)
         columns={
           Array [
             "Segment ID",
@@ -26,6 +54,8 @@ exports[`segments-view matches snapshot 1`] = `
             "Start",
             "End",
             "Version",
+            "Time span",
+            "Partitioning",
             "Partition",
             "Size",
             "Num rows",
@@ -38,9 +68,10 @@ exports[`segments-view matches snapshot 1`] = `
           ]
         }
         onChange={[Function]}
+        onClose={[Function]}
         tableColumnsHidden={Array []}
       />
-    </ViewControlBar>
+    </Memo(ViewControlBar)>
     <ReactTable
       AggregatedComponent={[Function]}
       ExpanderComponent={[Function]}
@@ -101,7 +132,9 @@ exports[`segments-view matches snapshot 1`] = `
           Object {
             "Header": "Segment ID",
             "accessor": "segment_id",
+            "filterable": true,
             "show": true,
+            "sortable": true,
             "width": 300,
           },
           Object {
@@ -112,10 +145,22 @@ exports[`segments-view matches snapshot 1`] = `
           },
           Object {
             "Cell": [Function],
+            "Header": "Interval",
+            "accessor": "interval",
+            "defaultSortDesc": true,
+            "filterable": true,
+            "show": false,
+            "sortable": true,
+            "width": 120,
+          },
+          Object {
+            "Cell": [Function],
             "Header": "Start",
             "accessor": "start",
             "defaultSortDesc": true,
+            "filterable": true,
             "show": true,
+            "sortable": true,
             "width": 120,
           },
           Object {
@@ -123,21 +168,44 @@ exports[`segments-view matches snapshot 1`] = `
             "Header": "End",
             "accessor": "end",
             "defaultSortDesc": true,
+            "filterable": true,
             "show": true,
+            "sortable": true,
             "width": 120,
           },
           Object {
             "Header": "Version",
             "accessor": "version",
             "defaultSortDesc": true,
+            "filterable": true,
             "show": true,
+            "sortable": true,
             "width": 120,
+          },
+          Object {
+            "Cell": [Function],
+            "Header": "Time span",
+            "accessor": "time_span",
+            "filterable": true,
+            "show": true,
+            "sortable": true,
+            "width": 100,
+          },
+          Object {
+            "Cell": [Function],
+            "Header": "Partitioning",
+            "accessor": "partitioning",
+            "filterable": true,
+            "show": true,
+            "sortable": true,
+            "width": 100,
           },
           Object {
             "Header": "Partition",
             "accessor": "partition_num",
             "filterable": false,
             "show": true,
+            "sortable": true,
             "width": 60,
           },
           Object {
@@ -147,6 +215,7 @@ exports[`segments-view matches snapshot 1`] = `
             "defaultSortDesc": true,
             "filterable": false,
             "show": true,
+            "sortable": true,
           },
           Object {
             "Cell": [Function],
@@ -209,7 +278,7 @@ exports[`segments-view matches snapshot 1`] = `
       defaultFilterMethod={[Function]}
       defaultFiltered={Array []}
       defaultPage={0}
-      defaultPageSize={50}
+      defaultPageSize={25}
       defaultResized={Array []}
       defaultSortDesc={false}
       defaultSortMethod={[Function]}
@@ -234,7 +303,7 @@ exports[`segments-view matches snapshot 1`] = `
         Array [
           Object {
             "id": "datasource",
-            "value": "test",
+            "value": "\\"test\\"",
           },
         ]
       }
@@ -263,7 +332,7 @@ exports[`segments-view matches snapshot 1`] = `
       getTrProps={[Function]}
       groupedByPivotKey="_groupedByPivot"
       indexKey="_index"
-      loading={true}
+      loading={false}
       loadingText="Loading..."
       manual={true}
       multiSort={true}
@@ -287,6 +356,7 @@ exports[`segments-view matches snapshot 1`] = `
       }
       pageText="Page"
       pages={10000000}
+      pivotBy={Array []}
       pivotDefaults={Object {}}
       pivotIDKey="_pivotID"
       pivotValKey="_pivotVal"
@@ -305,20 +375,5 @@ exports[`segments-view matches snapshot 1`] = `
       subRowsKey="_subRows"
     />
   </div>
-  <AsyncActionDialog
-    action={null}
-    confirmButtonText="Drop Segment"
-    failText="Could not drop segment"
-    intent="danger"
-    onClose={[Function]}
-    successText="Segment drop request acknowledged, next time the coordinator runs segment will be dropped"
-  >
-    <p>
-      Are you sure you want to drop segment 'null'?
-    </p>
-    <p>
-      This action is not reversible.
-    </p>
-  </AsyncActionDialog>
 </Fragment>
 `;

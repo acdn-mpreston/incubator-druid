@@ -20,12 +20,13 @@
 package org.apache.druid.cli;
 
 import com.google.common.collect.ImmutableList;
+import com.google.inject.Key;
 import com.google.inject.Module;
 import com.google.inject.TypeLiteral;
 import com.google.inject.name.Names;
 import io.airlift.airline.Command;
 import org.apache.druid.curator.discovery.DiscoveryModule;
-import org.apache.druid.discovery.NodeType;
+import org.apache.druid.discovery.NodeRole;
 import org.apache.druid.guice.Jerseys;
 import org.apache.druid.guice.JsonConfigProvider;
 import org.apache.druid.guice.LazySingleton;
@@ -37,9 +38,12 @@ import org.apache.druid.guice.RouterProcessingModule;
 import org.apache.druid.guice.annotations.Self;
 import org.apache.druid.guice.http.JettyHttpClientModule;
 import org.apache.druid.java.util.common.logger.Logger;
+import org.apache.druid.query.QuerySegmentWalker;
 import org.apache.druid.query.lookup.LookupSerdeModule;
 import org.apache.druid.server.AsyncQueryForwardingServlet;
+import org.apache.druid.server.NoopQuerySegmentWalker;
 import org.apache.druid.server.http.RouterResource;
+import org.apache.druid.server.http.SelfDiscoveryResource;
 import org.apache.druid.server.initialization.jetty.JettyServerInitializer;
 import org.apache.druid.server.metrics.QueryCountStatsProvider;
 import org.apache.druid.server.router.AvaticaConnectionBalancer;
@@ -59,7 +63,8 @@ import java.util.List;
  */
 @Command(
     name = "router",
-    description = "Experimental! Understands tiers and routes things to different brokers, see https://druid.apache.org/docs/latest/development/router.html for a description"
+    description = "Experimental! Understands tiers and routes things to different brokers, "
+                  + "see https://druid.apache.org/docs/latest/development/router.html for a description"
 )
 public class CliRouter extends ServerRunnable
 {
@@ -88,6 +93,8 @@ public class CliRouter extends ServerRunnable
           JsonConfigProvider.bind(binder, "druid.router.avatica.balancer", AvaticaConnectionBalancer.class);
           JsonConfigProvider.bind(binder, "druid.router.managementProxy", ManagementProxyConfig.class);
 
+          binder.bind(QuerySegmentWalker.class).to(NoopQuerySegmentWalker.class).in(LazySingleton.class);
+
           binder.bind(CoordinatorRuleManager.class);
           LifecycleModule.register(binder, CoordinatorRuleManager.class);
 
@@ -106,10 +113,10 @@ public class CliRouter extends ServerRunnable
           LifecycleModule.register(binder, Server.class);
           DiscoveryModule.register(binder, Self.class);
 
-          bindAnnouncer(
-              binder,
-              DiscoverySideEffectsProvider.builder(NodeType.ROUTER).build()
-          );
+          bindNodeRoleAndAnnouncer(binder, DiscoverySideEffectsProvider.builder(NodeRole.ROUTER).build());
+
+          Jerseys.addResource(binder, SelfDiscoveryResource.class);
+          LifecycleModule.registerKey(binder, Key.get(SelfDiscoveryResource.class));
         },
         new LookupSerdeModule()
     );

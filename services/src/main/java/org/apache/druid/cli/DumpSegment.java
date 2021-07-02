@@ -21,6 +21,7 @@ package org.apache.druid.cli;
 
 import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Function;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
@@ -38,7 +39,6 @@ import org.apache.druid.collections.bitmap.BitmapFactory;
 import org.apache.druid.collections.bitmap.ConciseBitmapFactory;
 import org.apache.druid.collections.bitmap.ImmutableBitmap;
 import org.apache.druid.collections.bitmap.RoaringBitmapFactory;
-import org.apache.druid.common.config.NullHandling;
 import org.apache.druid.guice.DruidProcessingModule;
 import org.apache.druid.guice.QueryRunnerFactoryModule;
 import org.apache.druid.guice.QueryableModule;
@@ -46,11 +46,11 @@ import org.apache.druid.guice.annotations.Json;
 import org.apache.druid.java.util.common.IAE;
 import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.StringUtils;
-import org.apache.druid.java.util.common.concurrent.Execs;
 import org.apache.druid.java.util.common.granularity.Granularities;
 import org.apache.druid.java.util.common.guava.Sequence;
 import org.apache.druid.java.util.common.guava.Sequences;
 import org.apache.druid.java.util.common.logger.Logger;
+import org.apache.druid.query.DirectQueryProcessingPool;
 import org.apache.druid.query.DruidProcessingConfig;
 import org.apache.druid.query.Query;
 import org.apache.druid.query.QueryPlus;
@@ -59,6 +59,7 @@ import org.apache.druid.query.QueryRunnerFactory;
 import org.apache.druid.query.QueryRunnerFactoryConglomerate;
 import org.apache.druid.query.SegmentDescriptor;
 import org.apache.druid.query.TableDataSource;
+import org.apache.druid.query.context.ResponseContext;
 import org.apache.druid.query.filter.DimFilter;
 import org.apache.druid.query.metadata.metadata.ListColumnIncluderator;
 import org.apache.druid.query.metadata.metadata.SegmentAnalysis;
@@ -91,7 +92,6 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.EnumSet;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -190,7 +190,7 @@ public class DumpSegment extends GuiceRunnable
           runBitmaps(injector, index);
           break;
         default:
-          throw new ISE("WTF?! dumpType[%s] has no handler?", dumpType);
+          throw new ISE("dumpType[%s] has no handler", dumpType);
       }
     }
     catch (Exception e) {
@@ -360,22 +360,22 @@ public class DumpSegment extends GuiceRunnable
                       jg.writeFieldName(columnName);
                       jg.writeStartObject();
                       for (int i = 0; i < bitmapIndex.getCardinality(); i++) {
-                        String val = NullHandling.nullToEmptyIfNeeded(bitmapIndex.getValue(i));
-                        if (val != null) {
-                          final ImmutableBitmap bitmap = bitmapIndex.getBitmap(i);
-                          if (decompressBitmaps) {
-                            jg.writeStartArray();
-                            final IntIterator iterator = bitmap.iterator();
-                            while (iterator.hasNext()) {
-                              final int rowNum = iterator.next();
-                              jg.writeNumber(rowNum);
-                            }
-                            jg.writeEndArray();
-                          } else {
-                            byte[] bytes = bitmapSerdeFactory.getObjectStrategy().toBytes(bitmap);
-                            if (bytes != null) {
-                              jg.writeBinary(bytes);
-                            }
+                        String val = bitmapIndex.getValue(i);
+                        // respect nulls if they are present in the dictionary
+                        jg.writeFieldName(val == null ? "null" : val);
+                        final ImmutableBitmap bitmap = bitmapIndex.getBitmap(i);
+                        if (decompressBitmaps) {
+                          jg.writeStartArray();
+                          final IntIterator iterator = bitmap.iterator();
+                          while (iterator.hasNext()) {
+                            final int rowNum = iterator.next();
+                            jg.writeNumber(rowNum);
+                          }
+                          jg.writeEndArray();
+                        } else {
+                          byte[] bytes = bitmapSerdeFactory.getObjectStrategy().toBytes(bitmap);
+                          if (bytes != null) {
+                            jg.writeBinary(bytes);
                           }
                         }
                       }
@@ -478,15 +478,16 @@ public class DumpSegment extends GuiceRunnable
     );
   }
 
-  private static <T> Sequence<T> executeQuery(final Injector injector, final QueryableIndex index, final Query<T> query)
+  @VisibleForTesting
+  static <T> Sequence<T> executeQuery(final Injector injector, final QueryableIndex index, final Query<T> query)
   {
     final QueryRunnerFactoryConglomerate conglomerate = injector.getInstance(QueryRunnerFactoryConglomerate.class);
     final QueryRunnerFactory<T, Query<T>> factory = conglomerate.findFactory(query);
     final QueryRunner<T> runner = factory.createRunner(new QueryableIndexSegment(index, SegmentId.dummy("segment")));
     return factory
         .getToolchest()
-        .mergeResults(factory.mergeRunners(Execs.directExecutor(), ImmutableList.of(runner)))
-        .run(QueryPlus.wrap(query), new HashMap<>());
+        .mergeResults(factory.mergeRunners(DirectQueryProcessingPool.INSTANCE, ImmutableList.of(runner)))
+        .run(QueryPlus.wrap(query), ResponseContext.createEmpty());
   }
 
   private static <T> void evaluateSequenceForSideEffects(final Sequence<T> sequence)

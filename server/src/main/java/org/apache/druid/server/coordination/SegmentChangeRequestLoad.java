@@ -25,6 +25,8 @@ import com.fasterxml.jackson.annotation.JsonUnwrapped;
 import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.timeline.DataSegment;
 
+import javax.annotation.Nullable;
+
 import java.util.Objects;
 
 /**
@@ -33,16 +35,28 @@ public class SegmentChangeRequestLoad implements DataSegmentChangeRequest
 {
   private final DataSegment segment;
 
+  /**
+   * To avoid pruning of the loadSpec on the broker, needed when the broker is loading broadcast segments,
+   * we deserialize into an {@link LoadableDataSegment}, which never removes the loadSpec.
+   */
   @JsonCreator
   public SegmentChangeRequestLoad(
-      @JsonUnwrapped DataSegment segment
+      @JsonUnwrapped LoadableDataSegment segment
   )
   {
     this.segment = segment;
   }
 
+  public SegmentChangeRequestLoad(
+      DataSegment segment
+  )
+  {
+    this.segment = segment;
+  }
+
+
   @Override
-  public void go(DataSegmentChangeHandler handler, DataSegmentChangeCallback callback)
+  public void go(DataSegmentChangeHandler handler, @Nullable DataSegmentChangeCallback callback)
   {
     handler.addSegment(segment, callback);
   }

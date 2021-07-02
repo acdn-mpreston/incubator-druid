@@ -21,6 +21,7 @@ package org.apache.druid.timeline.partition;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Range;
@@ -31,33 +32,44 @@ import org.apache.druid.java.util.common.ISE;
 import javax.annotation.Nullable;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /**
- * Class uses getters/setters to work around http://jira.codehaus.org/browse/MSHADE-92
- *
- * Adjust to JsonCreator and final fields when resolved.
+ * {@link ShardSpec} for range partitioning based on a single dimension
  */
 public class SingleDimensionShardSpec implements ShardSpec
 {
+  public static final int UNKNOWN_NUM_CORE_PARTITIONS = -1;
+
   private final String dimension;
   @Nullable
   private final String start;
   @Nullable
   private final String end;
   private final int partitionNum;
+  private final int numCorePartitions;
 
+  /**
+   * @param dimension    partition dimension
+   * @param start        inclusive start of this range
+   * @param end          exclusive end of this range
+   * @param partitionNum unique ID for this shard
+   */
   @JsonCreator
   public SingleDimensionShardSpec(
       @JsonProperty("dimension") String dimension,
       @JsonProperty("start") @Nullable String start,
       @JsonProperty("end") @Nullable String end,
-      @JsonProperty("partitionNum") int partitionNum
+      @JsonProperty("partitionNum") int partitionNum,
+      @JsonProperty("numCorePartitions") @Nullable Integer numCorePartitions // nullable for backward compatibility
   )
   {
+    Preconditions.checkArgument(partitionNum >= 0, "partitionNum >= 0");
     this.dimension = Preconditions.checkNotNull(dimension, "dimension");
     this.start = start;
     this.end = end;
     this.partitionNum = partitionNum;
+    this.numCorePartitions = numCorePartitions == null ? UNKNOWN_NUM_CORE_PARTITIONS : numCorePartitions;
   }
 
   @JsonProperty("dimension")
@@ -88,11 +100,23 @@ public class SingleDimensionShardSpec implements ShardSpec
   }
 
   @Override
-  public ShardSpecLookup getLookup(final List<ShardSpec> shardSpecs)
+  @JsonProperty
+  public int getNumCorePartitions()
+  {
+    return numCorePartitions;
+  }
+
+  @Override
+  public ShardSpecLookup getLookup(final List<? extends ShardSpec> shardSpecs)
+  {
+    return createLookup(shardSpecs);
+  }
+
+  static ShardSpecLookup createLookup(List<? extends ShardSpec> shardSpecs)
   {
     return (long timestamp, InputRow row) -> {
       for (ShardSpec spec : shardSpecs) {
-        if (spec.isInChunk(timestamp, row)) {
+        if (((SingleDimensionShardSpec) spec).isInChunk(row)) {
           return spec;
         }
       }
@@ -134,22 +158,20 @@ public class SingleDimensionShardSpec implements ShardSpec
   @Override
   public <T> PartitionChunk<T> createChunk(T obj)
   {
-    return new StringPartitionChunk<T>(start, end, partitionNum, obj);
-  }
-
-  @Override
-  public boolean isInChunk(long timestamp, InputRow inputRow)
-  {
-    final List<String> values = inputRow.getDimension(dimension);
-
-    if (values == null || values.size() != 1) {
-      return checkValue(null);
+    if (numCorePartitions == UNKNOWN_NUM_CORE_PARTITIONS) {
+      return new StringPartitionChunk<>(start, end, partitionNum, obj);
     } else {
-      return checkValue(values.get(0));
+      return new NumberedPartitionChunk<>(partitionNum, numCorePartitions, obj);
     }
   }
 
-  private boolean checkValue(String value)
+  @VisibleForTesting
+  boolean isInChunk(InputRow inputRow)
+  {
+    return isInChunk(dimension, start, end, inputRow);
+  }
+
+  private static boolean checkValue(@Nullable String start, @Nullable String end, String value)
   {
     if (value == null) {
       return start == null;
@@ -163,6 +185,45 @@ public class SingleDimensionShardSpec implements ShardSpec
            (end == null || value.compareTo(end) < 0);
   }
 
+  public static boolean isInChunk(
+      String dimension,
+      @Nullable String start,
+      @Nullable String end,
+      InputRow inputRow
+  )
+  {
+    final List<String> values = inputRow.getDimension(dimension);
+
+    if (values == null || values.size() != 1) {
+      return checkValue(start, end, null);
+    } else {
+      return checkValue(start, end, values.get(0));
+    }
+  }
+
+  @Override
+  public boolean equals(Object o)
+  {
+    if (this == o) {
+      return true;
+    }
+    if (o == null || getClass() != o.getClass()) {
+      return false;
+    }
+    SingleDimensionShardSpec shardSpec = (SingleDimensionShardSpec) o;
+    return partitionNum == shardSpec.partitionNum &&
+           numCorePartitions == shardSpec.numCorePartitions &&
+           Objects.equals(dimension, shardSpec.dimension) &&
+           Objects.equals(start, shardSpec.start) &&
+           Objects.equals(end, shardSpec.end);
+  }
+
+  @Override
+  public int hashCode()
+  {
+    return Objects.hash(dimension, start, end, partitionNum, numCorePartitions);
+  }
+
   @Override
   public String toString()
   {
@@ -171,6 +232,7 @@ public class SingleDimensionShardSpec implements ShardSpec
            ", start='" + start + '\'' +
            ", end='" + end + '\'' +
            ", partitionNum=" + partitionNum +
+           ", numCorePartitions=" + numCorePartitions +
            '}';
   }
 }

@@ -115,6 +115,7 @@ public class DefaultOfflineAppenderatorFactoryTest
                 new TimestampSpec("ts", "auto", null),
                 new DimensionsSpec(null, null, null),
                 null,
+                null,
                 null
             )
         ),
@@ -133,7 +134,9 @@ public class DefaultOfflineAppenderatorFactoryTest
     );
 
     RealtimeTuningConfig tuningConfig = new RealtimeTuningConfig(
+        null,
         75000,
+        null,
         null,
         null,
         null,
@@ -153,11 +156,12 @@ public class DefaultOfflineAppenderatorFactoryTest
         null
     );
 
-    try (Appenderator appenderator = defaultOfflineAppenderatorFactory.build(
+    Appenderator appenderator = defaultOfflineAppenderatorFactory.build(
         schema,
         tuningConfig,
         new FireDepartmentMetrics()
-    )) {
+    );
+    try {
       Assert.assertEquals("dataSourceName", appenderator.getDataSource());
       Assert.assertEquals(null, appenderator.startJob());
       SegmentIdWithShardSpec identifier = new SegmentIdWithShardSpec(
@@ -173,6 +177,9 @@ public class DefaultOfflineAppenderatorFactoryTest
       Assert.assertEquals(2, ((AppenderatorImpl) appenderator).getRowsInMemory());
       appenderator.close();
       Assert.assertEquals(0, ((AppenderatorImpl) appenderator).getRowsInMemory());
+    }
+    finally {
+      appenderator.close();
     }
   }
 }

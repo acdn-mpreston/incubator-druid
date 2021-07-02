@@ -20,27 +20,29 @@
 package org.apache.druid.segment.realtime.appenderator;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.base.Preconditions;
 import org.apache.druid.client.cache.Cache;
 import org.apache.druid.client.cache.CacheConfig;
 import org.apache.druid.client.cache.CachePopulatorStats;
-import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.java.util.emitter.service.ServiceEmitter;
+import org.apache.druid.query.QueryProcessingPool;
 import org.apache.druid.query.QueryRunnerFactoryConglomerate;
 import org.apache.druid.segment.IndexIO;
 import org.apache.druid.segment.IndexMerger;
+import org.apache.druid.segment.incremental.ParseExceptionHandler;
+import org.apache.druid.segment.incremental.RowIngestionMeters;
 import org.apache.druid.segment.indexing.DataSchema;
+import org.apache.druid.segment.join.JoinableFactory;
 import org.apache.druid.segment.loading.DataSegmentPusher;
 import org.apache.druid.segment.realtime.FireDepartmentMetrics;
 import org.apache.druid.server.coordination.DataSegmentAnnouncer;
-import org.apache.druid.timeline.DataSegment;
-import org.apache.druid.timeline.partition.ShardSpec;
-import org.joda.time.Interval;
-
-import java.util.concurrent.ExecutorService;
+import org.apache.druid.server.coordination.NoopDataSegmentAnnouncer;
+import org.apache.druid.timeline.VersionedIntervalTimeline;
 
 public class Appenderators
 {
   public static Appenderator createRealtime(
+      String id,
       DataSchema schema,
       AppenderatorConfig config,
       FireDepartmentMetrics metrics,
@@ -51,85 +53,75 @@ public class Appenderators
       QueryRunnerFactoryConglomerate conglomerate,
       DataSegmentAnnouncer segmentAnnouncer,
       ServiceEmitter emitter,
-      ExecutorService queryExecutorService,
+      QueryProcessingPool queryProcessingPool,
+      JoinableFactory joinableFactory,
       Cache cache,
       CacheConfig cacheConfig,
-      CachePopulatorStats cachePopulatorStats
+      CachePopulatorStats cachePopulatorStats,
+      RowIngestionMeters rowIngestionMeters,
+      ParseExceptionHandler parseExceptionHandler
   )
   {
     return new AppenderatorImpl(
+        id,
         schema,
         config,
         metrics,
         dataSegmentPusher,
         objectMapper,
-        conglomerate,
         segmentAnnouncer,
-        emitter,
-        queryExecutorService,
+        new SinkQuerySegmentWalker(
+            schema.getDataSource(),
+            new VersionedIntervalTimeline<>(
+                String.CASE_INSENSITIVE_ORDER
+            ),
+            objectMapper,
+            emitter,
+            conglomerate,
+            queryProcessingPool,
+            joinableFactory,
+            Preconditions.checkNotNull(cache, "cache"),
+            cacheConfig,
+            cachePopulatorStats
+        ),
         indexIO,
         indexMerger,
         cache,
-        cacheConfig,
-        cachePopulatorStats
+        rowIngestionMeters,
+        parseExceptionHandler,
+        true
     );
   }
 
   public static Appenderator createOffline(
+      String id,
       DataSchema schema,
       AppenderatorConfig config,
       FireDepartmentMetrics metrics,
       DataSegmentPusher dataSegmentPusher,
       ObjectMapper objectMapper,
       IndexIO indexIO,
-      IndexMerger indexMerger
+      IndexMerger indexMerger,
+      RowIngestionMeters rowIngestionMeters,
+      ParseExceptionHandler parseExceptionHandler,
+      boolean batchMemoryMappedIndex
   )
   {
     return new AppenderatorImpl(
+        id,
         schema,
         config,
         metrics,
         dataSegmentPusher,
         objectMapper,
-        null,
-        new DataSegmentAnnouncer()
-        {
-          @Override
-          public void announceSegment(DataSegment segment)
-          {
-            // Do nothing
-          }
-
-          @Override
-          public void unannounceSegment(DataSegment segment)
-          {
-            // Do nothing
-          }
-
-          @Override
-          public void announceSegments(Iterable<DataSegment> segments)
-          {
-            // Do nothing
-          }
-
-          @Override
-          public void unannounceSegments(Iterable<DataSegment> segments)
-          {
-            // Do nothing
-          }
-        },
-        null,
+        new NoopDataSegmentAnnouncer(),
         null,
         indexIO,
         indexMerger,
         null,
-        null,
-        null
+        rowIngestionMeters,
+        parseExceptionHandler,
+        batchMemoryMappedIndex // This is a task config (default false) to fallback to "old" code in case of bug with the new memory optimization code
     );
-  }
-
-  public static String getSequenceName(Interval interval, String version, ShardSpec shardSpec)
-  {
-    return StringUtils.format("index_%s_%s_%d", interval, version, shardSpec.getPartitionNum());
   }
 }

@@ -24,6 +24,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
+import org.apache.druid.common.config.NullHandling;
 import org.apache.druid.data.input.impl.TimestampSpec;
 import org.apache.druid.jackson.DefaultObjectMapper;
 import org.apache.druid.java.util.common.Intervals;
@@ -34,6 +35,7 @@ import org.apache.druid.query.BySegmentResultValueClass;
 import org.apache.druid.query.Druids;
 import org.apache.druid.query.FinalizeResultsQueryRunner;
 import org.apache.druid.query.Query;
+import org.apache.druid.query.QueryContexts;
 import org.apache.druid.query.QueryPlus;
 import org.apache.druid.query.QueryRunner;
 import org.apache.druid.query.QueryRunnerFactory;
@@ -73,6 +75,10 @@ import java.util.concurrent.Executors;
 @RunWith(Parameterized.class)
 public class SegmentMetadataQueryTest
 {
+  static {
+    NullHandling.initializeForTests();
+  }
+
   private static final SegmentMetadataQueryRunnerFactory FACTORY = new SegmentMetadataQueryRunnerFactory(
       new SegmentMetadataQueryQueryToolChest(new SegmentMetadataQueryConfig()),
       QueryRunnerTestHelper.NOOP_QUERYWATCHER
@@ -187,13 +193,13 @@ public class SegmentMetadataQueryTest
 
     int preferedSize1 = 0;
     int placementSize2 = 0;
-    int overallSize1 = 119691;
-    int overallSize2 = 119691;
+    int overallSize1 = 152334;
+    int overallSize2 = 152334;
     if (bitmaps) {
       preferedSize1 = mmap1 ? 10881 : 10764;
       placementSize2 = mmap2 ? 10881 : 0;
-      overallSize1 = mmap1 ? 167493 : 168188;
-      overallSize2 = mmap2 ? 167493 : 168188;
+      overallSize1 = mmap1 ? 200136 : 200831;
+      overallSize2 = mmap2 ? 200136 : 200831;
     }
     expectedSegmentAnalysis1 = new SegmentAnalysis(
         id1.toString(),
@@ -203,7 +209,19 @@ public class SegmentMetadataQueryTest
             new ColumnAnalysis(
                 ValueType.LONG.toString(),
                 false,
+                false,
                 12090,
+                null,
+                null,
+                null,
+                null
+            ),
+            "index",
+            new ColumnAnalysis(
+                ValueType.DOUBLE.toString(),
+                false,
+                false,
+                9672,
                 null,
                 null,
                 null,
@@ -213,20 +231,11 @@ public class SegmentMetadataQueryTest
             new ColumnAnalysis(
                 ValueType.STRING.toString(),
                 false,
+                false,
                 preferedSize1,
                 1,
                 "preferred",
                 "preferred",
-                null
-            ),
-            "index",
-            new ColumnAnalysis(
-                ValueType.DOUBLE.toString(),
-                false,
-                9672,
-                null,
-                null,
-                null,
                 null
             )
         ), overallSize1,
@@ -244,7 +253,19 @@ public class SegmentMetadataQueryTest
             new ColumnAnalysis(
                 ValueType.LONG.toString(),
                 false,
+                false,
                 12090,
+                null,
+                null,
+                null,
+                null
+            ),
+            "index",
+            new ColumnAnalysis(
+                ValueType.DOUBLE.toString(),
+                false,
+                false,
+                9672,
                 null,
                 null,
                 null,
@@ -254,18 +275,9 @@ public class SegmentMetadataQueryTest
             new ColumnAnalysis(
                 ValueType.STRING.toString(),
                 false,
+                false,
                 placementSize2,
                 1,
-                null,
-                null,
-                null
-            ),
-            "index",
-            new ColumnAnalysis(
-                ValueType.DOUBLE.toString(),
-                false,
-                9672,
-                null,
                 null,
                 null,
                 null
@@ -284,7 +296,7 @@ public class SegmentMetadataQueryTest
   @SuppressWarnings("unchecked")
   public void testSegmentMetadataQuery()
   {
-    List<SegmentAnalysis> results = runner1.run(QueryPlus.wrap(testQuery), new HashMap<>()).toList();
+    List<SegmentAnalysis> results = runner1.run(QueryPlus.wrap(testQuery)).toList();
 
     Assert.assertEquals(Collections.singletonList(expectedSegmentAnalysis1), results);
   }
@@ -300,6 +312,7 @@ public class SegmentMetadataQueryTest
             new ColumnAnalysis(
                 ValueType.STRING.toString(),
                 false,
+                false,
                 0,
                 0,
                 null,
@@ -310,6 +323,7 @@ public class SegmentMetadataQueryTest
             new ColumnAnalysis(
                 ValueType.STRING.toString(),
                 true,
+                false,
                 0,
                 0,
                 null,
@@ -351,7 +365,7 @@ public class SegmentMetadataQueryTest
         .build();
     TestHelper.assertExpectedObjects(
         ImmutableList.of(mergedSegmentAnalysis),
-        myRunner.run(QueryPlus.wrap(query), new HashMap<>()),
+        myRunner.run(QueryPlus.wrap(query)),
         "failed SegmentMetadata merging query"
     );
     exec.shutdownNow();
@@ -368,6 +382,7 @@ public class SegmentMetadataQueryTest
             new ColumnAnalysis(
                 ValueType.STRING.toString(),
                 false,
+                false,
                 0,
                 1,
                 null,
@@ -378,6 +393,7 @@ public class SegmentMetadataQueryTest
             new ColumnAnalysis(
                 ValueType.STRING.toString(),
                 true,
+                false,
                 0,
                 9,
                 null,
@@ -419,7 +435,7 @@ public class SegmentMetadataQueryTest
         .build();
     TestHelper.assertExpectedObjects(
         ImmutableList.of(mergedSegmentAnalysis),
-        myRunner.run(QueryPlus.wrap(query), new HashMap<>()),
+        myRunner.run(QueryPlus.wrap(query)),
         "failed SegmentMetadata merging query"
     );
     exec.shutdownNow();
@@ -436,6 +452,7 @@ public class SegmentMetadataQueryTest
             new ColumnAnalysis(
                 ValueType.STRING.toString(),
                 false,
+                false,
                 0,
                 1,
                 null,
@@ -446,6 +463,7 @@ public class SegmentMetadataQueryTest
             new ColumnAnalysis(
                 "hyperUnique",
                 false,
+                true,
                 0,
                 null,
                 null,
@@ -487,7 +505,7 @@ public class SegmentMetadataQueryTest
         .build();
     TestHelper.assertExpectedObjects(
         ImmutableList.of(mergedSegmentAnalysis),
-        myRunner.run(QueryPlus.wrap(query), new HashMap<>()),
+        myRunner.run(QueryPlus.wrap(query)),
         "failed SegmentMetadata merging query"
     );
     exec.shutdownNow();
@@ -504,6 +522,7 @@ public class SegmentMetadataQueryTest
     }
     ColumnAnalysis analysis = new ColumnAnalysis(
         ValueType.STRING.toString(),
+        false,
         false,
         size1 + size2,
         1,
@@ -526,6 +545,7 @@ public class SegmentMetadataQueryTest
     ColumnAnalysis analysis = new ColumnAnalysis(
         ValueType.STRING.toString(),
         false,
+        false,
         size1 + size2,
         3,
         "spot",
@@ -546,6 +566,7 @@ public class SegmentMetadataQueryTest
     }
     ColumnAnalysis analysis = new ColumnAnalysis(
         ValueType.STRING.toString(),
+        false,
         false,
         size1 + size2,
         9,
@@ -569,6 +590,7 @@ public class SegmentMetadataQueryTest
             new ColumnAnalysis(
                 ValueType.LONG.toString(),
                 false,
+                false,
                 12090 * 2,
                 null,
                 null,
@@ -578,6 +600,7 @@ public class SegmentMetadataQueryTest
             "index",
             new ColumnAnalysis(
                 ValueType.DOUBLE.toString(),
+                false,
                 false,
                 9672 * 2,
                 null,
@@ -616,7 +639,7 @@ public class SegmentMetadataQueryTest
 
     TestHelper.assertExpectedObjects(
         ImmutableList.of(mergedSegmentAnalysis),
-        myRunner.run(QueryPlus.wrap(query), new HashMap<>()),
+        myRunner.run(QueryPlus.wrap(query)),
         "failed SegmentMetadata merging query"
     );
     exec.shutdownNow();
@@ -632,6 +655,7 @@ public class SegmentMetadataQueryTest
             "placement",
             new ColumnAnalysis(
                 ValueType.STRING.toString(),
+                false,
                 false,
                 0,
                 0,
@@ -674,7 +698,7 @@ public class SegmentMetadataQueryTest
         .build();
     TestHelper.assertExpectedObjects(
         ImmutableList.of(mergedSegmentAnalysis),
-        myRunner.run(QueryPlus.wrap(query), new HashMap<>()),
+        myRunner.run(QueryPlus.wrap(query)),
         "failed SegmentMetadata merging query"
     );
     exec.shutdownNow();
@@ -694,6 +718,7 @@ public class SegmentMetadataQueryTest
             "placement",
             new ColumnAnalysis(
                 ValueType.STRING.toString(),
+                false,
                 false,
                 0,
                 0,
@@ -736,7 +761,7 @@ public class SegmentMetadataQueryTest
         .build();
     TestHelper.assertExpectedObjects(
         ImmutableList.of(mergedSegmentAnalysis),
-        myRunner.run(QueryPlus.wrap(query), new HashMap<>()),
+        myRunner.run(QueryPlus.wrap(query)),
         "failed SegmentMetadata merging query"
     );
     exec.shutdownNow();
@@ -752,6 +777,7 @@ public class SegmentMetadataQueryTest
             "placement",
             new ColumnAnalysis(
                 ValueType.STRING.toString(),
+                false,
                 false,
                 0,
                 0,
@@ -794,7 +820,7 @@ public class SegmentMetadataQueryTest
         .build();
     TestHelper.assertExpectedObjects(
         ImmutableList.of(mergedSegmentAnalysis),
-        myRunner.run(QueryPlus.wrap(query), new HashMap<>()),
+        myRunner.run(QueryPlus.wrap(query)),
         "failed SegmentMetadata merging query"
     );
     exec.shutdownNow();
@@ -810,6 +836,7 @@ public class SegmentMetadataQueryTest
             "placement",
             new ColumnAnalysis(
                 ValueType.STRING.toString(),
+                false,
                 false,
                 0,
                 0,
@@ -852,7 +879,7 @@ public class SegmentMetadataQueryTest
         .build();
     TestHelper.assertExpectedObjects(
         ImmutableList.of(mergedSegmentAnalysis),
-        myRunner.run(QueryPlus.wrap(query), new HashMap<>()),
+        myRunner.run(QueryPlus.wrap(query)),
         "failed SegmentMetadata merging query"
     );
     exec.shutdownNow();
@@ -879,7 +906,7 @@ public class SegmentMetadataQueryTest
             FACTORY.mergeRunners(
                 Execs.directExecutor(),
                 //Note: It is essential to have atleast 2 query runners merged to reproduce the regression bug described in
-                //https://github.com/apache/incubator-druid/pull/1172
+                //https://github.com/apache/druid/pull/1172
                 //the bug surfaces only when ordering is used which happens only when you have 2 things to compare
                 Lists.newArrayList(singleSegmentQueryRunner, singleSegmentQueryRunner)
             )
@@ -889,10 +916,7 @@ public class SegmentMetadataQueryTest
 
     TestHelper.assertExpectedObjects(
         ImmutableList.of(bySegmentResult, bySegmentResult),
-        myRunner.run(
-            QueryPlus.wrap(testQuery.withOverriddenContext(ImmutableMap.of("bySegment", true))),
-            new HashMap<>()
-        ),
+        myRunner.run(QueryPlus.wrap(testQuery.withOverriddenContext(ImmutableMap.of(QueryContexts.BY_SEGMENT_KEY, true)))),
         "failed SegmentMetadata bySegment query"
     );
     exec.shutdownNow();
@@ -915,7 +939,7 @@ public class SegmentMetadataQueryTest
 
     Query query = MAPPER.readValue(queryStr, Query.class);
     Assert.assertTrue(query instanceof SegmentMetadataQuery);
-    Assert.assertEquals("test_ds", Iterables.getOnlyElement(query.getDataSource().getNames()));
+    Assert.assertEquals("test_ds", Iterables.getOnlyElement(query.getDataSource().getTableNames()));
     Assert.assertEquals(
         Intervals.of("2013-12-04T00:00:00.000Z/2013-12-05T00:00:00.000Z"),
         query.getIntervals().get(0)
@@ -935,7 +959,7 @@ public class SegmentMetadataQueryTest
                       + "}";
     Query query = MAPPER.readValue(queryStr, Query.class);
     Assert.assertTrue(query instanceof SegmentMetadataQuery);
-    Assert.assertEquals("test_ds", Iterables.getOnlyElement(query.getDataSource().getNames()));
+    Assert.assertEquals("test_ds", Iterables.getOnlyElement(query.getDataSource().getTableNames()));
     Assert.assertEquals(Intervals.ETERNITY, query.getIntervals().get(0));
     Assert.assertTrue(((SegmentMetadataQuery) query).isUsingDefaultInterval());
 
@@ -1271,4 +1295,52 @@ public class SegmentMetadataQueryTest
     Assert.assertEquals(analysisWCfg2, expectedAnalysisWCfg2);
   }
 
+  @Test
+  public void testLongNullableColumn()
+  {
+    ColumnAnalysis analysis = new ColumnAnalysis(
+        ValueType.LONG.toString(),
+        false,
+        NullHandling.replaceWithDefault() ? false : true,
+        19344,
+        null,
+        null,
+        null,
+        null
+    );
+    testSegmentMetadataQueryWithDefaultAnalysisMerge("longNumericNull", analysis);
+  }
+
+  @Test
+  public void testDoubleNullableColumn()
+  {
+    ColumnAnalysis analysis = new ColumnAnalysis(
+        ValueType.DOUBLE.toString(),
+        false,
+        NullHandling.replaceWithDefault() ? false : true,
+        19344,
+        null,
+        null,
+        null,
+        null
+    );
+    testSegmentMetadataQueryWithDefaultAnalysisMerge("doubleNumericNull", analysis);
+  }
+
+
+  @Test
+  public void testFloatNullableColumn()
+  {
+    ColumnAnalysis analysis = new ColumnAnalysis(
+        ValueType.FLOAT.toString(),
+        false,
+        NullHandling.replaceWithDefault() ? false : true,
+        19344,
+        null,
+        null,
+        null,
+        null
+    );
+    testSegmentMetadataQueryWithDefaultAnalysisMerge("floatNumericNull", analysis);
+  }
 }

@@ -25,13 +25,14 @@ import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
 import com.google.common.collect.Iterables;
 import com.google.inject.Inject;
+import org.apache.druid.common.utils.IdUtils;
 import org.apache.druid.discovery.DruidLeaderClient;
 import org.apache.druid.indexer.TaskStatusPlus;
 import org.apache.druid.java.util.common.DateTimes;
 import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.java.util.common.jackson.JacksonUtils;
-import org.apache.druid.java.util.http.client.response.FullResponseHolder;
+import org.apache.druid.java.util.http.client.response.StringFullResponseHolder;
 import org.apache.druid.timeline.DataSegment;
 import org.jboss.netty.handler.codec.http.HttpMethod;
 import org.jboss.netty.handler.codec.http.HttpResponseStatus;
@@ -43,6 +44,7 @@ import javax.ws.rs.core.MediaType;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -65,21 +67,25 @@ public class HttpIndexingServiceClient implements IndexingServiceClient
   }
 
   @Override
-  public void killSegments(String dataSource, Interval interval)
+  public void killUnusedSegments(String idPrefix, String dataSource, Interval interval)
   {
-    runTask(new ClientKillQuery(dataSource, interval));
+    final String taskId = IdUtils.newTaskId(idPrefix, ClientKillUnusedSegmentsTaskQuery.TYPE, dataSource, interval);
+    final ClientTaskQuery taskQuery = new ClientKillUnusedSegmentsTaskQuery(taskId, dataSource, interval);
+    runTask(taskId, taskQuery);
   }
 
   @Override
   public String compactSegments(
+      String idPrefix,
       List<DataSegment> segments,
-      @Nullable Long targetCompactionSizeBytes,
       int compactionTaskPriority,
-      ClientCompactQueryTuningConfig tuningConfig,
+      @Nullable ClientCompactionTaskQueryTuningConfig tuningConfig,
+      @Nullable ClientCompactionTaskGranularitySpec granularitySpec,
+      @Nullable Boolean dropExisting,
       @Nullable Map<String, Object> context
   )
   {
-    Preconditions.checkArgument(segments.size() > 1, "Expect two or more segments to compact");
+    Preconditions.checkArgument(!segments.isEmpty(), "Expect non-empty segments to compact");
 
     final String dataSource = segments.get(0).getDataSource();
     Preconditions.checkArgument(
@@ -90,23 +96,25 @@ public class HttpIndexingServiceClient implements IndexingServiceClient
     context = context == null ? new HashMap<>() : context;
     context.put("priority", compactionTaskPriority);
 
-    return runTask(
-        new ClientCompactQuery(
-            dataSource,
-            null,
-            segments,
-            targetCompactionSizeBytes,
-            tuningConfig,
-            context
-        )
+    final String taskId = IdUtils.newTaskId(idPrefix, ClientCompactionTaskQuery.TYPE, dataSource, null);
+    final ClientTaskQuery taskQuery = new ClientCompactionTaskQuery(
+        taskId,
+        dataSource,
+        new ClientCompactionIOConfig(ClientCompactionIntervalSpec.fromSegments(segments), dropExisting),
+        tuningConfig,
+        granularitySpec,
+        context
     );
+    return runTask(taskId, taskQuery);
   }
 
   @Override
-  public String runTask(Object taskObject)
+  public String runTask(String taskId, Object taskObject)
   {
     try {
-      final FullResponseHolder response = druidLeaderClient.go(
+      // Warning, magic: here we may serialize ClientTaskQuery objects, but OverlordResource.taskPost() deserializes
+      // Task objects from the same data. See the comment for ClientTaskQuery for details.
+      final StringFullResponseHolder response = druidLeaderClient.go(
           druidLeaderClient.makeRequest(HttpMethod.POST, "/druid/indexer/v1/task")
                            .setContent(MediaType.APPLICATION_JSON, jsonMapper.writeValueAsBytes(taskObject))
       );
@@ -115,11 +123,11 @@ public class HttpIndexingServiceClient implements IndexingServiceClient
         if (!Strings.isNullOrEmpty(response.getContent())) {
           throw new ISE(
               "Failed to post task[%s] with error[%s].",
-              taskObject,
+              taskId,
               response.getContent()
           );
         } else {
-          throw new ISE("Failed to post task[%s]. Please check overlord log", taskObject);
+          throw new ISE("Failed to post task[%s]. Please check overlord log", taskId);
         }
       }
 
@@ -127,8 +135,14 @@ public class HttpIndexingServiceClient implements IndexingServiceClient
           response.getContent(),
           JacksonUtils.TYPE_REFERENCE_MAP_STRING_OBJECT
       );
-      final String taskId = (String) resultMap.get("task");
-      return Preconditions.checkNotNull(taskId, "Null task id for task[%s]", taskObject);
+      final String returnedTaskId = (String) resultMap.get("task");
+      Preconditions.checkState(
+          taskId.equals(returnedTaskId),
+          "Got a different taskId[%s]. Expected taskId[%s]",
+          returnedTaskId,
+          taskId
+      );
+      return taskId;
     }
     catch (Exception e) {
       throw new RuntimeException(e);
@@ -136,10 +150,10 @@ public class HttpIndexingServiceClient implements IndexingServiceClient
   }
 
   @Override
-  public String killTask(String taskId)
+  public String cancelTask(String taskId)
   {
     try {
-      final FullResponseHolder response = druidLeaderClient.go(
+      final StringFullResponseHolder response = druidLeaderClient.go(
           druidLeaderClient.makeRequest(
               HttpMethod.POST,
               StringUtils.format("/druid/indexer/v1/task/%s/shutdown", StringUtils.urlEncode(taskId))
@@ -147,22 +161,22 @@ public class HttpIndexingServiceClient implements IndexingServiceClient
       );
 
       if (!response.getStatus().equals(HttpResponseStatus.OK)) {
-        throw new ISE("Failed to kill task[%s]", taskId);
+        throw new ISE("Failed to cancel task[%s]", taskId);
       }
 
       final Map<String, Object> resultMap = jsonMapper.readValue(
           response.getContent(),
           JacksonUtils.TYPE_REFERENCE_MAP_STRING_OBJECT
       );
-      final String killedTaskId = (String) resultMap.get("task");
-      Preconditions.checkNotNull(killedTaskId, "Null task id returned for task[%s]", taskId);
+      final String cancelledTaskId = (String) resultMap.get("task");
+      Preconditions.checkNotNull(cancelledTaskId, "Null task id returned for task[%s]", taskId);
       Preconditions.checkState(
-          taskId.equals(killedTaskId),
-          "Requested to kill task[%s], but another task[%s] was killed!",
+          taskId.equals(cancelledTaskId),
+          "Requested to cancel task[%s], but another task[%s] was cancelled!",
           taskId,
-          killedTaskId
+          cancelledTaskId
       );
-      return killedTaskId;
+      return cancelledTaskId;
     }
     catch (Exception e) {
       throw new RuntimeException(e);
@@ -173,7 +187,7 @@ public class HttpIndexingServiceClient implements IndexingServiceClient
   public int getTotalWorkerCapacity()
   {
     try {
-      final FullResponseHolder response = druidLeaderClient.go(
+      final StringFullResponseHolder response = druidLeaderClient.go(
           druidLeaderClient.makeRequest(HttpMethod.GET, "/druid/indexer/v1/workers")
                            .setHeader("Content-Type", MediaType.APPLICATION_JSON)
       );
@@ -227,12 +241,12 @@ public class HttpIndexingServiceClient implements IndexingServiceClient
   private List<TaskStatusPlus> getTasks(String endpointSuffix)
   {
     try {
-      final FullResponseHolder responseHolder = druidLeaderClient.go(
+      final StringFullResponseHolder responseHolder = druidLeaderClient.go(
           druidLeaderClient.makeRequest(HttpMethod.GET, StringUtils.format("/druid/indexer/v1/%s", endpointSuffix))
       );
 
       if (!responseHolder.getStatus().equals(HttpResponseStatus.OK)) {
-        throw new ISE("Error while fetching the status of the last complete task");
+        throw new ISE("Error while fetching the status of tasks");
       }
 
       return jsonMapper.readValue(
@@ -251,7 +265,7 @@ public class HttpIndexingServiceClient implements IndexingServiceClient
   public TaskStatusResponse getTaskStatus(String taskId)
   {
     try {
-      final FullResponseHolder responseHolder = druidLeaderClient.go(
+      final StringFullResponseHolder responseHolder = druidLeaderClient.go(
           druidLeaderClient.makeRequest(HttpMethod.GET, StringUtils.format(
               "/druid/indexer/v1/task/%s/status",
               StringUtils.urlEncode(taskId)
@@ -271,6 +285,27 @@ public class HttpIndexingServiceClient implements IndexingServiceClient
   }
 
   @Override
+  public Map<String, TaskStatus> getTaskStatuses(Set<String> taskIds) throws InterruptedException
+  {
+    try {
+      final StringFullResponseHolder responseHolder = druidLeaderClient.go(
+          druidLeaderClient.makeRequest(HttpMethod.POST, "/druid/indexer/v1/taskStatus")
+                           .setContent(MediaType.APPLICATION_JSON, jsonMapper.writeValueAsBytes(taskIds))
+      );
+
+      return jsonMapper.readValue(
+          responseHolder.getContent(),
+          new TypeReference<Map<String, TaskStatus>>()
+          {
+          }
+      );
+    }
+    catch (IOException e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  @Override
   @Nullable
   public TaskStatusPlus getLastCompleteTask()
   {
@@ -282,7 +317,7 @@ public class HttpIndexingServiceClient implements IndexingServiceClient
   public TaskPayloadResponse getTaskPayload(String taskId)
   {
     try {
-      final FullResponseHolder responseHolder = druidLeaderClient.go(
+      final StringFullResponseHolder responseHolder = druidLeaderClient.go(
           druidLeaderClient.makeRequest(
               HttpMethod.GET,
               StringUtils.format("/druid/indexer/v1/task/%s", StringUtils.urlEncode(taskId))
@@ -302,6 +337,56 @@ public class HttpIndexingServiceClient implements IndexingServiceClient
   }
 
   @Override
+  public Map<String, List<Interval>> getLockedIntervals(Map<String, Integer> minTaskPriority)
+  {
+    try {
+      final StringFullResponseHolder responseHolder = druidLeaderClient.go(
+          druidLeaderClient.makeRequest(HttpMethod.POST, "/druid/indexer/v1/lockedIntervals")
+                           .setContent(MediaType.APPLICATION_JSON, jsonMapper.writeValueAsBytes(minTaskPriority))
+      );
+
+      final Map<String, List<Interval>> response = jsonMapper.readValue(
+          responseHolder.getContent(),
+          new TypeReference<Map<String, List<Interval>>>()
+          {
+          }
+      );
+      return response == null ? Collections.emptyMap() : response;
+    }
+    catch (IOException | InterruptedException e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  @Override
+  public SamplerResponse sample(SamplerSpec samplerSpec)
+  {
+    try {
+      final StringFullResponseHolder response = druidLeaderClient.go(
+          druidLeaderClient.makeRequest(HttpMethod.POST, "/druid/indexer/v1/sampler")
+                           .setContent(MediaType.APPLICATION_JSON, jsonMapper.writeValueAsBytes(samplerSpec))
+      );
+
+      if (!response.getStatus().equals(HttpResponseStatus.OK)) {
+        if (!Strings.isNullOrEmpty(response.getContent())) {
+          throw new ISE(
+              "Failed to sample with sampler spec[%s], response[%s].",
+              samplerSpec,
+              response.getContent()
+          );
+        } else {
+          throw new ISE("Failed to sample with sampler spec[%s]. Please check overlord log", samplerSpec);
+        }
+      }
+
+      return jsonMapper.readValue(response.getContent(), SamplerResponse.class);
+    }
+    catch (Exception e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  @Override
   public int killPendingSegments(String dataSource, DateTime end)
   {
     final String endPoint = StringUtils.format(
@@ -310,7 +395,7 @@ public class HttpIndexingServiceClient implements IndexingServiceClient
         new Interval(DateTimes.MIN, end)
     );
     try {
-      final FullResponseHolder responseHolder = druidLeaderClient.go(
+      final StringFullResponseHolder responseHolder = druidLeaderClient.go(
           druidLeaderClient.makeRequest(HttpMethod.DELETE, endPoint)
       );
 

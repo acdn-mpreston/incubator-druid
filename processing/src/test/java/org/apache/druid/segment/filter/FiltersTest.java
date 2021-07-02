@@ -27,13 +27,13 @@ import org.apache.druid.collections.bitmap.ImmutableBitmap;
 import org.apache.druid.collections.bitmap.MutableBitmap;
 import org.apache.druid.segment.IntIteratorUtils;
 import org.apache.druid.segment.column.BitmapIndex;
+import org.apache.druid.testing.InitializedNullHandlingTest;
+import org.junit.Assert;
 import org.junit.Test;
 
 import java.util.List;
 
-import static org.junit.Assert.assertEquals;
-
-public class FiltersTest
+public class FiltersTest extends InitializedNullHandlingTest
 {
   @Test
   public void testEstimateSelectivityOfBitmapList()
@@ -48,7 +48,7 @@ public class FiltersTest
         10000
     );
     final double expected = 0.1;
-    assertEquals(expected, estimated, 0.00001);
+    Assert.assertEquals(expected, estimated, 0.00001);
   }
 
   private static BitmapIndex getBitmapIndex(final List<ImmutableBitmap> bitmapList)

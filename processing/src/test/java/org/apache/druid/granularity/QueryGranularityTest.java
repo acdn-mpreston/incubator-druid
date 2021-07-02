@@ -46,8 +46,6 @@ import org.joda.time.Years;
 import org.junit.Assert;
 import org.junit.Test;
 
-import java.net.URL;
-import java.net.URLClassLoader;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
@@ -584,7 +582,7 @@ public class QueryGranularityTest
   }
 
   @Test
-  public void testDurationTruncate()
+  public void testDurationBucketStart()
   {
     {
       final DateTime origin = DateTimes.of("2012-01-02T05:00:00.000-08:00");
@@ -592,6 +590,7 @@ public class QueryGranularityTest
           new Period("PT12H5M").toStandardDuration().getMillis(),
           origin
       );
+
       assertSameDateTime(
           Lists.newArrayList(
               DateTimes.of("2012-01-01T04:50:00.000-08:00"),
@@ -605,6 +604,82 @@ public class QueryGranularityTest
               gran.bucketStart(DateTimes.of("2012-01-03T00:20:04.123-08:00")),
               gran.bucketStart(DateTimes.of("2012-02-03T22:25:00.000-08:00"))
           )
+      );
+
+      // Same as above, but using the millis form of the method.
+      Assert.assertEquals(
+          DateTimes.of("2012-01-01T04:50:00.000-08:00").getMillis(),
+          gran.bucketStart(DateTimes.of("2012-01-01T05:00:04.123-08:00").getMillis())
+      );
+      Assert.assertEquals(
+          DateTimes.of("2012-01-02T05:00:00.000-08:00").getMillis(),
+          gran.bucketStart(DateTimes.of("2012-01-02T07:00:04.123-08:00").getMillis())
+      );
+      Assert.assertEquals(
+          DateTimes.of("2012-01-02T17:05:00.000-08:00").getMillis(),
+          gran.bucketStart(DateTimes.of("2012-01-03T00:20:04.123-08:00").getMillis())
+      );
+      Assert.assertEquals(
+          DateTimes.of("2012-02-03T22:25:00.000-08:00").getMillis(),
+          gran.bucketStart(DateTimes.of("2012-02-03T22:25:00.000-08:00").getMillis())
+      );
+    }
+  }
+
+  @Test
+  public void testDurationIncrement()
+  {
+    {
+      final DateTime origin = DateTimes.of("2012-01-02T05:00:00.000-08:00");
+      Granularity gran = new DurationGranularity(
+          new Period("PT12H5M").toStandardDuration().getMillis(),
+          origin
+      );
+
+      Assert.assertEquals(
+          DateTimes.of("2012-01-01T17:05:04.123-08:00"),
+          gran.increment(DateTimes.of("2012-01-01T05:00:04.123-08:00"))
+      );
+      Assert.assertEquals(
+          DateTimes.of("2012-01-02T19:05:04.123-08:00"),
+          gran.increment(DateTimes.of("2012-01-02T07:00:04.123-08:00"))
+      );
+      Assert.assertEquals(
+          DateTimes.of("2012-01-03T12:25:04.123-08:00"),
+          gran.increment(DateTimes.of("2012-01-03T00:20:04.123-08:00"))
+      );
+      Assert.assertEquals(
+          DateTimes.of("2012-02-04T10:30:00.000-08:00"),
+          gran.increment(DateTimes.of("2012-02-03T22:25:00.000-08:00"))
+      );
+    }
+  }
+
+  @Test
+  public void testDurationIncrementOnMillis()
+  {
+    {
+      final DateTime origin = DateTimes.of("2012-01-02T05:00:00.000-08:00");
+      Granularity gran = new DurationGranularity(
+          new Period("PT12H5M").toStandardDuration().getMillis(),
+          origin
+      );
+
+      Assert.assertEquals(
+          DateTimes.of("2012-01-01T17:05:04.123-08:00").getMillis(),
+          gran.increment(DateTimes.of("2012-01-01T05:00:04.123-08:00").getMillis())
+      );
+      Assert.assertEquals(
+          DateTimes.of("2012-01-02T19:05:04.123-08:00").getMillis(),
+          gran.increment(DateTimes.of("2012-01-02T07:00:04.123-08:00")).getMillis()
+      );
+      Assert.assertEquals(
+          DateTimes.of("2012-01-03T12:25:04.123-08:00").getMillis(),
+          gran.increment(DateTimes.of("2012-01-03T00:20:04.123-08:00")).getMillis()
+      );
+      Assert.assertEquals(
+          DateTimes.of("2012-02-04T10:30:00.000-08:00").getMillis(),
+          gran.increment(DateTimes.of("2012-02-03T22:25:00.000-08:00")).getMillis()
       );
     }
   }
@@ -802,17 +877,6 @@ public class QueryGranularityTest
     Assert.assertFalse("actualIter not exhausted!?", actualIter.hasNext());
     Assert.assertFalse("expectedIter not exhausted!?", expectedIter.hasNext());
   }
-
-  @Test(timeout = 60_000L)
-  public void testDeadLock() throws Exception
-  {
-    final URL[] urls = ((URLClassLoader) Granularity.class.getClassLoader()).getURLs();
-    final String className = Granularity.class.getCanonicalName();
-    for (int i = 0; i < 1000; ++i) {
-      final ClassLoader loader = new URLClassLoader(urls, null);
-      Assert.assertNotNull(String.valueOf(i), Class.forName(className, true, loader));
-    }
-  }
   
   @Test
   public void testTruncateKathmandu()
@@ -823,21 +887,25 @@ public class QueryGranularityTest
     final PeriodGranularity hour = new PeriodGranularity(new Period("PT1H"), null, tz);
     final PeriodGranularity twoHour = new PeriodGranularity(new Period("PT2H"), null, tz);
 
-    Assert.assertEquals(
-        new DateTime("2011-01-01T00:00:00.000+05:45", tz),
-        year.toDateTime(year.bucketStart(date).getMillis())
-    );
-    Assert.assertEquals(
-        new DateTime("2011-03-15T21:00:00.000+05:45", tz),
-        hour.toDateTime(hour.bucketStart(date).getMillis())
+    assertBucketStart(
+        year,
+        date,
+        new DateTime("2011-01-01T00:00:00.000+05:45", tz)
     );
 
-    Assert.assertEquals(
-        new DateTime("2011-03-15T20:00:00.000+05:45", tz),
-        twoHour.toDateTime(twoHour.bucketStart(date).getMillis())
+    assertBucketStart(
+        hour,
+        date,
+        new DateTime("2011-03-15T21:00:00.000+05:45", tz)
+    );
+
+    assertBucketStart(
+        twoHour,
+        date,
+        new DateTime("2011-03-15T20:00:00.000+05:45", tz)
     );
   }
-  
+
   @Test
   public void testTruncateDhaka()
   {
@@ -847,20 +915,43 @@ public class QueryGranularityTest
     final PeriodGranularity hour = new PeriodGranularity(new Period("PT1H"), null, tz);
     final PeriodGranularity twoHour = new PeriodGranularity(new Period("PT2H"), null, tz);
 
-    Assert.assertEquals(
-        new DateTime("2011-01-01T00:00:00.000+06:00", tz),
-        year.toDateTime(year.bucketStart(date).getMillis())
-    );
-    Assert.assertEquals(
-        new DateTime("2011-03-15T21:00:00.000+06:00", tz),
-        hour.toDateTime(hour.bucketStart(date).getMillis())
+    assertBucketStart(
+        year,
+        date,
+        new DateTime("2011-01-01T00:00:00.000+06:00", tz)
     );
 
-    Assert.assertEquals(
-        new DateTime("2011-03-15T20:00:00.000+06:00", tz),
-        twoHour.toDateTime(twoHour.bucketStart(date).getMillis())
+    assertBucketStart(
+        hour,
+        date,
+        new DateTime("2011-03-15T21:00:00.000+06:00", tz)
+    );
+
+    assertBucketStart(
+        twoHour,
+        date,
+        new DateTime("2011-03-15T20:00:00.000+06:00", tz)
     );
   }
-  
 
+  private void assertBucketStart(final Granularity granularity, final DateTime in, final DateTime expectedInProperTz)
+  {
+    Assert.assertEquals(
+        StringUtils.format("Granularity [%s] toDateTime(bucketStart(DateTime))", granularity),
+        expectedInProperTz,
+        granularity.toDateTime(granularity.bucketStart(in).getMillis())
+    );
+
+    Assert.assertEquals(
+        StringUtils.format("Granularity [%s] bucketStart(DateTime)", granularity),
+        expectedInProperTz.withZone(in.getZone()),
+        granularity.bucketStart(in)
+    );
+
+    Assert.assertEquals(
+        StringUtils.format("Granularity [%s] bucketStart(long)", granularity),
+        expectedInProperTz.getMillis(),
+        granularity.bucketStart(in.getMillis())
+    );
+  }
 }

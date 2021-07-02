@@ -19,8 +19,10 @@
 
 package org.apache.druid.segment.filter;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Predicate;
+import com.google.common.collect.ImmutableSet;
 import org.apache.druid.collections.bitmap.ImmutableBitmap;
 import org.apache.druid.collections.spatial.search.Bound;
 import org.apache.druid.query.BitmapResultFactory;
@@ -30,10 +32,14 @@ import org.apache.druid.query.filter.DruidFloatPredicate;
 import org.apache.druid.query.filter.DruidLongPredicate;
 import org.apache.druid.query.filter.DruidPredicateFactory;
 import org.apache.druid.query.filter.Filter;
+import org.apache.druid.query.filter.FilterTuning;
 import org.apache.druid.query.filter.ValueMatcher;
 import org.apache.druid.segment.ColumnSelector;
 import org.apache.druid.segment.ColumnSelectorFactory;
 import org.apache.druid.segment.incremental.SpatialDimensionRowTransformer;
+
+import java.util.Objects;
+import java.util.Set;
 
 /**
  */
@@ -41,14 +47,17 @@ public class SpatialFilter implements Filter
 {
   private final String dimension;
   private final Bound bound;
+  private final FilterTuning filterTuning;
 
   public SpatialFilter(
       String dimension,
-      Bound bound
+      Bound bound,
+      FilterTuning filterTuning
   )
   {
     this.dimension = Preconditions.checkNotNull(dimension, "dimension");
     this.bound = Preconditions.checkNotNull(bound, "bound");
+    this.filterTuning = filterTuning;
   }
 
   @Override
@@ -64,46 +73,8 @@ public class SpatialFilter implements Filter
     return Filters.makeValueMatcher(
         factory,
         dimension,
-        new DruidPredicateFactory()
-        {
-          @Override
-          public Predicate<String> makeStringPredicate()
-          {
-            return new Predicate<String>()
-            {
-              @Override
-              public boolean apply(String input)
-              {
-                if (input == null) {
-                  return false;
-                }
-                final float[] coordinate = SpatialDimensionRowTransformer.decode(input);
-                return bound.contains(coordinate);
-              }
-            };
-          }
+        new BoundDruidPredicateFactory(bound)
 
-          @Override
-          public DruidLongPredicate makeLongPredicate()
-          {
-            // SpatialFilter does not currently support longs
-            return DruidLongPredicate.ALWAYS_FALSE;
-          }
-
-          @Override
-          public DruidFloatPredicate makeFloatPredicate()
-          {
-            // SpatialFilter does not currently support floats
-            return DruidFloatPredicate.ALWAYS_FALSE;
-          }
-
-          @Override
-          public DruidDoublePredicate makeDoublePredicate()
-          {
-            // SpatialFilter does not currently support doubles
-            return DruidDoublePredicate.ALWAYS_FALSE;
-          }
-        }
     );
   }
 
@@ -114,9 +85,21 @@ public class SpatialFilter implements Filter
   }
 
   @Override
+  public boolean shouldUseBitmapIndex(BitmapIndexSelector selector)
+  {
+    return Filters.shouldUseBitmapIndex(this, selector, filterTuning);
+  }
+
+  @Override
   public boolean supportsSelectivityEstimation(ColumnSelector columnSelector, BitmapIndexSelector indexSelector)
   {
     return false;
+  }
+
+  @Override
+  public Set<String> getRequiredColumns()
+  {
+    return ImmutableSet.of(dimension);
   }
 
   @Override
@@ -124,5 +107,89 @@ public class SpatialFilter implements Filter
   {
     // selectivity estimation for multi-value columns is not implemented yet.
     throw new UnsupportedOperationException();
+  }
+
+  @Override
+  public boolean equals(Object o)
+  {
+    if (this == o) {
+      return true;
+    }
+    if (o == null || getClass() != o.getClass()) {
+      return false;
+    }
+    SpatialFilter that = (SpatialFilter) o;
+    return Objects.equals(dimension, that.dimension) &&
+           Objects.equals(bound, that.bound) &&
+           Objects.equals(filterTuning, that.filterTuning);
+  }
+
+  @Override
+  public int hashCode()
+  {
+    return Objects.hash(dimension, bound, filterTuning);
+  }
+
+  @VisibleForTesting
+  static class BoundDruidPredicateFactory implements DruidPredicateFactory
+  {
+    private final Bound bound;
+
+    BoundDruidPredicateFactory(Bound bound)
+    {
+      this.bound = bound;
+    }
+
+    @Override
+    public Predicate<String> makeStringPredicate()
+    {
+      return input -> {
+        if (input == null) {
+          return false;
+        }
+        final float[] coordinate = SpatialDimensionRowTransformer.decode(input);
+        return bound.contains(coordinate);
+      };
+    }
+
+    @Override
+    public DruidLongPredicate makeLongPredicate()
+    {
+      // SpatialFilter does not currently support longs
+      return DruidLongPredicate.ALWAYS_FALSE;
+    }
+
+    @Override
+    public DruidFloatPredicate makeFloatPredicate()
+    {
+      // SpatialFilter does not currently support floats
+      return DruidFloatPredicate.ALWAYS_FALSE;
+    }
+
+    @Override
+    public DruidDoublePredicate makeDoublePredicate()
+    {
+      // SpatialFilter does not currently support doubles
+      return DruidDoublePredicate.ALWAYS_FALSE;
+    }
+
+    @Override
+    public boolean equals(Object o)
+    {
+      if (this == o) {
+        return true;
+      }
+      if (o == null || getClass() != o.getClass()) {
+        return false;
+      }
+      BoundDruidPredicateFactory that = (BoundDruidPredicateFactory) o;
+      return Objects.equals(bound, that.bound);
+    }
+
+    @Override
+    public int hashCode()
+    {
+      return Objects.hash(bound);
+    }
   }
 }

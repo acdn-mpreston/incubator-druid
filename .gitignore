@@ -11,9 +11,12 @@ target
 .project
 .PVS-Studio
 .settings/
+.vscode
 *.log
 *.DS_Store
 _site
 dependency-reduced-pom.xml
+LICENSE.BINARY
+NOTICE.BINARY
 README.BINARY
 README

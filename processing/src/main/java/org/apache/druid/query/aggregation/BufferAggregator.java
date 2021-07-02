@@ -24,6 +24,7 @@ import org.apache.druid.query.monomorphicprocessing.CalledFromHotLoop;
 import org.apache.druid.query.monomorphicprocessing.HotLoopCallee;
 import org.apache.druid.query.monomorphicprocessing.RuntimeShapeInspector;
 
+import javax.annotation.Nullable;
 import java.nio.ByteBuffer;
 
 /**
@@ -33,6 +34,8 @@ import java.nio.ByteBuffer;
  *
  * Thus, an Aggregator can be thought of as a closure over some other thing that is stateful and changes between calls
  * to aggregate(...).
+ *
+ * @see VectorAggregator, the vectorized version
  */
 @ExtensionPoint
 public interface BufferAggregator extends HotLoopCallee
@@ -87,6 +90,7 @@ public interface BufferAggregator extends HotLoopCallee
    * @param position offset within the byte buffer at which the aggregate value is stored
    * @return the Object representation of the aggregate
    */
+  @Nullable
   Object get(ByteBuffer buf, int position);
 
   /**
@@ -97,7 +101,7 @@ public interface BufferAggregator extends HotLoopCallee
    * <b>Implementations must not change the position, limit or mark of the given buffer</b>
    *
    * Implementations are only required to support this method if they are aggregations which
-   * have an {@link AggregatorFactory#getTypeName()} of "float".
+   * have an {@link AggregatorFactory#getType()} ()} of {@link org.apache.druid.segment.column.ValueType#FLOAT}.
    * If unimplemented, throwing an {@link UnsupportedOperationException} is common and recommended.
    *
    * @param buf byte buffer storing the byte array representation of the aggregate
@@ -114,7 +118,7 @@ public interface BufferAggregator extends HotLoopCallee
    * <b>Implementations must not change the position, limit or mark of the given buffer</b>
    *
    * Implementations are only required to support this method if they are aggregations which
-   * have an {@link AggregatorFactory#getTypeName()} of "long".
+   * have an {@link AggregatorFactory#getType()} of  of {@link org.apache.druid.segment.column.ValueType#LONG}.
    * If unimplemented, throwing an {@link UnsupportedOperationException} is common and recommended.
    *
    * @param buf byte buffer storing the byte array representation of the aggregate
@@ -131,7 +135,7 @@ public interface BufferAggregator extends HotLoopCallee
    * <b>Implementations must not change the position, limit or mark of the given buffer</b>
    *
    * Implementations are only required to support this method if they are aggregations which
-   * have an {@link AggregatorFactory#getTypeName()} of "double".
+   * have an {@link AggregatorFactory#getType()} of  of {@link org.apache.druid.segment.column.ValueType#DOUBLE}.
    * If unimplemented, throwing an {@link UnsupportedOperationException} is common and recommended.
    *
    * The default implementation casts {@link BufferAggregator#getFloat(ByteBuffer, int)} to double.

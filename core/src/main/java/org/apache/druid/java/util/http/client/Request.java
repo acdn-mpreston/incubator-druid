@@ -22,7 +22,6 @@ package org.apache.druid.java.util.http.client;
 import com.google.common.base.Supplier;
 import com.google.common.collect.Multimap;
 import com.google.common.collect.Multimaps;
-import org.apache.druid.java.util.common.StringUtils;
 import org.jboss.netty.buffer.ChannelBuffer;
 import org.jboss.netty.buffer.ChannelBufferFactory;
 import org.jboss.netty.buffer.HeapChannelBufferFactory;
@@ -44,7 +43,7 @@ import java.util.Map;
  */
 public class Request
 {
-  private static final ChannelBufferFactory factory = HeapChannelBufferFactory.getInstance();
+  private static final ChannelBufferFactory FACTORY = HeapChannelBufferFactory.getInstance();
 
   private final HttpMethod method;
   private final URL url;
@@ -147,7 +146,7 @@ public class Request
 
   public Request setContent(String contentType, byte[] bytes, int offset, int length)
   {
-    return setContent(contentType, factory.getBuffer(bytes, offset, length));
+    return setContent(contentType, FACTORY.getBuffer(bytes, offset, length));
   }
 
   public Request setContent(String contentType, ChannelBuffer content)
@@ -165,8 +164,8 @@ public class Request
 
   public Request setBasicAuthentication(String username, String password)
   {
-    final String base64Value = base64Encode(StringUtils.format("%s:%s", username, password));
-    setHeader(HttpHeaders.Names.AUTHORIZATION, StringUtils.format("Basic %s", base64Value));
+    final String base64Value = base64Encode(username + ":" + password);
+    setHeader(HttpHeaders.Names.AUTHORIZATION, "Basic " + base64Value);
     return this;
   }
 

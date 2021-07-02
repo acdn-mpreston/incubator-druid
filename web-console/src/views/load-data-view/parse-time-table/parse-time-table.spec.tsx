@@ -16,10 +16,11 @@
  * limitations under the License.
  */
 
+import { render } from '@testing-library/react';
 import React from 'react';
-import { render } from 'react-testing-library';
 
-import { getEmptyTimestampSpec } from '../../../utils/ingestion-spec';
+import { IngestionSpec, PLACEHOLDER_TIMESTAMP_SPEC } from '../../../druid-models';
+import { deepSet } from '../../../utils';
 
 import { ParseTimeTable } from './parse-time-table';
 
@@ -29,21 +30,28 @@ describe('parse time table', () => {
       header: ['c1'],
       rows: [
         {
-          raw: `{"c1":"hello"}`,
+          input: { c1: 'hello' },
           parsed: { c1: 'hello' },
         },
       ],
     };
 
+    const spec = deepSet(
+      {} as IngestionSpec,
+      'spec.dataSchema.timestampSpec',
+      PLACEHOLDER_TIMESTAMP_SPEC,
+    );
+
     const parseTimeTable = (
       <ParseTimeTable
         sampleBundle={{
           headerAndRows: sampleData,
-          timestampSpec: getEmptyTimestampSpec(),
+          spec,
         }}
         columnFilter=""
         possibleTimestampColumnsOnly={false}
-        onTimestampColumnSelect={() => null}
+        selectedColumnName={undefined}
+        onTimestampColumnSelect={() => {}}
       />
     );
 

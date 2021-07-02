@@ -1,135 +1,133 @@
 // Jest Snapshot v1, https://goo.gl/fbAQLP
 
-exports[`home view matches snapshot 1`] = `
+exports[`home view matches snapshot (coordinator) 1`] = `
 <div
   className="home-view app-view"
 >
-  <a
-    href="/status"
-    target="_blank"
-  >
-    <Blueprint3.Card
-      className="status-card"
-      elevation={0}
-      interactive={true}
-    >
-      <Component>
-        <Blueprint3.Icon
-          color="#bfccd5"
-          icon="graph"
-        />
-         
-        Status
-      </Component>
-      <p>
-        Loading...
-      </p>
-    </Blueprint3.Card>
-  </a>
-  <a
-    href="#datasources"
-  >
-    <Blueprint3.Card
-      className="status-card"
-      elevation={0}
-      interactive={true}
-    >
-      <Component>
-        <Blueprint3.Icon
-          color="#bfccd5"
-          icon="multi-select"
-        />
-         
-        Datasources
-      </Component>
-      <p>
-        Loading...
-      </p>
-    </Blueprint3.Card>
-  </a>
-  <a
-    href="#segments"
-  >
-    <Blueprint3.Card
-      className="status-card"
-      elevation={0}
-      interactive={true}
-    >
-      <Component>
-        <Blueprint3.Icon
-          color="#bfccd5"
-          icon="stacked-chart"
-        />
-         
-        Segments
-      </Component>
-      <p>
-        Loading...
-      </p>
-    </Blueprint3.Card>
-  </a>
-  <a
-    href="#tasks"
-  >
-    <Blueprint3.Card
-      className="status-card"
-      elevation={0}
-      interactive={true}
-    >
-      <Component>
-        <Blueprint3.Icon
-          color="#bfccd5"
-          icon="list-columns"
-        />
-         
-        Supervisors
-      </Component>
-      <p>
-        Loading...
-      </p>
-    </Blueprint3.Card>
-  </a>
-  <a
-    href="#tasks"
-  >
-    <Blueprint3.Card
-      className="status-card"
-      elevation={0}
-      interactive={true}
-    >
-      <Component>
-        <Blueprint3.Icon
-          color="#bfccd5"
-          icon="gantt-chart"
-        />
-         
-        Tasks
-      </Component>
-      <p>
-        Loading...
-      </p>
-    </Blueprint3.Card>
-  </a>
-  <a
-    href="#servers"
-  >
-    <Blueprint3.Card
-      className="status-card"
-      elevation={0}
-      interactive={true}
-    >
-      <Component>
-        <Blueprint3.Icon
-          color="#bfccd5"
-          icon="database"
-        />
-         
-        Servers
-      </Component>
-      <p>
-        Loading...
-      </p>
-    </Blueprint3.Card>
-  </a>
+  <Memo(StatusCard) />
+  <Memo(DatasourcesCard)
+    capabilities={
+      Capabilities {
+        "coordinator": true,
+        "overlord": false,
+        "queryType": "none",
+      }
+    }
+  />
+  <Memo(SegmentsCard)
+    capabilities={
+      Capabilities {
+        "coordinator": true,
+        "overlord": false,
+        "queryType": "none",
+      }
+    }
+  />
+  <Memo(ServicesCard)
+    capabilities={
+      Capabilities {
+        "coordinator": true,
+        "overlord": false,
+        "queryType": "none",
+      }
+    }
+  />
+  <Memo(LookupsCard)
+    capabilities={
+      Capabilities {
+        "coordinator": true,
+        "overlord": false,
+        "queryType": "none",
+      }
+    }
+  />
+</div>
+`;
+
+exports[`home view matches snapshot (full) 1`] = `
+<div
+  className="home-view app-view"
+>
+  <Memo(StatusCard) />
+  <Memo(DatasourcesCard)
+    capabilities={
+      Capabilities {
+        "coordinator": true,
+        "overlord": true,
+        "queryType": "nativeAndSql",
+      }
+    }
+  />
+  <Memo(SegmentsCard)
+    capabilities={
+      Capabilities {
+        "coordinator": true,
+        "overlord": true,
+        "queryType": "nativeAndSql",
+      }
+    }
+  />
+  <Memo(SupervisorsCard)
+    capabilities={
+      Capabilities {
+        "coordinator": true,
+        "overlord": true,
+        "queryType": "nativeAndSql",
+      }
+    }
+  />
+  <Memo(TasksCard)
+    capabilities={
+      Capabilities {
+        "coordinator": true,
+        "overlord": true,
+        "queryType": "nativeAndSql",
+      }
+    }
+  />
+  <Memo(ServicesCard)
+    capabilities={
+      Capabilities {
+        "coordinator": true,
+        "overlord": true,
+        "queryType": "nativeAndSql",
+      }
+    }
+  />
+  <Memo(LookupsCard)
+    capabilities={
+      Capabilities {
+        "coordinator": true,
+        "overlord": true,
+        "queryType": "nativeAndSql",
+      }
+    }
+  />
+</div>
+`;
+
+exports[`home view matches snapshot (overlord) 1`] = `
+<div
+  className="home-view app-view"
+>
+  <Memo(StatusCard) />
+  <Memo(SupervisorsCard)
+    capabilities={
+      Capabilities {
+        "coordinator": false,
+        "overlord": true,
+        "queryType": "none",
+      }
+    }
+  />
+  <Memo(TasksCard)
+    capabilities={
+      Capabilities {
+        "coordinator": false,
+        "overlord": true,
+        "queryType": "none",
+      }
+    }
+  />
 </div>
 `;

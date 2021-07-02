@@ -24,6 +24,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.druid.indexing.kinesis.KinesisIndexingServiceModule;
 import org.apache.druid.jackson.DefaultObjectMapper;
 import org.apache.druid.segment.IndexSpec;
+import org.apache.druid.segment.incremental.OnheapIncrementalIndex;
 import org.apache.druid.segment.indexing.TuningConfig;
 import org.joda.time.Duration;
 import org.joda.time.Period;
@@ -58,12 +59,12 @@ public class KinesisSupervisorTuningConfigTest
     );
 
     Assert.assertNotNull(config.getBasePersistDirectory());
+    Assert.assertEquals(new OnheapIncrementalIndex.Spec(), config.getAppendableIndexSpec());
     Assert.assertEquals(1000000, config.getMaxRowsInMemory());
     Assert.assertEquals(5_000_000, config.getMaxRowsPerSegment().intValue());
     Assert.assertEquals(new Period("PT10M"), config.getIntermediatePersistPeriod());
     Assert.assertEquals(0, config.getMaxPendingPersists());
     Assert.assertEquals(new IndexSpec(), config.getIndexSpec());
-    Assert.assertEquals(true, config.getBuildV9Directly());
     Assert.assertEquals(false, config.isReportParseExceptions());
     Assert.assertEquals(0, config.getHandoffConditionTimeout());
     Assert.assertNull(config.getWorkerThreads());
@@ -71,6 +72,7 @@ public class KinesisSupervisorTuningConfigTest
     Assert.assertEquals(8L, (long) config.getChatRetries());
     Assert.assertEquals(Duration.standardSeconds(10), config.getHttpTimeout());
     Assert.assertEquals(Duration.standardSeconds(80), config.getShutdownTimeout());
+    Assert.assertEquals(Duration.standardSeconds(120), config.getRepartitionTransitionDuration());
   }
 
   @Test
@@ -83,14 +85,15 @@ public class KinesisSupervisorTuningConfigTest
                      + "  \"maxRowsPerSegment\": 100,\n"
                      + "  \"intermediatePersistPeriod\": \"PT1H\",\n"
                      + "  \"maxPendingPersists\": 100,\n"
-                     + "  \"buildV9Directly\": false,\n"
                      + "  \"reportParseExceptions\": true,\n"
                      + "  \"handoffConditionTimeout\": 100,\n"
                      + "  \"workerThreads\": 12,\n"
                      + "  \"chatThreads\": 13,\n"
                      + "  \"chatRetries\": 14,\n"
                      + "  \"httpTimeout\": \"PT15S\",\n"
-                     + "  \"shutdownTimeout\": \"PT95S\"\n"
+                     + "  \"shutdownTimeout\": \"PT95S\",\n"
+                     + "  \"repartitionTransitionDuration\": \"PT500S\",\n"
+                     + "  \"appendableIndexSpec\": { \"type\" : \"onheap\" }\n"
                      + "}";
 
     KinesisSupervisorTuningConfig config = (KinesisSupervisorTuningConfig) mapper.readValue(
@@ -104,11 +107,11 @@ public class KinesisSupervisorTuningConfigTest
     );
 
     Assert.assertEquals(new File("/tmp/xxx"), config.getBasePersistDirectory());
+    Assert.assertEquals(new OnheapIncrementalIndex.Spec(), config.getAppendableIndexSpec());
     Assert.assertEquals(100, config.getMaxRowsInMemory());
     Assert.assertEquals(100, config.getMaxRowsPerSegment().intValue());
     Assert.assertEquals(new Period("PT1H"), config.getIntermediatePersistPeriod());
     Assert.assertEquals(100, config.getMaxPendingPersists());
-    Assert.assertEquals(true, config.getBuildV9Directly());
     Assert.assertEquals(true, config.isReportParseExceptions());
     Assert.assertEquals(100, config.getHandoffConditionTimeout());
     Assert.assertEquals(12, (int) config.getWorkerThreads());
@@ -116,5 +119,6 @@ public class KinesisSupervisorTuningConfigTest
     Assert.assertEquals(14L, (long) config.getChatRetries());
     Assert.assertEquals(Duration.standardSeconds(15), config.getHttpTimeout());
     Assert.assertEquals(Duration.standardSeconds(95), config.getShutdownTimeout());
+    Assert.assertEquals(Duration.standardSeconds(500), config.getRepartitionTransitionDuration());
   }
 }

@@ -42,7 +42,7 @@ public class DoubleNumericColumnPartSerdeV2 implements ColumnPartSerde
   @JsonCreator
   public static DoubleNumericColumnPartSerdeV2 getDoubleGenericColumnPartSerde(
       @JsonProperty("byteOrder") ByteOrder byteOrder,
-      @Nullable @JsonProperty("bitmapSerdeFactory") BitmapSerdeFactory bitmapSerdeFactory
+      @JsonProperty("bitmapSerdeFactory") @Nullable BitmapSerdeFactory bitmapSerdeFactory
   )
   {
     return new DoubleNumericColumnPartSerdeV2(
@@ -54,7 +54,7 @@ public class DoubleNumericColumnPartSerdeV2 implements ColumnPartSerde
 
   private final ByteOrder byteOrder;
   @Nullable
-  private Serializer serializer;
+  private final Serializer serializer;
   private final BitmapSerdeFactory bitmapSerdeFactory;
 
   public DoubleNumericColumnPartSerdeV2(
@@ -87,8 +87,11 @@ public class DoubleNumericColumnPartSerdeV2 implements ColumnPartSerde
 
   public static class SerializerBuilder
   {
+    @Nullable
     private ByteOrder byteOrder = null;
+    @Nullable
     private Serializer delegate = null;
+    @Nullable
     private BitmapSerdeFactory bitmapSerdeFactory = null;
 
     public SerializerBuilder withByteOrder(final ByteOrder byteOrder)
@@ -149,13 +152,17 @@ public class DoubleNumericColumnPartSerdeV2 implements ColumnPartSerde
 
       buffer.position(initialPos + offset);
       final ImmutableBitmap bitmap;
+      final boolean hasNulls;
       if (buffer.hasRemaining()) {
         bitmap = bitmapSerdeFactory.getObjectStrategy().fromByteBufferWithSize(buffer);
+        hasNulls = !bitmap.isEmpty();
       } else {
         bitmap = bitmapSerdeFactory.getBitmapFactory().makeEmptyImmutableBitmap();
+        hasNulls = false;
       }
       builder.setType(ValueType.DOUBLE)
              .setHasMultipleValues(false)
+             .setHasNulls(hasNulls)
              .setNumericColumnSupplier(new DoubleNumericColumnSupplier(column, bitmap));
     };
   }

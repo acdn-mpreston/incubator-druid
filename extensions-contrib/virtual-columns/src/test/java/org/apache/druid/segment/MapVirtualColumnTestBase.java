@@ -27,13 +27,15 @@ import org.apache.druid.data.input.impl.TimestampSpec;
 import org.apache.druid.java.util.common.DateTimes;
 import org.apache.druid.segment.incremental.IncrementalIndex;
 import org.apache.druid.segment.incremental.IncrementalIndexSchema;
+import org.apache.druid.segment.incremental.OnheapIncrementalIndex;
+import org.apache.druid.testing.InitializedNullHandlingTest;
 
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
 
-public class MapVirtualColumnTestBase
+public class MapVirtualColumnTestBase extends InitializedNullHandlingTest
 {
   static IncrementalIndex generateIndex() throws IOException
   {
@@ -61,10 +63,10 @@ public class MapVirtualColumnTestBase
         .build();
 
     return TestIndex.loadIncrementalIndex(
-        () -> new IncrementalIndex.Builder()
+        () -> new OnheapIncrementalIndex.Builder()
             .setIndexSchema(schema)
             .setMaxRowCount(10000)
-            .buildOnheap(),
+            .build(),
         input,
         parser
     );

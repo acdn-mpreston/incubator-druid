@@ -24,6 +24,7 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.base.Preconditions;
 import org.apache.druid.java.util.common.DateTimes;
 import org.joda.time.DateTime;
+import org.joda.time.Interval;
 import org.joda.time.format.DateTimeFormatter;
 
 import java.nio.ByteBuffer;
@@ -71,27 +72,47 @@ public class DurationGranularity extends Granularity
   }
 
   @Override
-  public DateTime increment(DateTime time)
+  public long increment(long time)
   {
-    return time.plus(getDuration());
+    return time + duration;
   }
 
   @Override
-  public DateTime bucketStart(DateTime time)
+  public DateTime increment(DateTime time)
   {
-    long t = time.getMillis();
+    return time.plus(duration);
+  }
+
+  @Override
+  public long bucketStart(long t)
+  {
     final long duration = getDurationMillis();
     long offset = t % duration - origin;
     if (offset < 0) {
       offset += duration;
     }
-    return new DateTime(t - offset, time.getChronology());
+    return t - offset;
+  }
+
+  @Override
+  public DateTime bucketStart(DateTime time)
+  {
+    return new DateTime(bucketStart(time.getMillis()), time.getChronology());
   }
 
   @Override
   public DateTime toDate(String filePath, Formatter formatter)
   {
     throw new UnsupportedOperationException("This method should not be invoked for this granularity type");
+  }
+
+  @Override
+  public boolean isAligned(Interval interval)
+  {
+    if (interval.toDurationMillis() == duration) {
+      return (interval.getStartMillis() - origin) % duration == 0;
+    }
+    return false;
   }
 
   @Override

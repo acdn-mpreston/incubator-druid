@@ -21,39 +21,65 @@ package org.apache.druid.query.filter;
 
 import com.fasterxml.jackson.annotation.JacksonInject;
 import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Supplier;
 import com.google.common.base.Suppliers;
 import com.google.common.collect.RangeSet;
-import com.google.common.collect.Sets;
 import org.apache.druid.math.expr.Expr;
 import org.apache.druid.math.expr.ExprMacroTable;
 import org.apache.druid.math.expr.Parser;
 import org.apache.druid.query.cache.CacheKeyBuilder;
 import org.apache.druid.segment.filter.ExpressionFilter;
 
-import java.util.HashSet;
+import javax.annotation.Nullable;
 import java.util.Objects;
+import java.util.Set;
 
-public class ExpressionDimFilter implements DimFilter
+public class ExpressionDimFilter extends AbstractOptimizableDimFilter implements DimFilter
 {
   private final String expression;
   private final Supplier<Expr> parsed;
+  private final Supplier<byte[]> cacheKey;
+  @Nullable
+  private final FilterTuning filterTuning;
 
   @JsonCreator
   public ExpressionDimFilter(
       @JsonProperty("expression") final String expression,
+      @JsonProperty("filterTuning") @Nullable final FilterTuning filterTuning,
       @JacksonInject ExprMacroTable macroTable
   )
   {
     this.expression = expression;
-    this.parsed = Suppliers.memoize(() -> Parser.parse(expression, macroTable));
+    this.filterTuning = filterTuning;
+    this.parsed = Parser.lazyParse(expression, macroTable);
+    this.cacheKey = Suppliers.memoize(() -> {
+      return new CacheKeyBuilder(DimFilterUtils.EXPRESSION_CACHE_ID)
+          .appendCacheable(parsed.get())
+          .build();
+    });
+  }
+
+  @VisibleForTesting
+  public ExpressionDimFilter(final String expression, ExprMacroTable macroTable)
+  {
+    this(expression, null, macroTable);
   }
 
   @JsonProperty
   public String getExpression()
   {
     return expression;
+  }
+
+  @Nullable
+  @JsonInclude(JsonInclude.Include.NON_NULL)
+  @JsonProperty
+  public FilterTuning getFilterTuning()
+  {
+    return filterTuning;
   }
 
   @Override
@@ -65,7 +91,7 @@ public class ExpressionDimFilter implements DimFilter
   @Override
   public Filter toFilter()
   {
-    return new ExpressionFilter(parsed);
+    return new ExpressionFilter(parsed, filterTuning);
   }
 
   @Override
@@ -75,36 +101,15 @@ public class ExpressionDimFilter implements DimFilter
   }
 
   @Override
-  public HashSet<String> getRequiredColumns()
+  public Set<String> getRequiredColumns()
   {
-    return Sets.newHashSet(parsed.get().analyzeInputs().getFreeVariables());
+    return parsed.get().analyzeInputs().getRequiredBindings();
   }
 
   @Override
   public byte[] getCacheKey()
   {
-    return new CacheKeyBuilder(DimFilterUtils.EXPRESSION_CACHE_ID)
-        .appendString(expression)
-        .build();
-  }
-
-  @Override
-  public boolean equals(final Object o)
-  {
-    if (this == o) {
-      return true;
-    }
-    if (o == null || getClass() != o.getClass()) {
-      return false;
-    }
-    final ExpressionDimFilter that = (ExpressionDimFilter) o;
-    return Objects.equals(expression, that.expression);
-  }
-
-  @Override
-  public int hashCode()
-  {
-    return Objects.hash(expression);
+    return cacheKey.get();
   }
 
   @Override
@@ -112,6 +117,27 @@ public class ExpressionDimFilter implements DimFilter
   {
     return "ExpressionDimFilter{" +
            "expression='" + expression + '\'' +
+           ", filterTuning=" + filterTuning +
            '}';
+  }
+
+  @Override
+  public boolean equals(Object o)
+  {
+    if (this == o) {
+      return true;
+    }
+    if (o == null || getClass() != o.getClass()) {
+      return false;
+    }
+    ExpressionDimFilter that = (ExpressionDimFilter) o;
+    return expression.equals(that.expression) &&
+           Objects.equals(filterTuning, that.filterTuning);
+  }
+
+  @Override
+  public int hashCode()
+  {
+    return Objects.hash(expression, filterTuning);
   }
 }

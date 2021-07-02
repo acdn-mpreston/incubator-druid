@@ -25,6 +25,8 @@ import org.apache.druid.segment.column.ColumnCapabilities;
 import org.apache.druid.segment.selector.settable.SettableColumnValueSelector;
 import org.apache.druid.segment.writeout.SegmentWriteOutMedium;
 
+import javax.annotation.Nullable;
+
 import java.util.Comparator;
 
 /**
@@ -70,6 +72,7 @@ public interface DimensionHandler
    * Get {@link MultiValueHandling} for the column associated with this handler.
    * Only string columns can have {@link MultiValueHandling} currently.
    */
+  @Nullable
   default MultiValueHandling getMultivalueHandling()
   {
     return null;
@@ -119,6 +122,10 @@ public interface DimensionHandler
    * Returns a comparator that knows how to compare {@link ColumnValueSelector} of the assumed dimension type,
    * corresponding to this DimensionHandler. E. g. {@link StringDimensionHandler} returns a comparator, that compares
    * {@link ColumnValueSelector}s as {@link DimensionSelector}s.
+   *
+   * The comparison rules used by this method should match the rules used by
+   * {@link DimensionIndexer#compareUnsortedEncodedKeyComponents}, otherwise incorrect ordering/merging of rows
+   * can occur during ingestion, causing issues such as imperfect rollup.
    */
   Comparator<ColumnValueSelector> getEncodedValueSelectorComparator();
 

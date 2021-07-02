@@ -16,21 +16,99 @@
  * limitations under the License.
  */
 
+import { render } from '@testing-library/react';
 import React from 'react';
-import { render } from 'react-testing-library';
 
 import { RuleEditor } from './rule-editor';
 
 describe('rule editor', () => {
-  it('matches snapshot', () => {
+  it('matches snapshot no tier in rule', () => {
     const ruleEditor = (
       <RuleEditor
         rule={{ type: 'loadForever' }}
         tiers={['test', 'test', 'test']}
-        onChange={() => null}
-        onDelete={() => null}
-        moveUp={null}
-        moveDown={null}
+        onChange={() => {}}
+        onDelete={() => {}}
+        moveUp={undefined}
+        moveDown={undefined}
+      />
+    );
+    const { container } = render(ruleEditor);
+    expect(container.firstChild).toMatchSnapshot();
+  });
+
+  it('matches snapshot with non existing tier in rule', () => {
+    const ruleEditor = (
+      <RuleEditor
+        rule={{
+          type: 'loadByInterval',
+          period: '2010-01-01/2015-01-01',
+          tieredReplicants: { nonexist: 2 },
+        }}
+        tiers={['test1', 'test2', 'test3']}
+        onChange={() => {}}
+        onDelete={() => {}}
+        moveUp={undefined}
+        moveDown={undefined}
+      />
+    );
+    const { container } = render(ruleEditor);
+    expect(container.firstChild).toMatchSnapshot();
+  });
+
+  it('matches snapshot with existing tier in rule', () => {
+    const ruleEditor = (
+      <RuleEditor
+        rule={{
+          type: 'loadByInterval',
+          period: '2010-01-01/2015-01-01',
+          tieredReplicants: { test1: 2 },
+        }}
+        tiers={['test1', 'test2', 'test3']}
+        onChange={() => {}}
+        onDelete={() => {}}
+        moveUp={undefined}
+        moveDown={undefined}
+      />
+    );
+    const { container } = render(ruleEditor);
+    expect(container.firstChild).toMatchSnapshot();
+  });
+
+  it('matches snapshot with existing tier and non existing tier in rule', () => {
+    const ruleEditor = (
+      <RuleEditor
+        rule={{
+          type: 'loadByInterval',
+          period: '2010-01-01/2015-01-01',
+          tieredReplicants: {
+            test1: 2,
+            nonexist: 1,
+          },
+        }}
+        tiers={['test1', 'test2', 'test3']}
+        onChange={() => {}}
+        onDelete={() => {}}
+        moveUp={undefined}
+        moveDown={undefined}
+      />
+    );
+    const { container } = render(ruleEditor);
+    expect(container.firstChild).toMatchSnapshot();
+  });
+
+  it('matches snapshot with broadcast rule', () => {
+    const ruleEditor = (
+      <RuleEditor
+        rule={{
+          type: 'broadcastByInterval',
+          period: '2010-01-01/2015-01-01',
+        }}
+        tiers={[]}
+        onChange={() => {}}
+        onDelete={() => {}}
+        moveUp={undefined}
+        moveDown={undefined}
       />
     );
     const { container } = render(ruleEditor);

@@ -22,14 +22,19 @@ package org.apache.druid.indexing.kafka.supervisor;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.base.Preconditions;
+import org.apache.druid.data.input.InputFormat;
 import org.apache.druid.indexing.seekablestream.supervisor.SeekableStreamSupervisorIOConfig;
+import org.apache.druid.indexing.seekablestream.supervisor.autoscaler.AutoScalerConfig;
 import org.apache.druid.java.util.common.StringUtils;
+import org.joda.time.DateTime;
 import org.joda.time.Period;
 
+import javax.annotation.Nullable;
 import java.util.Map;
 
 public class KafkaSupervisorIOConfig extends SeekableStreamSupervisorIOConfig
 {
+  public static final String DRUID_DYNAMIC_CONFIG_PROVIDER_KEY = "druid.dynamic.config.provider";
   public static final String BOOTSTRAP_SERVERS_KEY = "bootstrap.servers";
   public static final String TRUST_STORE_PASSWORD_KEY = "ssl.truststore.password";
   public static final String KEY_STORE_PASSWORD_KEY = "ssl.keystore.password";
@@ -43,21 +48,25 @@ public class KafkaSupervisorIOConfig extends SeekableStreamSupervisorIOConfig
   @JsonCreator
   public KafkaSupervisorIOConfig(
       @JsonProperty("topic") String topic,
+      @JsonProperty("inputFormat") InputFormat inputFormat,
       @JsonProperty("replicas") Integer replicas,
       @JsonProperty("taskCount") Integer taskCount,
       @JsonProperty("taskDuration") Period taskDuration,
       @JsonProperty("consumerProperties") Map<String, Object> consumerProperties,
+      @Nullable @JsonProperty("autoScalerConfig") AutoScalerConfig autoScalerConfig,
       @JsonProperty("pollTimeout") Long pollTimeout,
       @JsonProperty("startDelay") Period startDelay,
       @JsonProperty("period") Period period,
       @JsonProperty("useEarliestOffset") Boolean useEarliestOffset,
       @JsonProperty("completionTimeout") Period completionTimeout,
       @JsonProperty("lateMessageRejectionPeriod") Period lateMessageRejectionPeriod,
-      @JsonProperty("earlyMessageRejectionPeriod") Period earlyMessageRejectionPeriod
+      @JsonProperty("earlyMessageRejectionPeriod") Period earlyMessageRejectionPeriod,
+      @JsonProperty("lateMessageRejectionStartDateTime") DateTime lateMessageRejectionStartDateTime
   )
   {
     super(
         Preconditions.checkNotNull(topic, "topic"),
+        inputFormat,
         replicas,
         taskCount,
         taskDuration,
@@ -66,7 +75,9 @@ public class KafkaSupervisorIOConfig extends SeekableStreamSupervisorIOConfig
         useEarliestOffset,
         completionTimeout,
         lateMessageRejectionPeriod,
-        earlyMessageRejectionPeriod
+        earlyMessageRejectionPeriod,
+        autoScalerConfig,
+        lateMessageRejectionStartDateTime
     );
 
     this.consumerProperties = Preconditions.checkNotNull(consumerProperties, "consumerProperties");
@@ -110,6 +121,7 @@ public class KafkaSupervisorIOConfig extends SeekableStreamSupervisorIOConfig
            ", taskCount=" + getTaskCount() +
            ", taskDuration=" + getTaskDuration() +
            ", consumerProperties=" + consumerProperties +
+           ", autoScalerConfig=" + getAutoscalerConfig() +
            ", pollTimeout=" + pollTimeout +
            ", startDelay=" + getStartDelay() +
            ", period=" + getPeriod() +
@@ -117,6 +129,7 @@ public class KafkaSupervisorIOConfig extends SeekableStreamSupervisorIOConfig
            ", completionTimeout=" + getCompletionTimeout() +
            ", earlyMessageRejectionPeriod=" + getEarlyMessageRejectionPeriod() +
            ", lateMessageRejectionPeriod=" + getLateMessageRejectionPeriod() +
+           ", lateMessageRejectionStartDateTime=" + getLateMessageRejectionStartDateTime() +
            '}';
   }
 

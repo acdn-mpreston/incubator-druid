@@ -26,16 +26,16 @@ import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.guava.Sequence;
 import org.apache.druid.query.ChainedExecutionQueryRunner;
 import org.apache.druid.query.QueryPlus;
+import org.apache.druid.query.QueryProcessingPool;
 import org.apache.druid.query.QueryRunner;
 import org.apache.druid.query.QueryRunnerFactory;
 import org.apache.druid.query.QueryToolChest;
 import org.apache.druid.query.QueryWatcher;
 import org.apache.druid.query.Result;
+import org.apache.druid.query.context.ResponseContext;
 import org.apache.druid.segment.Segment;
 
 import java.nio.ByteBuffer;
-import java.util.Map;
-import java.util.concurrent.ExecutorService;
 
 /**
  */
@@ -66,7 +66,7 @@ public class TopNQueryRunnerFactory implements QueryRunnerFactory<Result<TopNRes
       @Override
       public Sequence<Result<TopNResultValue>> run(
           QueryPlus<Result<TopNResultValue>> input,
-          Map<String, Object> responseContext
+          ResponseContext responseContext
       )
       {
         if (!(input.getQuery() instanceof TopNQuery)) {
@@ -82,11 +82,11 @@ public class TopNQueryRunnerFactory implements QueryRunnerFactory<Result<TopNRes
 
   @Override
   public QueryRunner<Result<TopNResultValue>> mergeRunners(
-      ExecutorService queryExecutor,
+      QueryProcessingPool queryProcessingPool,
       Iterable<QueryRunner<Result<TopNResultValue>>> queryRunners
   )
   {
-    return new ChainedExecutionQueryRunner<>(queryExecutor, queryWatcher, queryRunners);
+    return new ChainedExecutionQueryRunner<>(queryProcessingPool, queryWatcher, queryRunners);
   }
 
   @Override

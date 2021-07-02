@@ -23,6 +23,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableMap;
 import org.apache.druid.jackson.DefaultObjectMapper;
 import org.apache.druid.segment.IndexSpec;
+import org.apache.druid.segment.incremental.OnheapIncrementalIndex;
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -32,7 +33,7 @@ import java.util.List;
  */
 public class HadoopTuningConfigTest
 {
-  private static final ObjectMapper jsonMapper = new DefaultObjectMapper();
+  private static final ObjectMapper JSON_MAPPER = new DefaultObjectMapper();
 
   @Test
   public void testSerde() throws Exception
@@ -40,6 +41,8 @@ public class HadoopTuningConfigTest
     HadoopTuningConfig expected = new HadoopTuningConfig(
         "/tmp/workingpath",
         "version",
+        null,
+        null,
         null,
         null,
         null,
@@ -54,23 +57,25 @@ public class HadoopTuningConfigTest
         true,
         null,
         null,
+        true,
+        true,
         null,
-        true,
-        true,
         null,
         null,
         null,
         null
     );
 
-    HadoopTuningConfig actual = jsonReadWriteRead(jsonMapper.writeValueAsString(expected), HadoopTuningConfig.class);
+    HadoopTuningConfig actual = jsonReadWriteRead(JSON_MAPPER.writeValueAsString(expected), HadoopTuningConfig.class);
 
     Assert.assertEquals("/tmp/workingpath", actual.getWorkingPath());
     Assert.assertEquals("version", actual.getVersion());
+    Assert.assertEquals(new OnheapIncrementalIndex.Spec(), actual.getAppendableIndexSpec());
     Assert.assertNotNull(actual.getPartitionsSpec());
     Assert.assertEquals(ImmutableMap.<Long, List<HadoopyShardSpec>>of(), actual.getShardSpecs());
     Assert.assertEquals(new IndexSpec(), actual.getIndexSpec());
-    Assert.assertEquals(100, actual.getRowFlushBoundary());
+    Assert.assertEquals(new IndexSpec(), actual.getIndexSpecForIntermediatePersists());
+    Assert.assertEquals(100, actual.getMaxRowsInMemory());
     Assert.assertEquals(true, actual.isLeaveIntermediate());
     Assert.assertEquals(true, actual.isCleanupOnFailure());
     Assert.assertEquals(true, actual.isOverwriteFiles());
@@ -81,12 +86,13 @@ public class HadoopTuningConfigTest
     Assert.assertEquals(0, actual.getNumBackgroundPersistThreads());
     Assert.assertEquals(true, actual.isForceExtendableShardSpecs());
     Assert.assertEquals(true, actual.isUseExplicitVersion());
+    Assert.assertEquals(0, actual.getAwaitSegmentAvailabilityTimeoutMillis());
   }
 
   public static <T> T jsonReadWriteRead(String s, Class<T> klass)
   {
     try {
-      return jsonMapper.readValue(jsonMapper.writeValueAsBytes(jsonMapper.readValue(s, klass)), klass);
+      return JSON_MAPPER.readValue(JSON_MAPPER.writeValueAsBytes(JSON_MAPPER.readValue(s, klass)), klass);
     }
     catch (Exception e) {
       throw new RuntimeException(e);

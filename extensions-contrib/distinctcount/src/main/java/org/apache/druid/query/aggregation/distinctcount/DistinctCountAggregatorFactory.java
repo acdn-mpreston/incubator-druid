@@ -34,6 +34,7 @@ import org.apache.druid.query.aggregation.LongSumAggregatorFactory;
 import org.apache.druid.query.dimension.DefaultDimensionSpec;
 import org.apache.druid.segment.ColumnSelectorFactory;
 import org.apache.druid.segment.DimensionSelector;
+import org.apache.druid.segment.column.ValueType;
 
 import javax.annotation.Nullable;
 import java.nio.ByteBuffer;
@@ -124,7 +125,7 @@ public class DistinctCountAggregatorFactory extends AggregatorFactory
   @Override
   public AggregateCombiner makeAggregateCombiner()
   {
-    // This is likely wrong as well as combine(), see https://github.com/apache/incubator-druid/pull/2602#issuecomment-321224202
+    // This is likely wrong as well as combine(), see https://github.com/apache/druid/pull/2602#issuecomment-321224202
     return new LongSumAggregateCombiner();
   }
 
@@ -194,9 +195,26 @@ public class DistinctCountAggregatorFactory extends AggregatorFactory
   }
 
   @Override
-  public String getTypeName()
+  public String getComplexTypeName()
   {
     return "distinctCount";
+  }
+
+  /**
+   * this aggregator only works on a single segment, so even though it stores a
+   * {@link org.apache.druid.collections.bitmap.MutableBitmap} while computing, this value never leaves the aggregator
+   * and {@link DistinctCountAggregator#get} returns an integer for the number of set bits in the bitmap.
+   */
+  @Override
+  public ValueType getType()
+  {
+    return ValueType.LONG;
+  }
+
+  @Override
+  public ValueType getFinalizedType()
+  {
+    return ValueType.LONG;
   }
 
   @Override

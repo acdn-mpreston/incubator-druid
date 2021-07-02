@@ -38,6 +38,7 @@ import org.apache.druid.query.dimension.DefaultDimensionSpec;
 import org.apache.druid.query.dimension.DimensionSpec;
 import org.apache.druid.query.dimension.ExtractionDimensionSpec;
 import org.apache.druid.segment.VirtualColumn;
+import org.apache.druid.segment.column.RowSignature;
 import org.apache.druid.segment.column.ValueType;
 import org.apache.druid.segment.virtual.ExpressionVirtualColumn;
 import org.apache.druid.sql.calcite.aggregation.Aggregation;
@@ -47,10 +48,8 @@ import org.apache.druid.sql.calcite.expression.Expressions;
 import org.apache.druid.sql.calcite.planner.Calcites;
 import org.apache.druid.sql.calcite.planner.PlannerContext;
 import org.apache.druid.sql.calcite.rel.VirtualColumnRegistry;
-import org.apache.druid.sql.calcite.table.RowSignature;
 
 import javax.annotation.Nullable;
-import java.util.ArrayList;
 import java.util.List;
 
 public class BloomFilterSqlAggregator implements SqlAggregator
@@ -115,15 +114,10 @@ public class BloomFilterSqlAggregator implements SqlAggregator
 
           // Check input for equivalence.
           final boolean inputMatches;
-          final VirtualColumn virtualInput =
-              existing.getVirtualColumns()
-                      .stream()
-                      .filter(virtualColumn ->
-                                  virtualColumn.getOutputName().equals(theFactory.getField().getOutputName())
-                      )
-                      .findFirst()
-                      .orElse(null);
-
+          final VirtualColumn virtualInput = virtualColumnRegistry.findVirtualColumns(theFactory.requiredFields())
+                                                                  .stream()
+                                                                  .findFirst()
+                                                                  .orElse(null);
           if (virtualInput == null) {
             if (input.isDirectColumnAccess()) {
               inputMatches =
@@ -150,9 +144,8 @@ public class BloomFilterSqlAggregator implements SqlAggregator
     }
 
     // No existing match found. Create a new one.
-    final List<VirtualColumn> virtualColumns = new ArrayList<>();
 
-    ValueType valueType = Calcites.getValueTypeForSqlTypeName(inputOperand.getType().getSqlTypeName());
+    ValueType valueType = Calcites.getValueTypeForRelDataType(inputOperand.getType());
     final DimensionSpec spec;
     if (input.isDirectColumnAccess()) {
       spec = new DefaultDimensionSpec(
@@ -171,10 +164,12 @@ public class BloomFilterSqlAggregator implements SqlAggregator
       VirtualColumn virtualColumn = virtualColumnRegistry.getOrCreateVirtualColumnForExpression(
           plannerContext,
           input,
-          inputOperand.getType().getSqlTypeName()
+          inputOperand.getType()
       );
-      virtualColumns.add(virtualColumn);
-      spec = new DefaultDimensionSpec(virtualColumn.getOutputName(), virtualColumn.getOutputName());
+      spec = new DefaultDimensionSpec(
+          virtualColumn.getOutputName(),
+          StringUtils.format("%s:%s", name, virtualColumn.getOutputName())
+      );
     }
 
     aggregatorFactory = new BloomFilterAggregatorFactory(
@@ -183,10 +178,7 @@ public class BloomFilterSqlAggregator implements SqlAggregator
         maxNumEntries
     );
 
-    return Aggregation.create(
-        virtualColumns,
-        aggregatorFactory
-    );
+    return Aggregation.create(aggregatorFactory);
   }
 
   private static class BloomFilterSqlAggFunction extends SqlAggFunction

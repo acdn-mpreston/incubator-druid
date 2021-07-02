@@ -21,6 +21,7 @@ package org.apache.druid.indexing.overlord.supervisor;
 
 import com.fasterxml.jackson.annotation.JsonSubTypes;
 import com.fasterxml.jackson.annotation.JsonTypeInfo;
+import org.apache.druid.indexing.overlord.supervisor.autoscaler.SupervisorTaskAutoScaler;
 
 import java.util.List;
 
@@ -40,6 +41,11 @@ public interface SupervisorSpec
    */
   Supervisor createSupervisor();
 
+  default SupervisorTaskAutoScaler createAutoscaler(Supervisor supervisor)
+  {
+    return null;
+  }
+
   List<String> getDataSources();
 
   default SupervisorSpec createSuspendedSpec()
@@ -56,4 +62,20 @@ public interface SupervisorSpec
   {
     return false;
   }
+
+  /**
+   * This API is only used for informational purposes in
+   * org.apache.druid.sql.calcite.schema.SystemSchema.SupervisorsTable
+   *
+   * @return supervisor type
+   */
+  String getType();
+
+  /**
+   * This API is only used for informational purposes in
+   * org.apache.druid.sql.calcite.schema.SystemSchema.SupervisorsTable
+   *
+   * @return source like stream or topic name
+   */
+  String getSource();
 }

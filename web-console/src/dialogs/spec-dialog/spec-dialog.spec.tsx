@@ -16,14 +16,27 @@
  * limitations under the License.
  */
 
+import { render } from '@testing-library/react';
 import React from 'react';
-import { render } from 'react-testing-library';
 
 import { SpecDialog } from './spec-dialog';
 
 describe('spec dialog', () => {
-  it('matches snapshot', () => {
-    const specDialog = <SpecDialog onSubmit={() => null} onClose={() => null} title={'test'} />;
+  it('matches snapshot no initSpec', () => {
+    const specDialog = <SpecDialog onSubmit={() => {}} onClose={() => {}} title="test" />;
+    render(specDialog);
+    expect(document.body.lastChild).toMatchSnapshot();
+  });
+
+  it('matches snapshot with initSpec', () => {
+    const specDialog = (
+      <SpecDialog
+        initSpec={{ type: 'some-spec' }}
+        onSubmit={() => {}}
+        onClose={() => {}}
+        title="test"
+      />
+    );
     render(specDialog);
     expect(document.body.lastChild).toMatchSnapshot();
   });

@@ -44,6 +44,8 @@ public class AuthConfig
 
   public static final String ANONYMOUS_NAME = "anonymous";
 
+  public static final String TRUSTED_DOMAIN_NAME = "trustedDomain";
+
   public AuthConfig()
   {
     this(null, null, null, false);
@@ -51,13 +53,13 @@ public class AuthConfig
 
   @JsonCreator
   public AuthConfig(
-      @JsonProperty("authenticatorChain") List<String> authenticationChain,
+      @JsonProperty("authenticatorChain") List<String> authenticatorChain,
       @JsonProperty("authorizers") List<String> authorizers,
       @JsonProperty("unsecuredPaths") List<String> unsecuredPaths,
       @JsonProperty("allowUnauthenticatedHttpOptions") boolean allowUnauthenticatedHttpOptions
   )
   {
-    this.authenticatorChain = authenticationChain;
+    this.authenticatorChain = authenticatorChain;
     this.authorizers = authorizers;
     this.unsecuredPaths = unsecuredPaths == null ? Collections.emptyList() : unsecuredPaths;
     this.allowUnauthenticatedHttpOptions = allowUnauthenticatedHttpOptions;

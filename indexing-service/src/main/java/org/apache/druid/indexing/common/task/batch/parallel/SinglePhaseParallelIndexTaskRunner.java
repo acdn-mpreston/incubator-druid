@@ -20,232 +20,134 @@
 package org.apache.druid.indexing.common.task.batch.parallel;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Optional;
 import com.google.common.base.Preconditions;
-import com.google.common.util.concurrent.FutureCallback;
-import com.google.common.util.concurrent.Futures;
-import com.google.common.util.concurrent.ListenableFuture;
-import org.apache.druid.client.indexing.IndexingServiceClient;
-import org.apache.druid.data.input.FiniteFirehoseFactory;
+import org.apache.commons.lang3.mutable.MutableObject;
 import org.apache.druid.data.input.FirehoseFactory;
+import org.apache.druid.data.input.FirehoseFactoryToInputSourceAdaptor;
+import org.apache.druid.data.input.InputSource;
 import org.apache.druid.data.input.InputSplit;
-import org.apache.druid.indexer.TaskState;
-import org.apache.druid.indexer.TaskStatusPlus;
-import org.apache.druid.indexing.appenderator.ActionBasedUsedSegmentChecker;
+import org.apache.druid.data.input.impl.SplittableInputSource;
+import org.apache.druid.indexing.common.Counters;
+import org.apache.druid.indexing.common.TaskLock;
+import org.apache.druid.indexing.common.TaskLockType;
 import org.apache.druid.indexing.common.TaskToolbox;
-import org.apache.druid.indexing.common.actions.SegmentTransactionalInsertAction;
-import org.apache.druid.indexing.common.task.batch.parallel.TaskMonitor.MonitorEntry;
+import org.apache.druid.indexing.common.actions.LockListAction;
+import org.apache.druid.indexing.common.actions.TimeChunkLockTryAcquireAction;
+import org.apache.druid.indexing.common.task.Task;
 import org.apache.druid.indexing.common.task.batch.parallel.TaskMonitor.SubTaskCompleteEvent;
+import org.apache.druid.java.util.common.IAE;
 import org.apache.druid.java.util.common.ISE;
-import org.apache.druid.java.util.common.logger.Logger;
+import org.apache.druid.java.util.common.NonnullPair;
+import org.apache.druid.segment.indexing.granularity.GranularitySpec;
 import org.apache.druid.segment.realtime.appenderator.SegmentIdWithShardSpec;
-import org.apache.druid.segment.realtime.appenderator.TransactionalSegmentPublisher;
-import org.apache.druid.segment.realtime.appenderator.UsedSegmentChecker;
-import org.apache.druid.timeline.DataSegment;
+import org.apache.druid.timeline.SegmentId;
+import org.apache.druid.timeline.partition.BuildingNumberedShardSpec;
+import org.joda.time.DateTime;
+import org.joda.time.Interval;
 
 import javax.annotation.Nullable;
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.LinkedBlockingDeque;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
 /**
  * An implementation of {@link ParallelIndexTaskRunner} to support best-effort roll-up. This runner can submit and
- * monitor multiple {@link ParallelIndexSubTask}s.
- *
+ * monitor multiple {@link SinglePhaseSubTask}s.
+ * <p>
  * As its name indicates, distributed indexing is done in a single phase, i.e., without shuffling intermediate data. As
  * a result, this task can't be used for perfect rollup.
  */
-public class SinglePhaseParallelIndexTaskRunner implements ParallelIndexTaskRunner<ParallelIndexSubTask>
+public class SinglePhaseParallelIndexTaskRunner extends ParallelIndexPhaseRunner<SinglePhaseSubTask, PushedSegmentsReport>
 {
-  private static final Logger log = new Logger(SinglePhaseParallelIndexTaskRunner.class);
+  /**
+   * A flag to determine what protocol to use for segment allocation. The Overlod sets this context explicitly
+   * for all tasks to use the lineage-based protocol in 0.22 or later.
+   */
+  public static final String CTX_USE_LINEAGE_BASED_SEGMENT_ALLOCATION_KEY = "useLineageBasedSegmentAllocation";
 
-  private final TaskToolbox toolbox;
-  private final String taskId;
-  private final String groupId;
+  /**
+   * A legacy default for {@link #CTX_USE_LINEAGE_BASED_SEGMENT_ALLOCATION_KEY} when the Overlord is running on
+   * 0.21 or earlier.
+   *
+   * The new lineage-based segment allocation protocol must be used as the legacy protocol has a critical bug.
+   * However, we tell subtasks to use the legacy protocol by default unless it is explicitly set in the taskContext.
+   * This is to guarantee that every subtask uses the same protocol during the replacing rolling upgrade so that
+   * batch tasks that are already running can continue. Once the upgrade is done, the Overlod will set this context
+   * explicitly for all tasks to use the new protocol.
+   *
+   * @see SinglePhaseParallelIndexTaskRunner#allocateNewSegment(String, DateTime)
+   * @see org.apache.druid.indexing.overlord.TaskQueue#add(Task)
+   * @see #DEFAULT_USE_LINEAGE_BASED_SEGMENT_ALLOCATION
+   */
+  @Deprecated
+  static final boolean LEGACY_DEFAULT_USE_LINEAGE_BASED_SEGMENT_ALLOCATION = false;
+
+  /**
+   * A new default for {@link #CTX_USE_LINEAGE_BASED_SEGMENT_ALLOCATION_KEY} when the Overlord is running on 0.22
+   * or later. The new lineage-based segment allocation protocol must be used to ensure data correctness.
+   *
+   * @see SinglePhaseParallelIndexTaskRunner#allocateNewSegment(String, DateTime, String, String)
+   */
+  public static final boolean DEFAULT_USE_LINEAGE_BASED_SEGMENT_ALLOCATION = true;
+
+  private static final String PHASE_NAME = "segment generation";
+
+  // interval -> next partitionId
+  private final ConcurrentHashMap<Interval, AtomicInteger> partitionNumCountersPerInterval = new ConcurrentHashMap<>();
+
+  // sequenceName -> list of segmentIds
+  private final ConcurrentHashMap<String, List<String>> sequenceToSegmentIds = new ConcurrentHashMap<>();
+
   private final ParallelIndexIngestionSpec ingestionSchema;
-  private final Map<String, Object> context;
-  private final FiniteFirehoseFactory<?, ?> baseFirehoseFactory;
-  private final int maxNumTasks;
-  private final IndexingServiceClient indexingServiceClient;
-
-  private final BlockingQueue<SubTaskCompleteEvent<ParallelIndexSubTask>> taskCompleteEvents =
-      new LinkedBlockingDeque<>();
-
-  /** subTaskId -> report */
-  private final ConcurrentHashMap<String, PushedSegmentsReport> segmentsMap = new ConcurrentHashMap<>();
-
-  private volatile boolean subTaskScheduleAndMonitorStopped;
-  private volatile TaskMonitor<ParallelIndexSubTask> taskMonitor;
-
-  private int nextSpecId = 0;
+  private final SplittableInputSource<?> baseInputSource;
 
   SinglePhaseParallelIndexTaskRunner(
       TaskToolbox toolbox,
       String taskId,
       String groupId,
+      String baseSubtaskSpecName,
       ParallelIndexIngestionSpec ingestionSchema,
-      Map<String, Object> context,
-      IndexingServiceClient indexingServiceClient
+      Map<String, Object> context
   )
   {
-    this.toolbox = toolbox;
-    this.taskId = taskId;
-    this.groupId = groupId;
-    this.ingestionSchema = ingestionSchema;
-    this.context = context;
-    this.baseFirehoseFactory = (FiniteFirehoseFactory) ingestionSchema.getIOConfig().getFirehoseFactory();
-    this.maxNumTasks = ingestionSchema.getTuningConfig().getMaxNumSubTasks();
-    this.indexingServiceClient = Preconditions.checkNotNull(indexingServiceClient, "indexingServiceClient");
-  }
-
-  @Override
-  public TaskState run() throws Exception
-  {
-    if (baseFirehoseFactory.getNumSplits() == 0) {
-      log.warn("There's no input split to process");
-      return TaskState.SUCCESS;
-    }
-    
-    final Iterator<ParallelIndexSubTaskSpec> subTaskSpecIterator = subTaskSpecIterator().iterator();
-    final long taskStatusCheckingPeriod = ingestionSchema.getTuningConfig().getTaskStatusCheckPeriodMs();
-
-    taskMonitor = new TaskMonitor<>(
-        Preconditions.checkNotNull(indexingServiceClient, "indexingServiceClient"),
-        ingestionSchema.getTuningConfig().getMaxRetry(),
-        baseFirehoseFactory.getNumSplits()
+    super(
+        toolbox,
+        taskId,
+        groupId,
+        baseSubtaskSpecName,
+        ingestionSchema.getTuningConfig(),
+        context
     );
-    TaskState state = TaskState.RUNNING;
-
-    taskMonitor.start(taskStatusCheckingPeriod);
-
-    try {
-      log.info("Submitting initial tasks");
-      // Submit initial tasks
-      while (isRunning() && subTaskSpecIterator.hasNext() && taskMonitor.getNumRunningTasks() < maxNumTasks) {
-        submitNewTask(taskMonitor, subTaskSpecIterator.next());
-      }
-
-      log.info("Waiting for subTasks to be completed");
-      while (isRunning()) {
-        final SubTaskCompleteEvent<ParallelIndexSubTask> taskCompleteEvent = taskCompleteEvents.poll(
-            taskStatusCheckingPeriod,
-            TimeUnit.MILLISECONDS
-        );
-
-        if (taskCompleteEvent != null) {
-          final TaskState completeState = taskCompleteEvent.getLastState();
-          switch (completeState) {
-            case SUCCESS:
-              final TaskStatusPlus completeStatus = taskCompleteEvent.getLastStatus();
-              if (completeStatus == null) {
-                throw new ISE("Last status of complete task is missing!");
-              }
-              // Pushed segments of complete tasks are supposed to be already reported.
-              if (!segmentsMap.containsKey(completeStatus.getId())) {
-                throw new ISE("Missing reports from task[%s]!", completeStatus.getId());
-              }
-
-              if (!subTaskSpecIterator.hasNext()) {
-                // We have no more subTasks to run
-                if (taskMonitor.getNumRunningTasks() == 0 && taskCompleteEvents.size() == 0) {
-                  subTaskScheduleAndMonitorStopped = true;
-                  if (taskMonitor.isSucceeded()) {
-                    // Publishing all segments reported so far
-                    publish(toolbox);
-
-                    // Succeeded
-                    state = TaskState.SUCCESS;
-                  } else {
-                    // Failed
-                    final SinglePhaseParallelIndexingProgress monitorStatus = taskMonitor.getProgress();
-                    throw new ISE(
-                        "Expected for [%d] tasks to succeed, but we got [%d] succeeded tasks and [%d] failed tasks",
-                        monitorStatus.getExpectedSucceeded(),
-                        monitorStatus.getSucceeded(),
-                        monitorStatus.getFailed()
-                    );
-                  }
-                }
-              } else if (taskMonitor.getNumRunningTasks() < maxNumTasks) {
-                // We have more subTasks to run
-                submitNewTask(taskMonitor, subTaskSpecIterator.next());
-              } else {
-                // We have more subTasks to run, but don't have enough available task slots
-                // do nothing
-              }
-              break;
-            case FAILED:
-              // TaskMonitor already tried everything it can do for failed tasks. We failed.
-              state = TaskState.FAILED;
-              subTaskScheduleAndMonitorStopped = true;
-              final TaskStatusPlus lastStatus = taskCompleteEvent.getLastStatus();
-              if (lastStatus != null) {
-                log.error("Failed because of the failed sub task[%s]", lastStatus.getId());
-              } else {
-                final ParallelIndexSubTaskSpec spec =
-                    (ParallelIndexSubTaskSpec) taskCompleteEvent.getSpec();
-                log.error(
-                    "Failed to run sub tasks for inputSplits[%s]",
-                    getSplitsIfSplittable(spec.getIngestionSpec().getIOConfig().getFirehoseFactory())
-                );
-              }
-              break;
-            default:
-              throw new ISE("spec[%s] is in an invalid state[%s]", taskCompleteEvent.getSpec().getId(), completeState);
-          }
-        }
-      }
-    }
-    finally {
-      stopInternal();
-      if (!state.isComplete()) {
-        state = TaskState.FAILED;
-      }
-    }
-
-    return state;
-  }
-
-  @Override
-  public void stopGracefully()
-  {
-    subTaskScheduleAndMonitorStopped = true;
-    stopInternal();
-  }
-
-  /**
-   * Stop task scheduling and monitoring, and kill all running tasks.
-   * This method is thread-safe.
-   */
-  private void stopInternal()
-  {
-    log.info("Cleaning up resources");
-
-    taskCompleteEvents.clear();
-    if (taskMonitor != null) {
-      taskMonitor.stop();
-    }
-  }
-
-  private boolean isRunning()
-  {
-    return !subTaskScheduleAndMonitorStopped && !Thread.currentThread().isInterrupted();
+    this.ingestionSchema = ingestionSchema;
+    this.baseInputSource = (SplittableInputSource) ingestionSchema.getIOConfig().getNonNullInputSource(
+        ingestionSchema.getDataSchema().getParser()
+    );
   }
 
   @VisibleForTesting
-  TaskToolbox getToolbox()
+  SinglePhaseParallelIndexTaskRunner(
+      TaskToolbox toolbox,
+      String taskId,
+      String groupId,
+      ParallelIndexIngestionSpec ingestionSchema,
+      Map<String, Object> context
+  )
   {
-    return toolbox;
+    this(toolbox, taskId, groupId, taskId, ingestionSchema, context);
+  }
+
+  @Override
+  public String getName()
+  {
+    return PHASE_NAME;
   }
 
   @VisibleForTesting
@@ -255,251 +157,212 @@ public class SinglePhaseParallelIndexTaskRunner implements ParallelIndexTaskRunn
   }
 
   @VisibleForTesting
-  @Nullable
-  TaskMonitor<ParallelIndexSubTask> getTaskMonitor()
+  @Override
+  Iterator<SubTaskSpec<SinglePhaseSubTask>> subTaskSpecIterator() throws IOException
   {
-    return taskMonitor;
+    return baseInputSource.createSplits(
+        ingestionSchema.getIOConfig().getInputFormat(),
+        getTuningConfig().getSplitHintSpec()
+    ).map(this::newTaskSpec).iterator();
   }
 
   @Override
-  public void collectReport(PushedSegmentsReport report)
+  int estimateTotalNumSubTasks() throws IOException
   {
-    // subTasks might send their reports multiple times because of the HTTP retry.
-    // Here, we simply make sure the current report is exactly same with the previous one.
-    segmentsMap.compute(report.getTaskId(), (taskId, prevReport) -> {
-      if (prevReport != null) {
-        Preconditions.checkState(
-            prevReport.getSegments().equals(report.getSegments()),
-            "task[%s] sent two or more reports and previous report[%s] is different from the current one[%s]",
-            taskId,
-            prevReport,
-            report
-        );
-      }
-      return report;
-    });
-  }
-
-  @Override
-  public SinglePhaseParallelIndexingProgress getProgress()
-  {
-    return taskMonitor == null ? SinglePhaseParallelIndexingProgress.notRunning() : taskMonitor.getProgress();
-  }
-
-  @Override
-  public Set<String> getRunningTaskIds()
-  {
-    return taskMonitor == null ? Collections.emptySet() : taskMonitor.getRunningTaskIds();
-  }
-
-  @Override
-  public List<SubTaskSpec<ParallelIndexSubTask>> getSubTaskSpecs()
-  {
-    if (taskMonitor != null) {
-      final List<SubTaskSpec<ParallelIndexSubTask>> runningSubTaskSpecs = taskMonitor.getRunningSubTaskSpecs();
-      final List<SubTaskSpec<ParallelIndexSubTask>> completeSubTaskSpecs = taskMonitor
-          .getCompleteSubTaskSpecs();
-      // Deduplicate subTaskSpecs because some subTaskSpec might exist both in runningSubTaskSpecs and
-      // completeSubTaskSpecs.
-      final Map<String, SubTaskSpec<ParallelIndexSubTask>> subTaskSpecMap = new HashMap<>(
-          runningSubTaskSpecs.size() + completeSubTaskSpecs.size()
-      );
-      runningSubTaskSpecs.forEach(spec -> subTaskSpecMap.put(spec.getId(), spec));
-      completeSubTaskSpecs.forEach(spec -> subTaskSpecMap.put(spec.getId(), spec));
-      return new ArrayList<>(subTaskSpecMap.values());
-    } else {
-      return Collections.emptyList();
-    }
-  }
-
-  @Override
-  public List<SubTaskSpec<ParallelIndexSubTask>> getRunningSubTaskSpecs()
-  {
-    return taskMonitor == null ? Collections.emptyList() : taskMonitor.getRunningSubTaskSpecs();
-  }
-
-  @Override
-  public List<SubTaskSpec<ParallelIndexSubTask>> getCompleteSubTaskSpecs()
-  {
-    return taskMonitor == null ? Collections.emptyList() : taskMonitor.getCompleteSubTaskSpecs();
-  }
-
-  @Nullable
-  @Override
-  public SubTaskSpec<ParallelIndexSubTask> getSubTaskSpec(String subTaskSpecId)
-  {
-    if (taskMonitor != null) {
-      // Running tasks should be checked first because, in taskMonitor, subTaskSpecs are removed from runningTasks after
-      // adding them to taskHistory.
-      final MonitorEntry monitorEntry = taskMonitor.getRunningTaskMonitorEntry(subTaskSpecId);
-      final TaskHistory<ParallelIndexSubTask> taskHistory = taskMonitor.getCompleteSubTaskSpecHistory(subTaskSpecId);
-      final SubTaskSpec<ParallelIndexSubTask> subTaskSpec;
-
-      if (monitorEntry != null) {
-        subTaskSpec = monitorEntry.getSpec();
-      } else {
-        if (taskHistory != null) {
-          subTaskSpec = taskHistory.getSpec();
-        } else {
-          subTaskSpec = null;
-        }
-      }
-
-      return subTaskSpec;
-    } else {
-      return null;
-    }
-  }
-
-  @Nullable
-  @Override
-  public SubTaskSpecStatus getSubTaskState(String subTaskSpecId)
-  {
-    if (taskMonitor == null) {
-      return null;
-    } else {
-      // Running tasks should be checked first because, in taskMonitor, subTaskSpecs are removed from runningTasks after
-      // adding them to taskHistory.
-      final MonitorEntry monitorEntry = taskMonitor.getRunningTaskMonitorEntry(subTaskSpecId);
-      final TaskHistory<ParallelIndexSubTask> taskHistory = taskMonitor.getCompleteSubTaskSpecHistory(subTaskSpecId);
-
-      final SubTaskSpecStatus subTaskSpecStatus;
-
-      if (monitorEntry != null) {
-        subTaskSpecStatus = new SubTaskSpecStatus(
-            (ParallelIndexSubTaskSpec) monitorEntry.getSpec(),
-            monitorEntry.getRunningStatus(),
-            monitorEntry.getTaskHistory()
-        );
-      } else {
-        if (taskHistory != null && !taskHistory.isEmpty()) {
-          subTaskSpecStatus = new SubTaskSpecStatus(
-              (ParallelIndexSubTaskSpec) taskHistory.getSpec(),
-              null,
-              taskHistory.getAttemptHistory()
-          );
-        } else {
-          subTaskSpecStatus = null;
-        }
-      }
-
-      return subTaskSpecStatus;
-    }
-  }
-
-  @Nullable
-  @Override
-  public TaskHistory<ParallelIndexSubTask> getCompleteSubTaskSpecAttemptHistory(String subTaskSpecId)
-  {
-    if (taskMonitor == null) {
-      return null;
-    } else {
-      return taskMonitor.getCompleteSubTaskSpecHistory(subTaskSpecId);
-    }
-  }
-
-  private void publish(TaskToolbox toolbox) throws IOException
-  {
-    final TransactionalSegmentPublisher publisher = (segments, commitMetadata) -> {
-      final SegmentTransactionalInsertAction action = new SegmentTransactionalInsertAction(segments);
-      return toolbox.getTaskActionClient().submit(action);
-    };
-    final UsedSegmentChecker usedSegmentChecker = new ActionBasedUsedSegmentChecker(toolbox.getTaskActionClient());
-    final Set<DataSegment> segmentsToPublish = segmentsMap
-        .values()
-        .stream()
-        .flatMap(report -> report.getSegments().stream())
-        .collect(Collectors.toSet());
-    final boolean published = segmentsToPublish.isEmpty()
-                              || publisher.publishSegments(segmentsToPublish, null).isSuccess();
-
-    if (published) {
-      log.info("Published [%d] segments", segmentsToPublish.size());
-    } else {
-      log.info("Transaction failure while publishing segments, checking if someone else beat us to it.");
-      final Set<SegmentIdWithShardSpec> segmentsIdentifiers = segmentsMap
-          .values()
-          .stream()
-          .flatMap(report -> report.getSegments().stream())
-          .map(SegmentIdWithShardSpec::fromDataSegment)
-          .collect(Collectors.toSet());
-      if (usedSegmentChecker.findUsedSegments(segmentsIdentifiers)
-                            .equals(segmentsToPublish)) {
-        log.info("Our segments really do exist, awaiting handoff.");
-      } else {
-        throw new ISE("Failed to publish segments[%s]", segmentsToPublish);
-      }
-    }
-  }
-
-  private void submitNewTask(
-      TaskMonitor<ParallelIndexSubTask> taskMonitor,
-      ParallelIndexSubTaskSpec spec
-  )
-  {
-    log.info("Submit a new task for spec[%s] and inputSplit[%s]", spec.getId(), spec.getInputSplit());
-    final ListenableFuture<SubTaskCompleteEvent<ParallelIndexSubTask>> future = taskMonitor.submit(spec);
-    Futures.addCallback(
-        future,
-        new FutureCallback<SubTaskCompleteEvent<ParallelIndexSubTask>>()
-        {
-          @Override
-          public void onSuccess(SubTaskCompleteEvent<ParallelIndexSubTask> completeEvent)
-          {
-            // this callback is called if a task completed wheter it succeeded or not.
-            taskCompleteEvents.offer(completeEvent);
-          }
-
-          @Override
-          public void onFailure(Throwable t)
-          {
-            // this callback is called only when there were some problems in TaskMonitor.
-            log.error(t, "Error while running a task for subTaskSpec[%s]", spec);
-            taskCompleteEvents.offer(SubTaskCompleteEvent.fail(spec, t));
-          }
-        }
+    return baseInputSource.estimateNumSplits(
+        ingestionSchema.getIOConfig().getInputFormat(),
+        getTuningConfig().getSplitHintSpec()
     );
   }
 
   @VisibleForTesting
-  int getAndIncrementNextSpecId()
+  SubTaskSpec<SinglePhaseSubTask> newTaskSpec(InputSplit split)
   {
-    return nextSpecId++;
-  }
-
-  @VisibleForTesting
-  Stream<ParallelIndexSubTaskSpec> subTaskSpecIterator() throws IOException
-  {
-    return baseFirehoseFactory.getSplits().map(this::newTaskSpec);
-  }
-
-  @VisibleForTesting
-  ParallelIndexSubTaskSpec newTaskSpec(InputSplit split)
-  {
-    return new ParallelIndexSubTaskSpec(
-        taskId + "_" + getAndIncrementNextSpecId(),
-        groupId,
-        taskId,
+    final FirehoseFactory firehoseFactory;
+    final InputSource inputSource;
+    if (baseInputSource instanceof FirehoseFactoryToInputSourceAdaptor) {
+      firehoseFactory = ((FirehoseFactoryToInputSourceAdaptor) baseInputSource).getFirehoseFactory().withSplit(split);
+      inputSource = null;
+    } else {
+      firehoseFactory = null;
+      inputSource = baseInputSource.withSplit(split);
+    }
+    final Map<String, Object> subtaskContext = new HashMap<>(getContext());
+    return new SinglePhaseSubTaskSpec(
+        getBaseSubtaskSpecName() + "_" + getAndIncrementNextSpecId(),
+        getGroupId(),
+        getTaskId(),
         new ParallelIndexIngestionSpec(
             ingestionSchema.getDataSchema(),
             new ParallelIndexIOConfig(
-                baseFirehoseFactory.withSplit(split),
-                ingestionSchema.getIOConfig().isAppendToExisting()
+                firehoseFactory,
+                inputSource,
+                ingestionSchema.getIOConfig().getInputFormat(),
+                ingestionSchema.getIOConfig().isAppendToExisting(),
+                ingestionSchema.getIOConfig().isDropExisting()
             ),
             ingestionSchema.getTuningConfig()
         ),
-        context,
+        subtaskContext,
         split
     );
   }
 
-  private static List<InputSplit> getSplitsIfSplittable(FirehoseFactory firehoseFactory) throws IOException
+  /**
+   * This method has a bug that transient task failures or network errors can create
+   * non-contiguous partitionIds in time chunks. When this happens, the segments this method creates
+   * will never become queryable (see {@link org.apache.druid.timeline.partition.PartitionHolder#isComplete()}.
+   * As a result, this method is deprecated in favor of {@link #allocateNewSegment(String, DateTime, String, String)}.
+   * However, we keep this method to support rolling upgrade without downtime of batch ingestion
+   * where you can have mixed versions of middleManagers/indexers.
+   */
+  @Deprecated
+  public SegmentIdWithShardSpec allocateNewSegment(String dataSource, DateTime timestamp) throws IOException
   {
-    if (firehoseFactory instanceof FiniteFirehoseFactory) {
-      final FiniteFirehoseFactory<?, ?> finiteFirehoseFactory = (FiniteFirehoseFactory) firehoseFactory;
-      return finiteFirehoseFactory.getSplits().collect(Collectors.toList());
-    } else {
-      throw new ISE("firehoseFactory[%s] is not splittable", firehoseFactory.getClass().getSimpleName());
+    NonnullPair<Interval, String> intervalAndVersion = findIntervalAndVersion(timestamp);
+
+    final int partitionNum = Counters.getAndIncrementInt(partitionNumCountersPerInterval, intervalAndVersion.lhs);
+    return new SegmentIdWithShardSpec(
+        dataSource,
+        intervalAndVersion.lhs,
+        intervalAndVersion.rhs,
+        new BuildingNumberedShardSpec(partitionNum)
+    );
+  }
+
+  /**
+   * Allocate a new segment for the given timestamp locally. This method is called when dynamic partitioning is used
+   * and {@link org.apache.druid.indexing.common.LockGranularity} is {@code TIME_CHUNK}.
+   *
+   * The allocation algorithm is similar to the Overlord-based segment allocation. It keeps the segment allocation
+   * history per sequenceName. If the prevSegmentId is found in the segment allocation history, this method
+   * returns the next segmentId right after the prevSegmentId in the history. Since the sequenceName is unique
+   * per {@link SubTaskSpec} (it is the ID of subtaskSpec), this algorithm guarantees that the same set of segmentIds
+   * are created in the same order for the same subtaskSpec.
+   *
+   * @see org.apache.druid.metadata.IndexerSQLMetadataStorageCoordinator#allocatePendingSegmentWithSegmentLineageCheck
+   */
+  public SegmentIdWithShardSpec allocateNewSegment(
+      String dataSource,
+      DateTime timestamp,
+      String sequenceName,
+      @Nullable String prevSegmentId
+  ) throws IOException
+  {
+    NonnullPair<Interval, String> intervalAndVersion = findIntervalAndVersion(timestamp);
+
+    MutableObject<SegmentIdWithShardSpec> segmentIdHolder = new MutableObject<>();
+    sequenceToSegmentIds.compute(sequenceName, (k, v) -> {
+      final int prevSegmentIdIndex;
+      final List<String> segmentIds;
+      if (prevSegmentId == null) {
+        prevSegmentIdIndex = -1;
+        segmentIds = v == null ? new ArrayList<>() : v;
+      } else {
+        segmentIds = v;
+        if (segmentIds == null) {
+          throw new ISE("Can't find previous segmentIds for sequence[%s]", sequenceName);
+        }
+        prevSegmentIdIndex = segmentIds.indexOf(prevSegmentId);
+        if (prevSegmentIdIndex == -1) {
+          throw new ISE("Can't find previously allocated segmentId[%s] for sequence[%s]", prevSegmentId, sequenceName);
+        }
+      }
+      final int nextSegmentIdIndex = prevSegmentIdIndex + 1;
+      final SegmentIdWithShardSpec newSegmentId;
+      if (nextSegmentIdIndex < segmentIds.size()) {
+        SegmentId segmentId = SegmentId.tryParse(dataSource, segmentIds.get(nextSegmentIdIndex));
+        if (segmentId == null) {
+          throw new ISE("Illegal segmentId format [%s]", segmentIds.get(nextSegmentIdIndex));
+        }
+        newSegmentId = new SegmentIdWithShardSpec(
+            segmentId.getDataSource(),
+            segmentId.getInterval(),
+            segmentId.getVersion(),
+            new BuildingNumberedShardSpec(segmentId.getPartitionNum())
+        );
+      } else {
+        final int partitionNum = Counters.getAndIncrementInt(partitionNumCountersPerInterval, intervalAndVersion.lhs);
+        newSegmentId = new SegmentIdWithShardSpec(
+            dataSource,
+            intervalAndVersion.lhs,
+            intervalAndVersion.rhs,
+            new BuildingNumberedShardSpec(partitionNum)
+        );
+        segmentIds.add(newSegmentId.toString());
+      }
+      segmentIdHolder.setValue(newSegmentId);
+      return segmentIds;
+    });
+    return segmentIdHolder.getValue();
+  }
+
+  private NonnullPair<Interval, String> findIntervalAndVersion(DateTime timestamp) throws IOException
+  {
+    final GranularitySpec granularitySpec = getIngestionSchema().getDataSchema().getGranularitySpec();
+    // This method is called whenever subtasks need to allocate a new segment via the supervisor task.
+    // As a result, this code is never called in the Overlord. For now using the materialized intervals
+    // here is ok for performance reasons
+    final Set<Interval> materializedBucketIntervals = granularitySpec.materializedBucketIntervals();
+
+    // List locks whenever allocating a new segment because locks might be revoked and no longer valid.
+    final List<TaskLock> locks = getToolbox()
+        .getTaskActionClient()
+        .submit(new LockListAction());
+    final TaskLock revokedLock = locks.stream().filter(TaskLock::isRevoked).findAny().orElse(null);
+    if (revokedLock != null) {
+      throw new ISE("Lock revoked: [%s]", revokedLock);
     }
+    final Map<Interval, String> versions = locks
+        .stream()
+        .collect(Collectors.toMap(TaskLock::getInterval, TaskLock::getVersion));
+
+    Interval interval;
+    String version;
+    if (!materializedBucketIntervals.isEmpty()) {
+      // If granularity spec has explicit intervals, we just need to find the version associated to the interval.
+      // This is because we should have gotten all required locks up front when the task starts up.
+      final Optional<Interval> maybeInterval = granularitySpec.bucketInterval(timestamp);
+      if (!maybeInterval.isPresent()) {
+        throw new IAE("Could not find interval for timestamp [%s]", timestamp);
+      }
+
+      interval = maybeInterval.get();
+      if (!materializedBucketIntervals.contains(interval)) {
+        throw new ISE("Unspecified interval[%s] in granularitySpec[%s]", interval, granularitySpec);
+      }
+
+      version = ParallelIndexSupervisorTask.findVersion(versions, interval);
+      if (version == null) {
+        throw new ISE("Cannot find a version for interval[%s]", interval);
+      }
+    } else {
+      // We don't have explicit intervals. We can use the segment granularity to figure out what
+      // interval we need, but we might not have already locked it.
+      interval = granularitySpec.getSegmentGranularity().bucket(timestamp);
+      version = ParallelIndexSupervisorTask.findVersion(versions, interval);
+      if (version == null) {
+        // We don't have a lock for this interval, so we should lock it now.
+        final TaskLock lock = Preconditions.checkNotNull(
+            getToolbox().getTaskActionClient().submit(
+                new TimeChunkLockTryAcquireAction(TaskLockType.EXCLUSIVE, interval)
+            ),
+            "Cannot acquire a lock for interval[%s]",
+            interval
+        );
+        version = lock.getVersion();
+      }
+    }
+    return new NonnullPair<>(interval, version);
+  }
+
+  @Override
+  public Runnable getSubtaskCompletionCallback(SubTaskCompleteEvent<?> event)
+  {
+    return () -> {
+      if (event.getLastState().isSuccess()) {
+        sequenceToSegmentIds.remove(event.getSpec().getId());
+      }
+    };
   }
 }

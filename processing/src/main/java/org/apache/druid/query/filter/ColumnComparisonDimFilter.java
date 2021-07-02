@@ -24,18 +24,18 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.RangeSet;
-import com.google.common.collect.Sets;
 import org.apache.druid.query.cache.CacheKeyBuilder;
 import org.apache.druid.query.dimension.DimensionSpec;
 import org.apache.druid.segment.filter.ColumnComparisonFilter;
 
-import java.util.HashSet;
 import java.util.List;
+import java.util.Objects;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
  */
-public class ColumnComparisonDimFilter implements DimFilter
+public class ColumnComparisonDimFilter extends AbstractOptimizableDimFilter implements DimFilter
 {
   private static final Joiner COMMA_JOINER = Joiner.on(", ");
 
@@ -94,10 +94,14 @@ public class ColumnComparisonDimFilter implements DimFilter
     if (o == null || getClass() != o.getClass()) {
       return false;
     }
-
     ColumnComparisonDimFilter that = (ColumnComparisonDimFilter) o;
-
     return dimensions.equals(that.dimensions);
+  }
+
+  @Override
+  public int hashCode()
+  {
+    return Objects.hash(dimensions);
   }
 
   @Override
@@ -107,17 +111,8 @@ public class ColumnComparisonDimFilter implements DimFilter
   }
 
   @Override
-  public HashSet<String> getRequiredColumns()
+  public Set<String> getRequiredColumns()
   {
-    return Sets.newHashSet(dimensions.stream()
-        .map(DimensionSpec::getDimension)
-        .collect(Collectors.toSet())
-    );
-  }
-
-  @Override
-  public int hashCode()
-  {
-    return 31 * dimensions.hashCode();
+    return dimensions.stream().map(DimensionSpec::getDimension).collect(Collectors.toSet());
   }
 }

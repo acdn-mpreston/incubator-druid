@@ -19,17 +19,19 @@
 
 package org.apache.druid.sql.calcite.rel;
 
-import org.apache.calcite.sql.type.SqlTypeName;
+import org.apache.calcite.rel.type.RelDataType;
 import org.apache.druid.segment.VirtualColumn;
+import org.apache.druid.segment.column.RowSignature;
+import org.apache.druid.segment.column.ValueType;
 import org.apache.druid.sql.calcite.expression.DruidExpression;
 import org.apache.druid.sql.calcite.planner.Calcites;
 import org.apache.druid.sql.calcite.planner.PlannerContext;
-import org.apache.druid.sql.calcite.table.RowSignature;
 
 import javax.annotation.Nullable;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
-import java.util.TreeSet;
+import java.util.stream.Collectors;
 
 /**
  * Provides facilities to create and re-use {@link VirtualColumn} definitions for dimensions, filters, and filtered
@@ -60,7 +62,7 @@ public class VirtualColumnRegistry
   {
     return new VirtualColumnRegistry(
         rowSignature,
-        Calcites.findUnusedPrefix("v", new TreeSet<>(rowSignature.getRowOrder())),
+        Calcites.findUnusedPrefixForDigits("v", rowSignature.getColumnNames()),
         new HashMap<>(),
         new HashMap<>()
     );
@@ -75,19 +77,19 @@ public class VirtualColumnRegistry
   }
 
   /**
-   * Get existing or create new {@link VirtualColumn} for a given {@link DruidExpression}.
+   * Get existing or create new {@link VirtualColumn} for a given {@link DruidExpression} and {@link ValueType}.
    */
   public VirtualColumn getOrCreateVirtualColumnForExpression(
       PlannerContext plannerContext,
       DruidExpression expression,
-      SqlTypeName typeName
+      ValueType valueType
   )
   {
     if (!virtualColumnsByExpression.containsKey(expression.getExpression())) {
       final String virtualColumnName = virtualColumnPrefix + virtualColumnCounter++;
       final VirtualColumn virtualColumn = expression.toVirtualColumn(
           virtualColumnName,
-          Calcites.getValueTypeForSqlTypeName(typeName),
+          valueType,
           plannerContext.getExprMacroTable()
       );
       virtualColumnsByExpression.put(
@@ -104,6 +106,22 @@ public class VirtualColumnRegistry
   }
 
   /**
+   * Get existing or create new {@link VirtualColumn} for a given {@link DruidExpression} and {@link RelDataType}
+   */
+  public VirtualColumn getOrCreateVirtualColumnForExpression(
+      PlannerContext plannerContext,
+      DruidExpression expression,
+      RelDataType dataType
+  )
+  {
+    return getOrCreateVirtualColumnForExpression(
+        plannerContext,
+        expression,
+        Calcites.getValueTypeForRelDataType(dataType)
+    );
+  }
+
+  /**
    * Get existing virtual column by column name
    */
   @Nullable
@@ -112,22 +130,38 @@ public class VirtualColumnRegistry
     return virtualColumnsByName.get(virtualColumnName);
   }
 
+  @Nullable
+  public VirtualColumn getVirtualColumnByExpression(String expression)
+  {
+    return virtualColumnsByExpression.get(expression);
+  }
+
   /**
    * Get a signature representing the base signature plus all registered virtual columns.
    */
   public RowSignature getFullRowSignature()
   {
-    final RowSignature.Builder builder = RowSignature.builder();
+    final RowSignature.Builder builder =
+        RowSignature.builder().addAll(baseRowSignature);
 
-    for (String columnName : baseRowSignature.getRowOrder()) {
-      builder.add(columnName, baseRowSignature.getColumnType(columnName));
-    }
+    RowSignature baseSignature = builder.build();
 
     for (VirtualColumn virtualColumn : virtualColumnsByName.values()) {
       final String columnName = virtualColumn.getOutputName();
-      builder.add(columnName, virtualColumn.capabilities(columnName).getType());
+      builder.add(columnName, virtualColumn.capabilities(baseSignature, columnName).getType());
     }
 
     return builder.build();
+  }
+
+  /**
+   * Given a list of column names, find any corresponding {@link VirtualColumn} with the same name
+   */
+  public List<VirtualColumn> findVirtualColumns(List<String> allColumns)
+  {
+    return allColumns.stream()
+                     .filter(this::isVirtualColumnDefined)
+                     .map(this::getVirtualColumn)
+                     .collect(Collectors.toList());
   }
 }

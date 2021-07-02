@@ -19,16 +19,17 @@
 import { shallow } from 'enzyme';
 import React from 'react';
 
+import { Capabilities } from '../../utils';
 import { SegmentsView } from '../segments-view/segments-view';
 
 describe('segments-view', () => {
   it('matches snapshot', () => {
     const segmentsView = shallow(
       <SegmentsView
-        datasource={'test'}
+        datasource="test"
         onlyUnavailable={false}
         goToQuery={() => {}}
-        noSqlMode={false}
+        capabilities={Capabilities.FULL}
       />,
     );
     expect(segmentsView).toMatchSnapshot();

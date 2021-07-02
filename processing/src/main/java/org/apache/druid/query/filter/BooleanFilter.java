@@ -19,13 +19,24 @@
 
 package org.apache.druid.query.filter;
 
+import org.apache.druid.segment.ColumnSelector;
 import org.apache.druid.segment.ColumnSelectorFactory;
 
-import java.util.List;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
+import java.util.Set;
 
 public interface BooleanFilter extends Filter
 {
-  List<Filter> getFilters();
+  ValueMatcher[] EMPTY_VALUE_MATCHER_ARRAY = new ValueMatcher[0];
+
+  /**
+   * Returns the child filters for this filter.
+   *
+   * This is a LinkedHashSet because we don't want duplicates, but the order is also important in some cases (such
+   * as when filters are provided in an order that encourages short-circuiting.)
+   */
+  LinkedHashSet<Filter> getFilters();
 
   /**
    * Get a ValueMatcher that applies this filter to row values.
@@ -48,4 +59,47 @@ public interface BooleanFilter extends Filter
       ColumnSelectorFactory columnSelectorFactory,
       RowOffsetMatcherFactory rowOffsetMatcherFactory
   );
+
+  @Override
+  default Set<String> getRequiredColumns()
+  {
+    Set<String> allColumns = new HashSet<>();
+    for (Filter f : getFilters()) {
+      allColumns.addAll(f.getRequiredColumns());
+    }
+    return allColumns;
+  }
+
+  @Override
+  default boolean supportsBitmapIndex(BitmapIndexSelector selector)
+  {
+    for (Filter filter : getFilters()) {
+      if (!filter.supportsBitmapIndex(selector)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  @Override
+  default boolean shouldUseBitmapIndex(BitmapIndexSelector selector)
+  {
+    for (Filter f : getFilters()) {
+      if (!f.shouldUseBitmapIndex(selector)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  @Override
+  default boolean supportsSelectivityEstimation(ColumnSelector columnSelector, BitmapIndexSelector indexSelector)
+  {
+    for (Filter filter : getFilters()) {
+      if (!filter.supportsSelectivityEstimation(columnSelector, indexSelector)) {
+        return false;
+      }
+    }
+    return true;
+  }
 }

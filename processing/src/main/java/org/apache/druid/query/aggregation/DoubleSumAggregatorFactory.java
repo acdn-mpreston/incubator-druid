@@ -22,13 +22,13 @@ package org.apache.druid.query.aggregation;
 import com.fasterxml.jackson.annotation.JacksonInject;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
-import org.apache.druid.java.util.common.StringUtils;
+import com.google.common.base.Supplier;
 import org.apache.druid.math.expr.ExprMacroTable;
 import org.apache.druid.segment.BaseDoubleColumnValueSelector;
-import org.apache.druid.segment.ColumnSelectorFactory;
+import org.apache.druid.segment.vector.VectorColumnSelectorFactory;
+import org.apache.druid.segment.vector.VectorValueSelector;
 
 import javax.annotation.Nullable;
-import java.nio.ByteBuffer;
 import java.util.Collections;
 import java.util.List;
 
@@ -36,15 +36,22 @@ import java.util.List;
  */
 public class DoubleSumAggregatorFactory extends SimpleDoubleAggregatorFactory
 {
+  private final Supplier<byte[]> cacheKey;
+
   @JsonCreator
   public DoubleSumAggregatorFactory(
       @JsonProperty("name") String name,
       @JsonProperty("fieldName") final String fieldName,
-      @JsonProperty("expression") String expression,
+      @JsonProperty("expression") @Nullable String expression,
       @JacksonInject ExprMacroTable macroTable
   )
   {
     super(macroTable, name, fieldName, expression);
+    this.cacheKey = AggregatorUtil.getSimpleAggregatorCacheKeySupplier(
+        AggregatorUtil.DOUBLE_SUM_CACHE_TYPE_ID,
+        fieldName,
+        fieldExpression
+    );
   }
 
   public DoubleSumAggregatorFactory(String name, String fieldName)
@@ -53,27 +60,30 @@ public class DoubleSumAggregatorFactory extends SimpleDoubleAggregatorFactory
   }
 
   @Override
-  protected BaseDoubleColumnValueSelector selector(ColumnSelectorFactory metricFactory)
+  protected double nullValue()
   {
-    return getDoubleColumnSelector(
-        metricFactory,
-        0.0d
-    );
+    return 0.0d;
   }
 
   @Override
-  protected Aggregator factorize(ColumnSelectorFactory metricFactory, BaseDoubleColumnValueSelector selector)
+  protected Aggregator buildAggregator(BaseDoubleColumnValueSelector selector)
   {
     return new DoubleSumAggregator(selector);
   }
 
   @Override
-  protected BufferAggregator factorizeBuffered(
-      ColumnSelectorFactory metricFactory,
-      BaseDoubleColumnValueSelector selector
-  )
+  protected BufferAggregator buildBufferAggregator(BaseDoubleColumnValueSelector selector)
   {
     return new DoubleSumBufferAggregator(selector);
+  }
+
+  @Override
+  protected VectorAggregator factorizeVector(
+      VectorColumnSelectorFactory columnSelectorFactory,
+      VectorValueSelector selector
+  )
+  {
+    return new DoubleSumVectorAggregator(selector);
   }
 
   @Override
@@ -110,15 +120,7 @@ public class DoubleSumAggregatorFactory extends SimpleDoubleAggregatorFactory
   @Override
   public byte[] getCacheKey()
   {
-    byte[] fieldNameBytes = StringUtils.toUtf8WithNullToEmpty(fieldName);
-    byte[] expressionBytes = StringUtils.toUtf8WithNullToEmpty(expression);
-
-    return ByteBuffer.allocate(2 + fieldNameBytes.length + expressionBytes.length)
-                     .put(AggregatorUtil.DOUBLE_SUM_CACHE_TYPE_ID)
-                     .put(fieldNameBytes)
-                     .put(AggregatorUtil.STRING_SEPARATOR)
-                     .put(expressionBytes)
-                     .array();
+    return cacheKey.get();
   }
 
   @Override

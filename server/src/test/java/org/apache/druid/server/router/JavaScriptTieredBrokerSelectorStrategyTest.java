@@ -23,21 +23,22 @@ import com.fasterxml.jackson.databind.InjectableValues;
 import com.fasterxml.jackson.databind.JsonMappingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.base.Optional;
-import com.google.common.collect.ImmutableList;
 import org.apache.druid.jackson.DefaultObjectMapper;
 import org.apache.druid.js.JavaScriptConfig;
 import org.apache.druid.query.Druids;
-import org.apache.druid.query.aggregation.AggregatorFactory;
 import org.apache.druid.query.aggregation.CountAggregatorFactory;
 import org.apache.druid.query.aggregation.DoubleSumAggregatorFactory;
 import org.apache.druid.query.aggregation.LongSumAggregatorFactory;
 import org.apache.druid.query.topn.TopNQueryBuilder;
 import org.hamcrest.CoreMatchers;
 import org.junit.Assert;
+import org.junit.Assume;
+import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.ExpectedException;
 
+import javax.script.ScriptEngineManager;
 import java.util.LinkedHashMap;
 
 public class JavaScriptTieredBrokerSelectorStrategyTest
@@ -49,6 +50,13 @@ public class JavaScriptTieredBrokerSelectorStrategyTest
       "function (config, query) { if (query.getAggregatorSpecs && query.getDimensionSpec && query.getDimensionSpec().getDimension() == 'bigdim' && query.getAggregatorSpecs().size() >= 3) { var size = config.getTierToBrokerMap().values().size(); if (size > 0) { return config.getTierToBrokerMap().values().toArray()[size-1] } else { return config.getDefaultBrokerServiceName() } } else { return null } }",
       JavaScriptConfig.getEnabledInstance()
   );
+
+  @Before
+  public void checkJdkCompatibility()
+  {
+    // skip tests for newer JDKs without javascript support
+    Assume.assumeNotNull(new ScriptEngineManager().getEngineByName("javascript"));
+  }
 
   @Test
   public void testSerde() throws Exception
@@ -117,11 +125,7 @@ public class JavaScriptTieredBrokerSelectorStrategyTest
                                                                 .dimension("bigdim")
                                                                 .metric("count")
                                                                 .threshold(1)
-                                                                .aggregators(
-                                                                    ImmutableList.<AggregatorFactory>of(
-                                                                        new CountAggregatorFactory("count")
-                                                                    )
-                                                                );
+                                                                .aggregators(new CountAggregatorFactory("count"));
 
     Assert.assertEquals(
         Optional.absent(),
@@ -145,11 +149,9 @@ public class JavaScriptTieredBrokerSelectorStrategyTest
         STRATEGY.getBrokerServiceName(
             tieredBrokerConfig,
             queryBuilder.aggregators(
-                ImmutableList.of(
-                    new CountAggregatorFactory("count"),
-                    new LongSumAggregatorFactory("longSum", "a"),
-                    new DoubleSumAggregatorFactory("doubleSum", "b")
-                )
+                new CountAggregatorFactory("count"),
+                new LongSumAggregatorFactory("longSum", "a"),
+                new DoubleSumAggregatorFactory("doubleSum", "b")
             ).build()
         )
     );
@@ -161,11 +163,9 @@ public class JavaScriptTieredBrokerSelectorStrategyTest
         STRATEGY.getBrokerServiceName(
             tieredBrokerConfig,
             queryBuilder.aggregators(
-                ImmutableList.of(
-                    new CountAggregatorFactory("count"),
-                    new LongSumAggregatorFactory("longSum", "a"),
-                    new DoubleSumAggregatorFactory("doubleSum", "b")
-                )
+                new CountAggregatorFactory("count"),
+                new LongSumAggregatorFactory("longSum", "a"),
+                new DoubleSumAggregatorFactory("doubleSum", "b")
             ).build()
         )
     );

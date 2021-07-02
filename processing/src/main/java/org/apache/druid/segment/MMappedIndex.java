@@ -27,6 +27,9 @@ import org.apache.druid.segment.data.GenericIndexed;
 import org.apache.druid.segment.data.VSizeColumnarMultiInts;
 import org.joda.time.Interval;
 
+import javax.annotation.Nullable;
+
+import java.nio.ByteBuffer;
 import java.util.Map;
 
 /**
@@ -40,6 +43,7 @@ public class MMappedIndex
   final CompressedColumnarLongsSupplier timestamps;
   final Map<String, MetricHolder> metrics;
   final Map<String, GenericIndexed<String>> dimValueLookups;
+  final Map<String, GenericIndexed<ByteBuffer>> dimValueUtf8Lookups;
   final Map<String, VSizeColumnarMultiInts> dimColumns;
   final Map<String, GenericIndexed<ImmutableBitmap>> invertedIndexes;
   final Map<String, ImmutableRTree> spatialIndexes;
@@ -52,6 +56,7 @@ public class MMappedIndex
       CompressedColumnarLongsSupplier timestamps,
       Map<String, MetricHolder> metrics,
       Map<String, GenericIndexed<String>> dimValueLookups,
+      Map<String, GenericIndexed<ByteBuffer>> dimValueUtf8Lookups,
       Map<String, VSizeColumnarMultiInts> dimColumns,
       Map<String, GenericIndexed<ImmutableBitmap>> invertedIndexes,
       Map<String, ImmutableRTree> spatialIndexes,
@@ -64,6 +69,7 @@ public class MMappedIndex
     this.timestamps = timestamps;
     this.metrics = metrics;
     this.dimValueLookups = dimValueLookups;
+    this.dimValueUtf8Lookups = dimValueUtf8Lookups;
     this.dimColumns = dimColumns;
     this.invertedIndexes = invertedIndexes;
     this.spatialIndexes = spatialIndexes;
@@ -85,20 +91,20 @@ public class MMappedIndex
     return dataInterval;
   }
 
+  @Nullable
   public MetricHolder getMetricHolder(String metric)
   {
-    final MetricHolder retVal = metrics.get(metric);
-
-    if (retVal == null) {
-      return null;
-    }
-
-    return retVal;
+    return metrics.get(metric);
   }
 
   public GenericIndexed<String> getDimValueLookup(String dimension)
   {
     return dimValueLookups.get(dimension);
+  }
+
+  public GenericIndexed<ByteBuffer> getDimValueUtf8Lookup(String dimension)
+  {
+    return dimValueUtf8Lookups.get(dimension);
   }
 
   public VSizeColumnarMultiInts getDimColumn(String dimension)

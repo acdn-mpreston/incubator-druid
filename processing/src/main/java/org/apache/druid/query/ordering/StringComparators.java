@@ -21,9 +21,7 @@ package org.apache.druid.query.ordering;
 
 import com.google.common.collect.Ordering;
 import com.google.common.primitives.Ints;
-import com.google.common.primitives.UnsignedBytes;
 import org.apache.druid.common.guava.GuavaUtils;
-import org.apache.druid.java.util.common.StringUtils;
 import org.apache.maven.artifact.versioning.DefaultArtifactVersion;
 
 import java.math.BigDecimal;
@@ -51,20 +49,13 @@ public class StringComparators
 
   public static class LexicographicComparator extends StringComparator
   {
-    private static final Ordering<String> ORDERING = Ordering.from(new Comparator<String>()
-    {
-      @Override
-      public int compare(String s, String s2)
-      {
-        return UnsignedBytes.lexicographicalComparator().compare(
-            StringUtils.toUtf8(s), StringUtils.toUtf8(s2));
-      }
-    }).nullsFirst();
-    
+    // Equivalent to comparing UTF-8 encoded strings as byte arrays.
+    private static final Ordering<String> ORDERING = Ordering.from(String::compareTo).nullsFirst();
+
     @Override
     public int compare(String s, String s2)
     {
-      // Avoid conversion to bytes for equal references
+      // Avoid comparisons for equal references
       // Assuming we mostly compare different strings, checking s.equals(s2) will only make the comparison slower.
       //noinspection StringEquality
       if (s == s2) {
@@ -85,6 +76,12 @@ public class StringComparators
       }
       
       return true;
+    }
+
+    @Override
+    public int hashCode()
+    {
+      return 0;
     }
 
     @Override
@@ -270,6 +267,12 @@ public class StringComparators
     }
 
     @Override
+    public int hashCode()
+    {
+      return 0;
+    }
+
+    @Override
     public String toString()
     {
       return StringComparators.ALPHANUMERIC_NAME;
@@ -314,8 +317,13 @@ public class StringComparators
       if (o == null || getClass() != o.getClass()) {
         return false;
       }
-
       return true;
+    }
+
+    @Override
+    public int hashCode()
+    {
+      return 0;
     }
 
     @Override
@@ -410,8 +418,13 @@ public class StringComparators
       if (o == null || getClass() != o.getClass()) {
         return false;
       }
-
       return true;
+    }
+
+    @Override
+    public int hashCode()
+    {
+      return 0;
     }
 
     @Override
@@ -459,6 +472,12 @@ public class StringComparators
       }
 
       return true;
+    }
+
+    @Override
+    public int hashCode()
+    {
+      return 0;
     }
 
     @Override

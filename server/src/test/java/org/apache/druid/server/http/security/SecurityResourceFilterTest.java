@@ -28,13 +28,16 @@ import org.apache.druid.server.ClientInfoResource;
 import org.apache.druid.server.QueryResource;
 import org.apache.druid.server.StatusResource;
 import org.apache.druid.server.http.BrokerResource;
+import org.apache.druid.server.http.CompactionResource;
 import org.apache.druid.server.http.CoordinatorDynamicConfigsResource;
 import org.apache.druid.server.http.CoordinatorResource;
 import org.apache.druid.server.http.DataSourcesResource;
 import org.apache.druid.server.http.HistoricalResource;
 import org.apache.druid.server.http.IntervalsResource;
 import org.apache.druid.server.http.MetadataResource;
+import org.apache.druid.server.http.RouterResource;
 import org.apache.druid.server.http.RulesResource;
+import org.apache.druid.server.http.SelfDiscoveryResource;
 import org.apache.druid.server.http.ServersResource;
 import org.apache.druid.server.http.TiersResource;
 import org.apache.druid.server.security.ForbiddenException;
@@ -46,14 +49,11 @@ import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 
 import java.util.Collection;
-import java.util.regex.Pattern;
 
 @RunWith(Parameterized.class)
 public class SecurityResourceFilterTest extends ResourceFilterTestHelper
 {
-  private static final Pattern WORD = Pattern.compile("\\w+");
-
-  @Parameterized.Parameters
+  @Parameterized.Parameters(name = "{index}: requestPath={0}, requestMethod={1}, resourceFilter={2}")
   public static Collection<Object[]> data()
   {
     return ImmutableList.copyOf(
@@ -71,7 +71,10 @@ public class SecurityResourceFilterTest extends ResourceFilterTestHelper
             getRequestPathsWithAuthorizer(CoordinatorDynamicConfigsResource.class),
             getRequestPathsWithAuthorizer(QueryResource.class),
             getRequestPathsWithAuthorizer(StatusResource.class),
-            getRequestPathsWithAuthorizer(BrokerQueryResource.class)
+            getRequestPathsWithAuthorizer(SelfDiscoveryResource.class),
+            getRequestPathsWithAuthorizer(BrokerQueryResource.class),
+            getRequestPathsWithAuthorizer(RouterResource.class),
+            getRequestPathsWithAuthorizer(CompactionResource.class)
         )
     );
   }

@@ -19,6 +19,7 @@
 
 package org.apache.druid.segment.data;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
@@ -28,7 +29,6 @@ import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.ListeningExecutorService;
 import com.google.common.util.concurrent.MoreExecutors;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
-import org.apache.druid.collections.CloseableStupidPool;
 import org.apache.druid.data.input.MapBasedInputRow;
 import org.apache.druid.data.input.Row;
 import org.apache.druid.data.input.impl.DimensionsSpec;
@@ -37,7 +37,6 @@ import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.java.util.common.granularity.Granularities;
 import org.apache.druid.java.util.common.guava.Accumulator;
 import org.apache.druid.java.util.common.guava.Sequence;
-import org.apache.druid.java.util.common.io.Closer;
 import org.apache.druid.query.Druids;
 import org.apache.druid.query.FinalizeResultsQueryRunner;
 import org.apache.druid.query.QueryPlus;
@@ -45,7 +44,6 @@ import org.apache.druid.query.QueryRunner;
 import org.apache.druid.query.QueryRunnerFactory;
 import org.apache.druid.query.QueryRunnerTestHelper;
 import org.apache.druid.query.Result;
-import org.apache.druid.query.aggregation.Aggregator;
 import org.apache.druid.query.aggregation.AggregatorFactory;
 import org.apache.druid.query.aggregation.CountAggregatorFactory;
 import org.apache.druid.query.aggregation.DoubleSumAggregatorFactory;
@@ -63,27 +61,24 @@ import org.apache.druid.segment.CloserRule;
 import org.apache.druid.segment.IncrementalIndexSegment;
 import org.apache.druid.segment.Segment;
 import org.apache.druid.segment.incremental.IncrementalIndex;
-import org.apache.druid.segment.incremental.IncrementalIndex.Builder;
+import org.apache.druid.segment.incremental.IncrementalIndexCreator;
 import org.apache.druid.segment.incremental.IncrementalIndexSchema;
 import org.apache.druid.segment.incremental.IndexSizeExceededException;
+import org.apache.druid.segment.incremental.OnheapIncrementalIndex;
+import org.apache.druid.testing.InitializedNullHandlingTest;
 import org.joda.time.Interval;
-import org.junit.AfterClass;
 import org.junit.Assert;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 
-import java.io.IOException;
-import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -94,75 +89,31 @@ import java.util.concurrent.atomic.AtomicInteger;
 /**
  */
 @RunWith(Parameterized.class)
-public class IncrementalIndexTest
+public class IncrementalIndexTest extends InitializedNullHandlingTest
 {
-  interface IndexCreator
-  {
-    IncrementalIndex createIndex(AggregatorFactory[] aggregatorFactories);
-  }
-
-  private static final Closer resourceCloser = Closer.create();
-
-  @AfterClass
-  public static void teardown() throws IOException
-  {
-    resourceCloser.close();
-  }
-
-  private final IndexCreator indexCreator;
+  public final IncrementalIndexCreator indexCreator;
 
   @Rule
-  public final CloserRule closerRule = new CloserRule(false);
+  public final CloserRule closer = new CloserRule(false);
 
-  public IncrementalIndexTest(IndexCreator indexCreator)
+  public IncrementalIndexTest(String indexType, String mode) throws JsonProcessingException
   {
-    this.indexCreator = indexCreator;
+    indexCreator = closer.closeLater(new IncrementalIndexCreator(indexType, (builder, args) -> builder
+        .setSimpleTestingIndexSchema("rollup".equals(mode), (AggregatorFactory[]) args[0])
+        .setMaxRowCount(1_000_000)
+        .build()
+    ));
   }
 
-  @Parameterized.Parameters
+  @Parameterized.Parameters(name = "{index}: {0}, {1}")
   public static Collection<?> constructorFeeder()
   {
-    final List<Object[]> params = new ArrayList<>();
-    params.add(new Object[] {(IndexCreator) IncrementalIndexTest::createIndex});
-    final CloseableStupidPool<ByteBuffer> pool1 = new CloseableStupidPool<>(
-        "OffheapIncrementalIndex-bufferPool",
-        () -> ByteBuffer.allocate(256 * 1024)
-    );
-    resourceCloser.register(pool1);
-    params.add(
-        new Object[] {
-            (IndexCreator) factories -> new Builder()
-                .setSimpleTestingIndexSchema(factories)
-                .setMaxRowCount(1000000)
-                .buildOffheap(pool1)
-        }
-    );
-    params.add(new Object[] {(IndexCreator) IncrementalIndexTest::createNoRollupIndex});
-    final CloseableStupidPool<ByteBuffer> pool2 = new CloseableStupidPool<>(
-        "OffheapIncrementalIndex-bufferPool",
-        () -> ByteBuffer.allocate(256 * 1024)
-    );
-    resourceCloser.register(pool2);
-    params.add(
-        new Object[] {
-            (IndexCreator) factories -> new Builder()
-                .setIndexSchema(
-                    new IncrementalIndexSchema.Builder()
-                        .withMetrics(factories)
-                        .withRollup(false)
-                        .build()
-                )
-                .setMaxRowCount(1000000)
-                .buildOffheap(pool2)
-        }
-    );
-
-    return params;
+    return IncrementalIndexCreator.indexTypeCartesianProduct(ImmutableList.of("rollup", "plain"));
   }
 
   public static AggregatorFactory[] getDefaultCombiningAggregatorFactories()
   {
-    return defaultCombiningAggregatorFactories;
+    return DEFAULT_COMBINING_AGGREGATOR_FACTORIES;
   }
 
   public static IncrementalIndex createIndex(
@@ -171,10 +122,10 @@ public class IncrementalIndexTest
   )
   {
     if (null == aggregatorFactories) {
-      aggregatorFactories = defaultAggregatorFactories;
+      aggregatorFactories = DEFAULT_AGGREGATOR_FACTORIES;
     }
 
-    return new IncrementalIndex.Builder()
+    return new OnheapIncrementalIndex.Builder()
         .setIndexSchema(
             new IncrementalIndexSchema.Builder()
                 .withDimensionsSpec(dimensionsSpec)
@@ -182,31 +133,31 @@ public class IncrementalIndexTest
                 .build()
         )
         .setMaxRowCount(1000000)
-        .buildOnheap();
+        .build();
   }
 
   public static IncrementalIndex createIndex(AggregatorFactory[] aggregatorFactories)
   {
     if (null == aggregatorFactories) {
-      aggregatorFactories = defaultAggregatorFactories;
+      aggregatorFactories = DEFAULT_AGGREGATOR_FACTORIES;
     }
 
-    return new IncrementalIndex.Builder()
+    return new OnheapIncrementalIndex.Builder()
         .setSimpleTestingIndexSchema(aggregatorFactories)
         .setMaxRowCount(1000000)
-        .buildOnheap();
+        .build();
   }
 
   public static IncrementalIndex createNoRollupIndex(AggregatorFactory[] aggregatorFactories)
   {
     if (null == aggregatorFactories) {
-      aggregatorFactories = defaultAggregatorFactories;
+      aggregatorFactories = DEFAULT_AGGREGATOR_FACTORIES;
     }
 
-    return new IncrementalIndex.Builder()
+    return new OnheapIncrementalIndex.Builder()
         .setSimpleTestingIndexSchema(false, aggregatorFactories)
         .setMaxRowCount(1000000)
-        .buildOnheap();
+        .build();
   }
 
   public static void populateIndex(long timestamp, IncrementalIndex index) throws IndexSizeExceededException
@@ -252,21 +203,21 @@ public class IncrementalIndexTest
     return new MapBasedInputRow(timestamp, dimensionList, builder.build());
   }
 
-  private static final AggregatorFactory[] defaultAggregatorFactories = new AggregatorFactory[]{
+  private static final AggregatorFactory[] DEFAULT_AGGREGATOR_FACTORIES = new AggregatorFactory[]{
       new CountAggregatorFactory(
           "count"
       )
   };
 
-  private static final AggregatorFactory[] defaultCombiningAggregatorFactories = new AggregatorFactory[]{
-      defaultAggregatorFactories[0].getCombiningFactory()
+  private static final AggregatorFactory[] DEFAULT_COMBINING_AGGREGATOR_FACTORIES = new AggregatorFactory[]{
+      DEFAULT_AGGREGATOR_FACTORIES[0].getCombiningFactory()
   };
 
   @Test
   public void testCaseSensitivity() throws Exception
   {
     long timestamp = System.currentTimeMillis();
-    IncrementalIndex index = closerRule.closeLater(indexCreator.createIndex(defaultAggregatorFactories));
+    IncrementalIndex<?> index = indexCreator.createIndex((Object) DEFAULT_AGGREGATOR_FACTORIES);
 
     populateIndex(timestamp, index);
     Assert.assertEquals(Arrays.asList("dim1", "dim2"), index.getDimensionNames());
@@ -288,27 +239,25 @@ public class IncrementalIndexTest
   public void testFilteredAggregators() throws Exception
   {
     long timestamp = System.currentTimeMillis();
-    IncrementalIndex index = closerRule.closeLater(
-        indexCreator.createIndex(new AggregatorFactory[]{
-            new CountAggregatorFactory("count"),
-            new FilteredAggregatorFactory(
-                new CountAggregatorFactory("count_selector_filtered"),
-                new SelectorDimFilter("dim2", "2", null)
-            ),
-            new FilteredAggregatorFactory(
-                new CountAggregatorFactory("count_bound_filtered"),
-                new BoundDimFilter("dim2", "2", "3", false, true, null, null, StringComparators.NUMERIC)
-            ),
-            new FilteredAggregatorFactory(
-                new CountAggregatorFactory("count_multivaldim_filtered"),
-                new SelectorDimFilter("dim3", "b", null)
-            ),
-            new FilteredAggregatorFactory(
-                new CountAggregatorFactory("count_numeric_filtered"),
-                new SelectorDimFilter("met1", "11", null)
-            )
-        })
-    );
+    IncrementalIndex<?> index = indexCreator.createIndex((Object) new AggregatorFactory[]{
+        new CountAggregatorFactory("count"),
+        new FilteredAggregatorFactory(
+            new CountAggregatorFactory("count_selector_filtered"),
+            new SelectorDimFilter("dim2", "2", null)
+        ),
+        new FilteredAggregatorFactory(
+            new CountAggregatorFactory("count_bound_filtered"),
+            new BoundDimFilter("dim2", "2", "3", false, true, null, null, StringComparators.NUMERIC)
+        ),
+        new FilteredAggregatorFactory(
+            new CountAggregatorFactory("count_multivaldim_filtered"),
+            new SelectorDimFilter("dim3", "b", null)
+        ),
+        new FilteredAggregatorFactory(
+            new CountAggregatorFactory("count_numeric_filtered"),
+            new SelectorDimFilter("met1", "11", null)
+        )
+    });
 
     index.add(
         new MapBasedInputRow(
@@ -384,11 +333,9 @@ public class IncrementalIndexTest
       );
     }
 
-    final IncrementalIndex index = closerRule.closeLater(
-        indexCreator.createIndex(
-            ingestAggregatorFactories.toArray(
-                new AggregatorFactory[0]
-            )
+    final IncrementalIndex<?> index = indexCreator.createIndex(
+        (Object) ingestAggregatorFactories.toArray(
+            new AggregatorFactory[0]
         )
     );
 
@@ -432,7 +379,7 @@ public class IncrementalIndexTest
 
     final Segment incrementalIndexSegment = new IncrementalIndexSegment(index, null);
     final QueryRunnerFactory factory = new TimeseriesQueryRunnerFactory(
-        new TimeseriesQueryQueryToolChest(QueryRunnerTestHelper.noopIntervalChunkingQueryRunnerDecorator()),
+        new TimeseriesQueryQueryToolChest(),
         new TimeseriesQueryEngine(),
         QueryRunnerTestHelper.NOOP_QUERYWATCHER
     );
@@ -442,7 +389,7 @@ public class IncrementalIndexTest
     );
 
 
-    List<Result<TimeseriesResultValue>> results = runner.run(QueryPlus.wrap(query), new HashMap<String, Object>()).toList();
+    List<Result<TimeseriesResultValue>> results = runner.run(QueryPlus.wrap(query)).toList();
     Result<TimeseriesResultValue> result = Iterables.getOnlyElement(results);
     boolean isRollup = index.isRollup();
     Assert.assertEquals(rows * (isRollup ? 1 : 2), result.getValue().getLongMetric("rows").intValue());
@@ -499,8 +446,8 @@ public class IncrementalIndexTest
     }
 
 
-    final IncrementalIndex index = closerRule.closeLater(
-        indexCreator.createIndex(ingestAggregatorFactories.toArray(new AggregatorFactory[0]))
+    final IncrementalIndex<?> index = indexCreator.createIndex(
+        (Object) ingestAggregatorFactories.toArray(new AggregatorFactory[0])
     );
     final int concurrentThreads = 2;
     final int elementsPerThread = 10_000;
@@ -529,7 +476,7 @@ public class IncrementalIndexTest
     final List<ListenableFuture<?>> queryFutures = Lists.newArrayListWithExpectedSize(concurrentThreads);
     final Segment incrementalIndexSegment = new IncrementalIndexSegment(index, null);
     final QueryRunnerFactory factory = new TimeseriesQueryRunnerFactory(
-        new TimeseriesQueryQueryToolChest(QueryRunnerTestHelper.noopIntervalChunkingQueryRunnerDecorator()),
+        new TimeseriesQueryQueryToolChest(),
         new TimeseriesQueryEngine(),
         QueryRunnerTestHelper.NOOP_QUERYWATCHER
     );
@@ -597,8 +544,7 @@ public class IncrementalIndexTest
                         factory.createRunner(incrementalIndexSegment),
                         factory.getToolchest()
                     );
-                    Map<String, Object> context = new HashMap<String, Object>();
-                    Sequence<Result<TimeseriesResultValue>> sequence = runner.run(QueryPlus.wrap(query), context);
+                    Sequence<Result<TimeseriesResultValue>> sequence = runner.run(QueryPlus.wrap(query));
 
                     Double[] results = sequence.accumulate(
                         new Double[0],
@@ -653,8 +599,7 @@ public class IncrementalIndexTest
                                   .intervals(ImmutableList.of(queryInterval))
                                   .aggregators(queryAggregatorFactories)
                                   .build();
-    Map<String, Object> context = new HashMap<String, Object>();
-    List<Result<TimeseriesResultValue>> results = runner.run(QueryPlus.wrap(query), context).toList();
+    List<Result<TimeseriesResultValue>> results = runner.run(QueryPlus.wrap(query)).toList();
     boolean isRollup = index.isRollup();
     for (Result<TimeseriesResultValue> result : results) {
       Assert.assertEquals(
@@ -679,7 +624,7 @@ public class IncrementalIndexTest
   @Test
   public void testConcurrentAdd() throws Exception
   {
-    final IncrementalIndex index = closerRule.closeLater(indexCreator.createIndex(defaultAggregatorFactories));
+    final IncrementalIndex<?> index = indexCreator.createIndex((Object) DEFAULT_AGGREGATOR_FACTORIES);
     final int threadCount = 10;
     final int elementsPerThread = 200;
     final int dimensionCount = 5;
@@ -725,22 +670,23 @@ public class IncrementalIndexTest
   @Test
   public void testgetDimensions()
   {
-    final IncrementalIndex<Aggregator> incrementalIndex = new IncrementalIndex.Builder()
-        .setIndexSchema(
-            new IncrementalIndexSchema.Builder()
-                .withMetrics(new CountAggregatorFactory("count"))
-                .withDimensionsSpec(
-                    new DimensionsSpec(
-                        DimensionsSpec.getDefaultSchemas(Arrays.asList("dim0", "dim1")),
-                        null,
-                        null
+    final IncrementalIndex<?> incrementalIndex = indexCreator.createIndex(
+        (builder, args) -> builder
+            .setIndexSchema(
+                new IncrementalIndexSchema.Builder()
+                    .withMetrics(new CountAggregatorFactory("count"))
+                    .withDimensionsSpec(
+                        new DimensionsSpec(
+                            DimensionsSpec.getDefaultSchemas(Arrays.asList("dim0", "dim1")),
+                            null,
+                            null
+                        )
                     )
-                )
-                .build()
-        )
-        .setMaxRowCount(1000000)
-        .buildOnheap();
-    closerRule.closeLater(incrementalIndex);
+                    .build()
+            )
+            .setMaxRowCount(1000000)
+            .build()
+    );
 
     Assert.assertEquals(Arrays.asList("dim0", "dim1"), incrementalIndex.getDimensionNames());
   }
@@ -748,11 +694,13 @@ public class IncrementalIndexTest
   @Test
   public void testDynamicSchemaRollup() throws IndexSizeExceededException
   {
-    IncrementalIndex<Aggregator> index = new IncrementalIndex.Builder()
-        .setSimpleTestingIndexSchema(/* empty */)
-        .setMaxRowCount(10)
-        .buildOnheap();
-    closerRule.closeLater(index);
+    final IncrementalIndex<?> index = indexCreator.createIndex(
+        (builder, args) -> builder
+            .setSimpleTestingIndexSchema(/* empty */)
+            .setMaxRowCount(10)
+            .build()
+    );
+
     index.add(
         new MapBasedInputRow(
             1481871600000L,

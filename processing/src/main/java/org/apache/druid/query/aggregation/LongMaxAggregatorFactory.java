@@ -22,13 +22,13 @@ package org.apache.druid.query.aggregation;
 import com.fasterxml.jackson.annotation.JacksonInject;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
-import org.apache.druid.java.util.common.StringUtils;
+import com.google.common.base.Supplier;
 import org.apache.druid.math.expr.ExprMacroTable;
 import org.apache.druid.segment.BaseLongColumnValueSelector;
-import org.apache.druid.segment.ColumnSelectorFactory;
+import org.apache.druid.segment.vector.VectorColumnSelectorFactory;
+import org.apache.druid.segment.vector.VectorValueSelector;
 
 import javax.annotation.Nullable;
-import java.nio.ByteBuffer;
 import java.util.Collections;
 import java.util.List;
 
@@ -36,15 +36,22 @@ import java.util.List;
  */
 public class LongMaxAggregatorFactory extends SimpleLongAggregatorFactory
 {
+  private final Supplier<byte[]> cacheKey;
+
   @JsonCreator
   public LongMaxAggregatorFactory(
       @JsonProperty("name") String name,
       @JsonProperty("fieldName") final String fieldName,
-      @JsonProperty("expression") String expression,
+      @JsonProperty("expression") @Nullable String expression,
       @JacksonInject ExprMacroTable macroTable
   )
   {
     super(macroTable, name, fieldName, expression);
+    this.cacheKey = AggregatorUtil.getSimpleAggregatorCacheKeySupplier(
+        AggregatorUtil.LONG_MAX_CACHE_TYPE_ID,
+        fieldName,
+        fieldExpression
+    );
   }
 
   public LongMaxAggregatorFactory(String name, String fieldName)
@@ -53,27 +60,30 @@ public class LongMaxAggregatorFactory extends SimpleLongAggregatorFactory
   }
 
   @Override
-  protected BaseLongColumnValueSelector selector(ColumnSelectorFactory metricFactory)
+  protected long nullValue()
   {
-    return getLongColumnSelector(
-        metricFactory,
-        Long.MIN_VALUE
-    );
+    return Long.MIN_VALUE;
   }
 
   @Override
-  protected Aggregator factorize(ColumnSelectorFactory metricFactory, BaseLongColumnValueSelector selector)
+  protected Aggregator buildAggregator(BaseLongColumnValueSelector selector)
   {
     return new LongMaxAggregator(selector);
   }
 
   @Override
-  protected BufferAggregator factorizeBuffered(
-      ColumnSelectorFactory metricFactory,
-      BaseLongColumnValueSelector selector
-  )
+  protected BufferAggregator buildBufferAggregator(BaseLongColumnValueSelector selector)
   {
     return new LongMaxBufferAggregator(selector);
+  }
+
+  @Override
+  protected VectorAggregator factorizeVector(
+      VectorColumnSelectorFactory columnSelectorFactory,
+      VectorValueSelector selector
+  )
+  {
+    return new LongMaxVectorAggregator(selector);
   }
 
   @Override
@@ -110,15 +120,7 @@ public class LongMaxAggregatorFactory extends SimpleLongAggregatorFactory
   @Override
   public byte[] getCacheKey()
   {
-    byte[] fieldNameBytes = StringUtils.toUtf8WithNullToEmpty(fieldName);
-    byte[] expressionBytes = StringUtils.toUtf8WithNullToEmpty(expression);
-
-    return ByteBuffer.allocate(2 + fieldNameBytes.length + expressionBytes.length)
-                     .put(AggregatorUtil.LONG_MAX_CACHE_TYPE_ID)
-                     .put(fieldNameBytes)
-                     .put(AggregatorUtil.STRING_SEPARATOR)
-                     .put(expressionBytes)
-                     .array();
+    return cacheKey.get();
   }
 
   @Override

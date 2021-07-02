@@ -17,25 +17,29 @@
  */
 
 export function shallowCopy(v: any): any {
-  return Array.isArray(v) ? v.slice() : Object.assign({}, v);
+  return Array.isArray(v) ? v.slice() : { ...v };
 }
 
-function isEmpty(v: any): boolean {
+export function isEmpty(v: any): boolean {
   return !(Array.isArray(v) ? v.length : Object.keys(v).length);
+}
+
+function isObjectOrArray(v: any): boolean {
+  return Boolean(v && typeof v === 'object');
 }
 
 export function parsePath(path: string): string[] {
   const parts: string[] = [];
   let rest = path;
   while (rest) {
-    const escapedMatch = rest.match(/^\{([^{}]*)\}(?:\.(.*))?$/);
+    const escapedMatch = /^\{([^{}]*)\}(?:\.(.*))?$/.exec(rest);
     if (escapedMatch) {
       parts.push(escapedMatch[1]);
       rest = escapedMatch[2];
       continue;
     }
 
-    const normalMatch = rest.match(/^([^.]*)(?:\.(.*))?$/);
+    const normalMatch = /^([^.]*)(?:\.(.*))?$/.exec(rest);
     if (normalMatch) {
       parts.push(normalMatch[1]);
       rest = normalMatch[2];
@@ -66,7 +70,7 @@ export function deepGet<T extends Record<string, any>>(value: T, path: string): 
 
 export function deepSet<T extends Record<string, any>>(value: T, path: string, x: any): T {
   const parts = parsePath(path);
-  let myKey = parts.shift() as string; // Must be defined
+  let myKey = parts.shift()!; // Must be defined
   const valueCopy = shallowCopy(value);
   if (Array.isArray(valueCopy) && isAppend(myKey)) myKey = String(valueCopy.length);
   if (parts.length) {
@@ -79,10 +83,26 @@ export function deepSet<T extends Record<string, any>>(value: T, path: string, x
   return valueCopy;
 }
 
+export function deepSetIfUnset<T extends Record<string, any>>(value: T, path: string, x: any): T {
+  if (typeof deepGet(value, path) !== 'undefined') return value;
+  return deepSet(value, path, x);
+}
+
+export function deepSetMulti<T extends Record<string, any>>(
+  value: T,
+  changes: Record<string, any>,
+): T {
+  let newValue = value;
+  for (const k in changes) {
+    newValue = deepSet(newValue, k, changes[k]);
+  }
+  return newValue;
+}
+
 export function deepDelete<T extends Record<string, any>>(value: T, path: string): T {
   const valueCopy = shallowCopy(value);
   const parts = parsePath(path);
-  const firstKey = parts.shift() as string; // Must be defined
+  const firstKey = parts.shift()!; // Must be defined
   if (parts.length) {
     const firstKeyValue = value[firstKey];
     if (firstKeyValue) {
@@ -105,6 +125,38 @@ export function deepDelete<T extends Record<string, any>>(value: T, path: string
     }
   }
   return valueCopy;
+}
+
+export function deepMove<T extends Record<string, any>>(
+  value: T,
+  fromPath: string,
+  toPath: string,
+): T {
+  value = deepSet(value, toPath, deepGet(value, fromPath));
+  value = deepDelete(value, fromPath);
+  return value;
+}
+
+export function deepExtend<T extends Record<string, any>>(target: T, diff: Record<string, any>): T {
+  if (typeof target !== 'object') throw new TypeError(`Invalid target`);
+  if (typeof diff !== 'object') throw new TypeError(`Invalid diff`);
+
+  const newValue = shallowCopy(target);
+  for (const key in diff) {
+    const targetValue = target[key];
+    const diffValue = diff[key];
+    if (typeof diffValue === 'undefined') {
+      delete newValue[key];
+    } else {
+      if (isObjectOrArray(targetValue) && isObjectOrArray(diffValue)) {
+        newValue[key] = deepExtend(targetValue, diffValue);
+      } else {
+        newValue[key] = diffValue;
+      }
+    }
+  }
+
+  return newValue;
 }
 
 export function whitelistKeys(obj: Record<string, any>, whitelist: string[]): Record<string, any> {

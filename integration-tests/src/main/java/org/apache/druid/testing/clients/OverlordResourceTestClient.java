@@ -25,6 +25,10 @@ import com.google.common.base.Predicates;
 import com.google.inject.Inject;
 import org.apache.druid.client.indexing.TaskStatusResponse;
 import org.apache.druid.indexer.TaskState;
+import org.apache.druid.indexer.TaskStatusPlus;
+import org.apache.druid.indexing.common.IngestionStatsAndErrorsTaskReport;
+import org.apache.druid.indexing.common.IngestionStatsAndErrorsTaskReportData;
+import org.apache.druid.indexing.overlord.supervisor.SupervisorStateManager;
 import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.RetryUtils;
 import org.apache.druid.java.util.common.StringUtils;
@@ -34,14 +38,16 @@ import org.apache.druid.java.util.http.client.HttpClient;
 import org.apache.druid.java.util.http.client.Request;
 import org.apache.druid.java.util.http.client.response.StatusResponseHandler;
 import org.apache.druid.java.util.http.client.response.StatusResponseHolder;
+import org.apache.druid.segment.incremental.RowIngestionMetersTotals;
 import org.apache.druid.testing.IntegrationTestingConfig;
 import org.apache.druid.testing.guice.TestClient;
-import org.apache.druid.testing.utils.RetryUtil;
+import org.apache.druid.testing.utils.ITRetryUtil;
 import org.jboss.netty.handler.codec.http.HttpMethod;
 import org.jboss.netty.handler.codec.http.HttpResponseStatus;
+import org.joda.time.Interval;
 
 import java.net.URL;
-import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Callable;
@@ -52,7 +58,6 @@ public class OverlordResourceTestClient
   private final ObjectMapper jsonMapper;
   private final HttpClient httpClient;
   private final String indexer;
-  private final StatusResponseHandler responseHandler;
 
   @Inject
   OverlordResourceTestClient(
@@ -63,8 +68,7 @@ public class OverlordResourceTestClient
   {
     this.jsonMapper = jsonMapper;
     this.httpClient = httpClient;
-    this.indexer = config.getIndexerUrl();
-    this.responseHandler = new StatusResponseHandler(StandardCharsets.UTF_8);
+    this.indexer = config.getOverlordUrl();
   }
 
   private String getIndexerURL()
@@ -86,7 +90,7 @@ public class OverlordResourceTestClient
                         "application/json",
                         StringUtils.toUtf8(task)
                     ),
-                responseHandler
+                StatusResponseHandler.getInstance()
             ).get();
             if (!response.getStatus().equals(HttpResponseStatus.OK)) {
               throw new ISE(
@@ -111,7 +115,7 @@ public class OverlordResourceTestClient
     }
   }
 
-  public TaskState getTaskStatus(String taskID)
+  public TaskStatusPlus getTaskStatus(String taskID)
   {
     try {
       StatusResponseHolder response = makeRequest(
@@ -130,7 +134,7 @@ public class OverlordResourceTestClient
           {
           }
       );
-      return taskStatusResponse.getStatus().getStatusCode();
+      return taskStatusResponse.getStatus();
     }
     catch (Exception e) {
       throw new RuntimeException(e);
@@ -157,6 +161,15 @@ public class OverlordResourceTestClient
     return getTasks(StringUtils.format("tasks?state=complete&datasource=%s", StringUtils.urlEncode(dataSource)));
   }
 
+  public List<TaskResponseObject> getUncompletedTasksForDataSource(final String dataSource)
+  {
+    List<TaskResponseObject> uncompletedTasks = new ArrayList<>();
+    uncompletedTasks.addAll(getTasks(StringUtils.format("tasks?state=pending&datasource=%s", StringUtils.urlEncode(dataSource))));
+    uncompletedTasks.addAll(getTasks(StringUtils.format("tasks?state=running&datasource=%s", StringUtils.urlEncode(dataSource))));
+    uncompletedTasks.addAll(getTasks(StringUtils.format("tasks?state=waiting&datasource=%s", StringUtils.urlEncode(dataSource))));
+    return uncompletedTasks;
+  }
+
   private List<TaskResponseObject> getTasks(String identifier)
   {
     try {
@@ -176,24 +189,135 @@ public class OverlordResourceTestClient
     }
   }
 
-  public void waitUntilTaskCompletes(final String taskID)
+  public String getTaskLog(String taskId)
   {
-    waitUntilTaskCompletes(taskID, 10000, 60);
+    return getTaskLog(taskId, -88000);
   }
 
-  public void waitUntilTaskCompletes(final String taskID, final int millisEach, final int numTimes)
+  public String getTaskLog(String taskId, long offsetValue)
   {
-    RetryUtil.retryUntil(
+    try {
+      StatusResponseHolder response = makeRequest(
+          HttpMethod.GET,
+          StringUtils.format("%s%s", getIndexerURL(), StringUtils.format("task/%s/log?offset=%s", StringUtils.urlEncode(taskId), offsetValue))
+      );
+      return response.getContent();
+    }
+    catch (Exception e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  public String getTaskErrorMessage(String taskId)
+  {
+    return ((IngestionStatsAndErrorsTaskReportData) getTaskReport(taskId).get("ingestionStatsAndErrors").getPayload()).getErrorMsg();
+  }
+
+  public RowIngestionMetersTotals getTaskStats(String taskId)
+  {
+    try {
+      Object buildSegment = ((IngestionStatsAndErrorsTaskReportData) getTaskReport(taskId).get("ingestionStatsAndErrors").getPayload()).getRowStats().get("buildSegments");
+      return jsonMapper.convertValue(buildSegment, RowIngestionMetersTotals.class);
+    }
+    catch (Exception e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  public Map<String, IngestionStatsAndErrorsTaskReport> getTaskReport(String taskId)
+  {
+    try {
+      StatusResponseHolder response = makeRequest(
+          HttpMethod.GET,
+          StringUtils.format(
+              "%s%s",
+              getIndexerURL(),
+              StringUtils.format("task/%s/reports", StringUtils.urlEncode(taskId))
+          )
+      );
+      return jsonMapper.readValue(
+          response.getContent(),
+          new TypeReference<Map<String, IngestionStatsAndErrorsTaskReport>>()
+          {
+          }
+      );
+    }
+    catch (Exception e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  public Map<String, List<Interval>> getLockedIntervals(Map<String, Integer> minTaskPriority)
+  {
+    try {
+      String jsonBody = jsonMapper.writeValueAsString(minTaskPriority);
+
+      StatusResponseHolder response = httpClient.go(
+          new Request(HttpMethod.POST, new URL(getIndexerURL() + "lockedIntervals"))
+              .setContent(
+                  "application/json",
+                  StringUtils.toUtf8(jsonBody)
+              ),
+          StatusResponseHandler.getInstance()
+      ).get();
+      return jsonMapper.readValue(
+          response.getContent(),
+          new TypeReference<Map<String, List<Interval>>>()
+          {
+          }
+      );
+    }
+    catch (Exception e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  public void waitUntilTaskCompletes(final String taskID)
+  {
+    waitUntilTaskCompletes(taskID, ITRetryUtil.DEFAULT_RETRY_SLEEP, ITRetryUtil.DEFAULT_RETRY_COUNT);
+  }
+
+  public void waitUntilTaskCompletes(final String taskID, final long millisEach, final int numTimes)
+  {
+    ITRetryUtil.retryUntil(
         new Callable<Boolean>()
         {
           @Override
           public Boolean call()
           {
-            TaskState status = getTaskStatus(taskID);
+            TaskState status = getTaskStatus(taskID).getStatusCode();
             if (status == TaskState.FAILED) {
               throw new ISE("Indexer task FAILED");
             }
             return status == TaskState.SUCCESS;
+          }
+        },
+        true,
+        millisEach,
+        numTimes,
+        taskID
+    );
+  }
+
+  public void waitUntilTaskFails(final String taskID)
+  {
+    waitUntilTaskFails(taskID, 10000, 60);
+  }
+
+
+  public void waitUntilTaskFails(final String taskID, final long millisEach, final int numTimes)
+  {
+    ITRetryUtil.retryUntil(
+        new Callable<Boolean>()
+        {
+          @Override
+          public Boolean call()
+          {
+            TaskState status = getTaskStatus(taskID).getStatusCode();
+            if (status == TaskState.SUCCESS) {
+              throw new ISE("Indexer task SUCCEED");
+            }
+            return status == TaskState.FAILED;
           }
         },
         true,
@@ -212,11 +336,11 @@ public class OverlordResourceTestClient
                   "application/json",
                   StringUtils.toUtf8(spec)
               ),
-          responseHandler
+          StatusResponseHandler.getInstance()
       ).get();
       if (!response.getStatus().equals(HttpResponseStatus.OK)) {
         throw new ISE(
-            "Error while submitting supervisor to overlord, response [%s %s]",
+            "Error while submitting supervisor to overlord, response [%s: %s]",
             response.getStatus(),
             response.getContent()
         );
@@ -233,28 +357,150 @@ public class OverlordResourceTestClient
     }
   }
 
-  public void shutdownSupervisor(String id)
+  public void terminateSupervisor(String id)
   {
     try {
       StatusResponseHolder response = httpClient.go(
           new Request(
               HttpMethod.POST,
               new URL(StringUtils.format(
-                  "%ssupervisor/%s/shutdown",
+                  "%ssupervisor/%s/terminate",
                   getIndexerURL(),
                   StringUtils.urlEncode(id)
               ))
           ),
-          responseHandler
+          StatusResponseHandler.getInstance()
       ).get();
       if (!response.getStatus().equals(HttpResponseStatus.OK)) {
         throw new ISE(
-            "Error while shutting down supervisor, response [%s %s]",
+            "Error while terminating supervisor, response [%s %s]",
             response.getStatus(),
             response.getContent()
         );
       }
-      LOG.info("Shutdown supervisor with id[%s]", id);
+      LOG.info("Terminate supervisor with id[%s]", id);
+    }
+    catch (Exception e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  public void shutdownTask(String id)
+  {
+    try {
+      StatusResponseHolder response = httpClient.go(
+          new Request(
+              HttpMethod.POST,
+              new URL(StringUtils.format(
+                  "%stask/%s/shutdown",
+                      getIndexerURL(),
+                  StringUtils.urlEncode(id)
+              ))
+          ),
+          StatusResponseHandler.getInstance()
+      ).get();
+      if (!response.getStatus().equals(HttpResponseStatus.OK)) {
+        throw new ISE(
+            "Error while shutdown task, response [%s %s]",
+            response.getStatus(),
+            response.getContent()
+        );
+      }
+      LOG.info("Shutdown task with id[%s]", id);
+    }
+    catch (Exception e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  public SupervisorStateManager.BasicState getSupervisorStatus(String id)
+  {
+    try {
+      StatusResponseHolder response = httpClient.go(
+          new Request(
+              HttpMethod.GET,
+              new URL(StringUtils.format(
+                  "%ssupervisor/%s/status",
+                  getIndexerURL(),
+                  StringUtils.urlEncode(id)
+              ))
+          ),
+          StatusResponseHandler.getInstance()
+      ).get();
+      if (!response.getStatus().equals(HttpResponseStatus.OK)) {
+        throw new ISE(
+            "Error while getting supervisor status, response [%s %s]",
+            response.getStatus(),
+            response.getContent()
+        );
+      }
+      Map<String, Object> responseData = jsonMapper.readValue(
+          response.getContent(), JacksonUtils.TYPE_REFERENCE_MAP_STRING_OBJECT
+      );
+
+      Map<String, Object> payload = jsonMapper.convertValue(
+          responseData.get("payload"),
+          JacksonUtils.TYPE_REFERENCE_MAP_STRING_OBJECT
+      );
+      String state = (String) payload.get("state");
+      LOG.info("Supervisor id[%s] has state [%s]", id, state);
+      return SupervisorStateManager.BasicState.valueOf(state);
+    }
+    catch (Exception e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  public void suspendSupervisor(String id)
+  {
+    try {
+      StatusResponseHolder response = httpClient.go(
+          new Request(
+              HttpMethod.POST,
+              new URL(StringUtils.format(
+                  "%ssupervisor/%s/suspend",
+                  getIndexerURL(),
+                  StringUtils.urlEncode(id)
+              ))
+          ),
+          StatusResponseHandler.getInstance()
+      ).get();
+      if (!response.getStatus().equals(HttpResponseStatus.OK)) {
+        throw new ISE(
+            "Error while suspending supervisor, response [%s %s]",
+            response.getStatus(),
+            response.getContent()
+        );
+      }
+      LOG.info("Suspended supervisor with id[%s]", id);
+    }
+    catch (Exception e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  public void resumeSupervisor(String id)
+  {
+    try {
+      StatusResponseHolder response = httpClient.go(
+          new Request(
+              HttpMethod.POST,
+              new URL(StringUtils.format(
+                  "%ssupervisor/%s/resume",
+                  getIndexerURL(),
+                  StringUtils.urlEncode(id)
+              ))
+          ),
+          StatusResponseHandler.getInstance()
+      ).get();
+      if (!response.getStatus().equals(HttpResponseStatus.OK)) {
+        throw new ISE(
+            "Error while resuming supervisor, response [%s %s]",
+            response.getStatus(),
+            response.getContent()
+        );
+      }
+      LOG.info("Resumed supervisor with id[%s]", id);
     }
     catch (Exception e) {
       throw new RuntimeException(e);
@@ -265,7 +511,7 @@ public class OverlordResourceTestClient
   {
     try {
       StatusResponseHolder response = this.httpClient
-          .go(new Request(method, new URL(url)), responseHandler).get();
+          .go(new Request(method, new URL(url)), StatusResponseHandler.getInstance()).get();
       if (!response.getStatus().equals(HttpResponseStatus.OK)) {
         throw new ISE("Error while making request to indexer [%s %s]", response.getStatus(), response.getContent());
       }

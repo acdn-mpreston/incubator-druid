@@ -31,11 +31,10 @@ import org.apache.druid.guice.annotations.Smile;
 import org.apache.druid.indexing.common.task.Task;
 import org.apache.druid.indexing.overlord.hrtr.WorkerHolder;
 import org.apache.druid.indexing.worker.WorkerHistoryItem;
-import org.apache.druid.indexing.worker.WorkerTaskMonitor;
+import org.apache.druid.indexing.worker.WorkerTaskManager;
 import org.apache.druid.java.util.emitter.EmittingLogger;
 import org.apache.druid.server.coordination.ChangeRequestHistory;
 import org.apache.druid.server.coordination.ChangeRequestsSnapshot;
-import org.apache.druid.server.http.SegmentListerResource;
 import org.apache.druid.server.http.security.StateResourceFilter;
 
 import javax.servlet.AsyncContext;
@@ -61,22 +60,22 @@ import java.io.IOException;
 @ResourceFilters(StateResourceFilter.class)
 public class TaskManagementResource
 {
-  protected static final EmittingLogger log = new EmittingLogger(SegmentListerResource.class);
+  protected static final EmittingLogger log = new EmittingLogger(TaskManagementResource.class);
 
   protected final ObjectMapper jsonMapper;
   protected final ObjectMapper smileMapper;
-  private final WorkerTaskMonitor workerTaskMonitor;
+  private final WorkerTaskManager workerTaskManager;
 
   @Inject
   public TaskManagementResource(
       @Json ObjectMapper jsonMapper,
       @Smile ObjectMapper smileMapper,
-      WorkerTaskMonitor workerTaskMonitor
+      WorkerTaskManager workerTaskManager
   )
   {
     this.jsonMapper = jsonMapper;
     this.smileMapper = smileMapper;
-    this.workerTaskMonitor = workerTaskMonitor;
+    this.workerTaskManager = workerTaskManager;
   }
 
   /**
@@ -100,11 +99,12 @@ public class TaskManagementResource
    * @param hash hash received in last response.
    * @param timeout after which response is sent even if there are no new segment updates.
    * @param req
+   * @return null to avoid "MUST return a non-void type" warning.
    * @throws IOException
    */
   @GET
   @Produces({MediaType.APPLICATION_JSON, SmileMediaTypes.APPLICATION_JACKSON_SMILE})
-  public void getWorkerState(
+  public Void getWorkerState(
       @QueryParam("counter") long counter,
       @QueryParam("hash") long hash,
       @QueryParam("timeout") long timeout,
@@ -113,12 +113,12 @@ public class TaskManagementResource
   {
     if (timeout <= 0) {
       sendErrorResponse(req, HttpServletResponse.SC_BAD_REQUEST, "timeout must be positive.");
-      return;
+      return null;
     }
 
     final ResponseContext context = createContext(req.getHeader("Accept"));
 
-    final ListenableFuture<ChangeRequestsSnapshot<WorkerHistoryItem>> future = workerTaskMonitor.getChangesSince(
+    final ListenableFuture<ChangeRequestsSnapshot<WorkerHistoryItem>> future = workerTaskManager.getChangesSince(
         new ChangeRequestHistory.Counter(
             counter,
             hash
@@ -195,6 +195,7 @@ public class TaskManagementResource
     );
 
     asyncContext.setTimeout(timeout);
+    return null;
   }
 
   @POST
@@ -203,7 +204,7 @@ public class TaskManagementResource
   public Response assignTask(Task task)
   {
     try {
-      workerTaskMonitor.assignTask(task);
+      workerTaskManager.assignTask(task);
       return Response.ok().build();
     }
     catch (RuntimeException ex) {
